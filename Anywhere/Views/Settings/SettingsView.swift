@@ -66,13 +66,18 @@ struct SettingsView: View {
     private var appSection: some View {
         @Bindable var settings = settings
         Section("App") {
-            Toggle(isOn: $settings.iCloudSyncEnabled) {
-                SettingsItem.iCloudSync.label
+            if settings.proModeEnabled {
+                Toggle(isOn: $settings.iCloudSyncEnabled) {
+                    SettingsItem.iCloudSync.label
+                }
             }
             NavigationLink {
                 PersonalizationSettingsView()
             } label: {
                 SettingsItem.personalization.label
+            }
+            Toggle(isOn: $settings.proModeEnabled) {
+                SettingsItem.proMode.label
             }
         }
     }
@@ -80,11 +85,13 @@ struct SettingsView: View {
     @ViewBuilder
     private var vpnSection: some View {
         @Bindable var settings = settings
-        Section("VPN") {
-            Toggle(isOn: $settings.alwaysOnEnabled) {
-                SettingsItem.alwaysOn.label
+        if settings.proModeEnabled {
+            Section("VPN") {
+                Toggle(isOn: $settings.alwaysOnEnabled) {
+                    SettingsItem.alwaysOn.label
+                }
+                .disabled(viewModel.pendingReconnect)
             }
-            .disabled(viewModel.pendingReconnect)
         }
     }
 
@@ -127,56 +134,62 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var securitySection: some View {
-        Section("Security") {
-            Toggle(isOn: Binding(
-                get: { settings.allowInsecure },
-                set: { newValue in
-                    if newValue {
-                        showInsecureAlert = true
-                    } else {
-                        settings.allowInsecure = false
+        if settings.proModeEnabled {
+            Section("Security") {
+                Toggle(isOn: Binding(
+                    get: { settings.allowInsecure },
+                    set: { newValue in
+                        if newValue {
+                            showInsecureAlert = true
+                        } else {
+                            settings.allowInsecure = false
+                        }
                     }
+                )) {
+                    SettingsItem.allowInsecure.label
                 }
-            )) {
-                SettingsItem.allowInsecure.label
-            }
-            .tint(.red)
-            NavigationLink {
-                TrustedCertificatesView()
-            } label: {
-                SettingsItem.trustedCertificates.label
-            }
-            NavigationLink {
-                TrustedNetworkSettingsView()
-            } label: {
-                SettingsItem.trustedNetwork.label
+                .tint(.red)
+                NavigationLink {
+                    TrustedCertificatesView()
+                } label: {
+                    SettingsItem.trustedCertificates.label
+                }
+                NavigationLink {
+                    TrustedNetworkSettingsView()
+                } label: {
+                    SettingsItem.trustedNetwork.label
+                }
             }
         }
     }
 
     @ViewBuilder
     private var utilitiesSection: some View {
-        Section("Utilities") {
-            NavigationLink {
-                PurifySettingsView()
-            } label: {
-                SettingsItem.purify.label
-            }
-            NavigationLink {
-                ReflectionSettingsView()
-            } label: {
-                SettingsItem.reflection.label
-            }
-            NavigationLink {
-                MITMSettingsView()
-            } label: {
-                SettingsItem.mitm.label
-            }
-            if settings.turnFeatureEnabled {
-                NavigationLink {
-                    TurnSettingsView()
-                } label: {
-                    SettingsItem.turn.label
+        if settings.proModeEnabled || settings.turnFeatureEnabled {
+            Section("Utilities") {
+                if settings.proModeEnabled {
+                    NavigationLink {
+                        PurifySettingsView()
+                    } label: {
+                        SettingsItem.purify.label
+                    }
+                    NavigationLink {
+                        ReflectionSettingsView()
+                    } label: {
+                        SettingsItem.reflection.label
+                    }
+                    NavigationLink {
+                        MITMSettingsView()
+                    } label: {
+                        SettingsItem.mitm.label
+                    }
+                }
+                if settings.turnFeatureEnabled {
+                    NavigationLink {
+                        TurnSettingsView()
+                    } label: {
+                        SettingsItem.turn.label
+                    }
                 }
             }
         }
@@ -218,20 +231,22 @@ struct SettingsView: View {
         } header: {
             Text("About")
         } footer: {
-            NavigationLink {
-                AdvancedSettingsView()
-            } label: {
-                HStack {
-                    Text("Advanced Settings")
-                        .font(.body)
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.bold())
+            if settings.proModeEnabled {
+                NavigationLink {
+                    AdvancedSettingsView()
+                } label: {
+                    HStack {
+                        Text("Advanced Settings")
+                            .font(.body)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.bold())
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
                 }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
     }
 

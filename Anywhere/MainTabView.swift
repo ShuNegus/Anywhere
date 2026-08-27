@@ -47,9 +47,16 @@ struct MainTabView: View {
             )) {
                 TurnCaptchaSheet()
             }
+            .onChange(of: settings.proModeEnabled) { _, enabled in
+                if !enabled && selectedTab == .proxies {
+                    selectedTab = .home
+                }
+            }
             .onChange(of: deepLinkManager.url) { _, newValue in
                 if let url = newValue {
-                    selectedTab = .proxies
+                    if settings.proModeEnabled {
+                        selectedTab = .proxies
+                    }
                     pendingDeepLinkURL = url
                     deepLinkManager.url = nil
                     showingDeepLinkAddSheet = true
@@ -108,12 +115,14 @@ struct MainTabView: View {
                     Image("anywhere")
                 }
                 
-                Tab(value: .proxies) {
-                    NavigationStack {
-                        ProxiesPageView()
+                if settings.proModeEnabled {
+                    Tab(value: .proxies) {
+                        NavigationStack {
+                            ProxiesPageView()
+                        }
+                    } label: {
+                        Image(systemName: "network")
                     }
-                } label: {
-                    Image(systemName: "network")
                 }
                 
                 Tab(value: .settings) {
@@ -135,12 +144,14 @@ struct MainTabView: View {
                     Label("Home", image: "anywhere")
                 }
                 
-                Tab(value: .proxies) {
-                    NavigationStack {
-                        ProxiesPageView()
+                if settings.proModeEnabled {
+                    Tab(value: .proxies) {
+                        NavigationStack {
+                            ProxiesPageView()
+                        }
+                    } label: {
+                        Label("Proxies", systemImage: "network")
                     }
-                } label: {
-                    Label("Proxies", systemImage: "network")
                 }
                 
                 Tab(value: .settings) {

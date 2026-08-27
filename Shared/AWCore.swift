@@ -35,6 +35,7 @@ nonisolated final class AWCore {
             UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.ipRuleDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.ipRuleDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.proModeEnabled: false,
             UserDefaultsKey.proxyDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.proxyDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
@@ -84,6 +85,7 @@ nonisolated final class AWCore {
         static let mitmEnabled = "mitmEnabled"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
+        static let proModeEnabled = "proModeEnabled"
         static let proxyDNSDoHURL = "proxyDNSDoHURL"
         static let proxyDNSMode = "proxyDNSMode"
         static let proxyDNSPlainServer = "proxyDNSPlainServer"
@@ -685,6 +687,18 @@ nonisolated final class AWCore {
     /// one-time migration off the synced blob (see `MITMRuleSetStore.init`).
     static func hasMITMEnabled() -> Bool {
         userDefaults.object(forKey: UserDefaultsKey.mitmEnabled) != nil
+    }
+
+    // MARK: - Pro Mode
+
+    /// Off (default) hides advanced UI: the Proxies tab, iCloud Sync, Always On,
+    /// the Security section, non-TURN utilities and Advanced Settings.
+    static func getProModeEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.proModeEnabled)
+    }
+
+    static func setProModeEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.proModeEnabled)
     }
 
     // MARK: - TURN
