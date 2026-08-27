@@ -29,6 +29,11 @@ struct HomeView: View {
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
 
+    @State private var captchaMonitor = TurnCaptchaMonitor.shared
+    /// Latches once the captcha sheet has been up, so the graph can tell "still
+    /// fetching VK access" from "captcha solved, tunnel coming up".
+    @State private var captchaSeen = false
+
     private var isLoading: Bool { !configStore.isLoaded }
 
     private var isConnected: Bool {
@@ -36,6 +41,23 @@ struct HomeView: View {
     }
 
     private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
+
+    private var turnOn: Bool { settings.turnFeatureEnabled && settings.turnEnabled }
+
+    /// Stage for the connection graph. With TURN on there is no signal for the VK
+    /// branch beyond the captcha, so "VPN profile up" stands in for "past the captcha"
+    /// — see SPEC.md §4, the core does not report its phase yet.
+    private var stage: ConnectionStage {
+        ConnectionStage.resolve(
+            status: viewModel.status,
+            turnEnabled: turnOn,
+            turnPhase: viewModel.turnPhase,
+            captchaPending: captchaMonitor.showCaptcha,
+            vpnProfileUp: turnOn
+                ? (captchaSeen && !captchaMonitor.showCaptcha)
+                : (viewModel.isManagerReady && viewModel.vpnStatus == .connecting)
+        )
+    }
 
     var body: some View {
         ZStack {
@@ -55,6 +77,7 @@ struct HomeView: View {
                 return .impact
             }
         }
+        .overlay(alignment: .bottom) { tabBarScrim }
         .colorScheme(settings.homeColorScheme.colorSceme)
         .onGeometryChange(for: CGSize.self) { proxy in
             proxy.size
@@ -82,6 +105,12 @@ struct HomeView: View {
         .onChange(of: viewModel.isManagerReady, initial: true) { _, ready in
             guard ready, !connectionEffectsEnabled else { return }
             Task { @MainActor in connectionEffectsEnabled = true }
+        }
+        .onChange(of: captchaMonitor.showCaptcha) { _, showing in
+            if showing { captchaSeen = true }
+        }
+        .onChange(of: viewModel.status) { _, status in
+            if status == .connected || status == .disconnected { captchaSeen = false }
         }
     }
 
@@ -138,16 +167,45 @@ struct HomeView: View {
     }
 
     private var connectionControls: some View {
-        VStack(spacing: 80) {
+        // 80 was the old gap; the graph does not fit the first screen with it.
+        VStack(spacing: 32) {
             VStack(spacing: 20) {
                 powerButton
                     .matchedGeometryEffect(id: "powerButton", in: namespace)
                 statusLabel
                     .matchedGeometryEffect(id: "statusLabel", in: namespace)
             }
-            configurationCard
-                .matchedGeometryEffect(id: "configurationCard", in: namespace)
+            VStack(spacing: 20) {
+                ConnectionGraphView(stage: stage)
+                    .matchedGeometryEffect(id: "connectionGraph", in: namespace)
+                serverList
+                    .matchedGeometryEffect(id: "serverList", in: namespace)
+            }
         }
+        .frame(maxWidth: Self.maxControlPaneWidth)
+    }
+
+    /// Fades the rows out under the tab bar instead of letting them cut off (SPEC.md §2).
+    private var tabBarScrim: some View {
+        let base = isConnected
+            ? color(settings.connectedBackgroundEndData, default: .connectedBackgroundEnd)
+            : color(settings.disconnectedBackgroundEndData, default: .disconnectedBackgroundEnd)
+        return LinearGradient(
+            stops: [
+                .init(color: base.opacity(0), location: 0),
+                .init(color: base.opacity(0.88), location: 0.46),
+                .init(color: base, location: 1),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .frame(height: 112)
+        .allowsHitTesting(false)
+        .ignoresSafeArea()
+    }
+
+    private func color(_ data: Data?, default fallback: Color) -> Color {
+        data.flatMap(Color.init(archivedData:)) ?? fallback
     }
 
     private var powerButton: some View {
@@ -171,9 +229,84 @@ struct HomeView: View {
         }
     }
 
-    private var configurationCard: some View {
-        ConfigurationCapsule(isConnected: isConnected, showingAddSheet: $showingAddSheet)
-            .frame(maxWidth: Self.maxControlPaneWidth)
+    /// Stable ids: a fresh `UUID()` per render would make SwiftUI treat the sections
+    /// as new every time the list updates.
+    private static let standaloneSectionId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    private static let chainsSectionId = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+
+    /// The same three sources the old `Menu` listed.
+    private var pickerSections: [PickerSection] {
+        var result: [PickerSection] = []
+        if !configStore.standalonePickerItems.isEmpty {
+            result.append(PickerSection(
+                id: Self.standaloneSectionId,
+                header: nil,
+                items: configStore.standalonePickerItems
+            ))
+        }
+        if !chainStore.pickerItems.isEmpty {
+            result.append(PickerSection(
+                id: Self.chainsSectionId,
+                header: String(localized: "Chains"),
+                items: chainStore.pickerItems
+            ))
+        }
+        result.append(contentsOf: subscriptionStore.pickerSections)
+        return result
+    }
+
+    /// Chain latencies live in their own dictionary; the list keys everything by row id.
+    private var listLatencies: [UUID: LatencyResult] {
+        viewModel.latencyResults.merging(viewModel.chainLatencyResults) { current, _ in current }
+    }
+
+    private var isMeasuringLatencies: Bool {
+        viewModel.latencyResults.values.contains(.testing)
+            || viewModel.chainLatencyResults.values.contains(.testing)
+    }
+
+    /// A selected chain is resolved into a configuration with a brand new id, so the
+    /// chain's own id is what the row matches on.
+    private var selectedRowId: UUID? {
+        viewModel.selectedChainId ?? viewModel.selectedConfiguration?.id
+    }
+
+    private func select(id: UUID) {
+        if let chain = chainStore.chains.first(where: { $0.id == id }) {
+            viewModel.selectChain(chain, configurations: configStore.configurations)
+        } else if let configuration = configStore.configurations.first(where: { $0.id == id }) {
+            viewModel.selectedConfiguration = configuration
+        }
+    }
+
+    @ViewBuilder
+    private var serverList: some View {
+        if !configStore.isLoaded {
+            loadingCard
+        } else if !pickerSections.isEmpty {
+            ServerListSection(
+                sections: pickerSections,
+                selectedId: selectedRowId,
+                latencies: listLatencies,
+                isMeasuring: isMeasuringLatencies,
+                onSelect: { select(id: $0) },
+                onMeasure: {
+                    viewModel.testLatencies(for: configStore.configurations)
+                    viewModel.testAllChainLatencies(
+                        chains: chainStore.chains,
+                        configurations: configStore.configurations
+                    )
+                }
+            )
+        }
+    }
+
+    private var loadingCard: some View {
+        ProgressView()
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(.primary.opacity(0.1))
+            .clipShape(.rect(cornerRadius: 16, style: .continuous))
     }
     
     private var statusLabel: some View {
@@ -263,117 +396,6 @@ private struct PowerButton: View {
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .animation(animatesChanges ? Animation.easeInOut(duration: 0.6) : nil, value: isConnected)
-    }
-}
-
-// MARK: - Configuration Capsule
-
-private struct ConfigurationCapsule: View {
-    @Environment(VPNViewModel.self) private var viewModel
-    @Environment(ConfigurationStore.self) private var configStore
-    @Environment(ChainStore.self) private var chainStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
-
-    let isConnected: Bool
-    @Binding var showingAddSheet: Bool
-
-    var body: some View {
-        if let configuration = viewModel.selectedConfiguration {
-            selectedCapsule(configuration)
-        } else if configStore.isLoaded {
-            emptyCapsule
-        } else {
-            loadingCapsule
-        }
-    }
-
-    private func select(id: UUID) {
-        if let chain = chainStore.chains.first(where: { $0.id == id }) {
-            viewModel.selectChain(chain, configurations: configStore.configurations)
-        } else if let configuration = configStore.configurations.first(where: { $0.id == id }) {
-            viewModel.selectedConfiguration = configuration
-        }
-    }
-
-    @ViewBuilder
-    private func selectedCapsule(_ configuration: ProxyConfiguration) -> some View {
-        Menu {
-            ForEach(configStore.standalonePickerItems) { item in
-                Button(item.name) { select(id: item.id) }
-            }
-            if !chainStore.pickerItems.isEmpty {
-                Section {
-                    ForEach(chainStore.pickerItems) { item in
-                        Button(item.name) { select(id: item.id) }
-                    }
-                } header: {
-                    Text("Chains")
-                }
-            }
-            ForEach(subscriptionStore.pickerSections) { section in
-                Section {
-                    ForEach(section.items) { item in
-                        Button(item.name) { select(id: item.id) }
-                    }
-                } header: {
-                    Text(section.header ?? "")
-                }
-            }
-            Button {
-                showingAddSheet = true
-            } label: {
-                Label("Add", systemImage: "plus")
-            }
-        } label: {
-            ProminentCapsule {
-                HStack {
-                    Image("anywhere")
-                        .foregroundStyle(.primary.opacity(0.7))
-                        .frame(width: 24)
-                    Text(configuration.name)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary.opacity(0.7))
-                }
-            }
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var emptyCapsule: some View {
-        Button {
-            showingAddSheet = true
-        } label: {
-            ProminentCapsule {
-                HStack(spacing: 12) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.tint)
-                    Text("Add a Configuration")
-                        .font(.body.weight(.medium))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-    }
-    
-    private var loadingCapsule: some View {
-        ProminentCapsule {
-            HStack(spacing: 12) {
-                ProgressView()
-                Text("Loading…")
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-        }
     }
 }
 
