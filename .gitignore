@@ -37,4 +37,7 @@ build/
 *.moved-aside
 
 # Local package user data
-.swiftpm/xcode/xcuserdata/
+**/.swiftpm/xcode/xcuserdata/
+
+# TURN core (built by Scripts/build-turn-xcframework.sh)
+Frameworks/Turn.xcframework/
