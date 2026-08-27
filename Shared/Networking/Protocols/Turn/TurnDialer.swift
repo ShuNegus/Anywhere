@@ -87,6 +87,9 @@ nonisolated final class TurnDialer: Sendable {
             DispatchQueue.global(qos: .userInitiated).async { [dialer] in
                 do {
                     try dialer.waitReady(milliseconds)
+                    // WaitReady already hands pages back on the Go side; record where
+                    // that left the extension's budget.
+                    logger.debug("TURN ready: Go heap \(TurnMemory.goHeapBytes / (1 << 20)) MiB, \(TurnMemory.availableBytes / (1 << 20)) MiB available")
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: TurnError.notReady)

@@ -53,7 +53,8 @@ nonisolated final class TurnDialerRegistry: Sendable {
         guard let server = TurnMetadataStore.shared.server(for: host), server.isUsable else { return nil }
 
         let vkLink = Self.effectiveVKLink()
-        let peers = AWCore.getTurnPeers()
+        // Trimmed to what the extension's remaining memory budget can actually carry.
+        let peers = TurnMemory.effectivePeers(requested: AWCore.getTurnPeers())
         let manualCaptcha = AWCore.getTurnCaptchaManual()
         let fingerprint = "\(vkLink)|\(peers)|\(manualCaptcha)"
 
@@ -71,6 +72,8 @@ nonisolated final class TurnDialerRegistry: Sendable {
         stale.forEach { $0.close() }
 
         if let existing = state.withLock({ $0.dialers[server.host] }) { return existing }
+
+        TurnMemory.applyBudget()
 
         let dialer: TurnDialer
         do {
