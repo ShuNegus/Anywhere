@@ -16138,6 +16138,22 @@
         }
       }
     },
+    "stats.sheet.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Statistics"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Статистика"
+          }
+        }
+      }
+    },
     "Stop your device from being a CDN node without permission." : {
       "localizations" : {
         "ar" : {
