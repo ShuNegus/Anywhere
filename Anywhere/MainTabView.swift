@@ -20,6 +20,7 @@ struct MainTabView: View {
     @State private var pendingDeepLinkURL: String?
     @State private var showingImportRuleSetsSheet = false
     @State private var pendingRuleSetLinks: [URL] = []
+    @State private var captchaMonitor = TurnCaptchaMonitor.shared
     
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
@@ -28,8 +29,24 @@ struct MainTabView: View {
         )
     }
     
+    /// A waiting captcha blocks every TURN relay, so it is watched app-wide rather than
+    /// only while the TURN settings screen is open.
+    private var isCaptchaWatchActive: Bool {
+        settings.turnFeatureEnabled && settings.turnEnabled && viewModel.status == .connected
+    }
+
     var body: some View {
         tabView
+            .onAppear { captchaMonitor.setActive(isCaptchaWatchActive) }
+            .onChange(of: isCaptchaWatchActive) { _, newValue in
+                captchaMonitor.setActive(newValue)
+            }
+            .sheet(isPresented: Binding(
+                get: { captchaMonitor.showCaptcha },
+                set: { if !$0 { captchaMonitor.userDismissed() } }
+            )) {
+                TurnCaptchaSheet()
+            }
             .onChange(of: deepLinkManager.url) { _, newValue in
                 if let url = newValue {
                     selectedTab = .proxies

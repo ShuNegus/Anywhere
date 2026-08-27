@@ -244,6 +244,13 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         case .fetchRequests:
             return encodeReply(RequestsResponse(requests: tunnelStack.requestLog.snapshot()))
+
+        case .fetchTurnStats:
+            #if canImport(Turn)
+            return encodeReply(TurnStatsResponse(hosts: TurnDialerRegistry.shared.statistics()))
+            #else
+            return encodeReply(TurnStatsResponse())
+            #endif
         }
     }
     
