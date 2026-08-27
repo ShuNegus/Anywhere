@@ -264,6 +264,30 @@ final class AppSettings {
         }
     }
 
+    // MARK: - TURN
+
+    /// Master switch. Off hides the whole feature; there is no UI for it, it is flipped
+    /// in code or via the app group defaults.
+    var turnFeatureEnabled: Bool {
+        didSet { AWCore.setTurnFeatureEnabled(turnFeatureEnabled) }
+    }
+
+    var turnEnabled: Bool {
+        didSet { AWCore.setTurnEnabled(turnEnabled) }
+    }
+
+    var turnVKLink: String {
+        didSet { AWCore.setTurnVKLink(turnVKLink) }
+    }
+
+    var turnPeers: Int {
+        didSet { AWCore.setTurnPeers(turnPeers) }
+    }
+
+    var turnCaptchaManual: Bool {
+        didSet { AWCore.setTurnCaptchaManual(turnCaptchaManual) }
+    }
+
     // MARK: - Persist + certificate policy
 
     var allowInsecure: Bool {
@@ -349,6 +373,12 @@ final class AppSettings {
         trustedSSIDs = AWCore.getTrustedSSIDs()
         tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
         tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
+
+        turnFeatureEnabled = AWCore.getTurnFeatureEnabled()
+        turnEnabled = AWCore.getTurnEnabled()
+        turnVKLink = AWCore.getTurnVKLink()
+        turnPeers = AWCore.getTurnPeers()
+        turnCaptchaManual = AWCore.getTurnCaptchaManual()
 
         allowInsecure = AWCore.getAllowInsecure()
 

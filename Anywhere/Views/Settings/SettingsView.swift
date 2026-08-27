@@ -172,6 +172,13 @@ struct SettingsView: View {
             } label: {
                 SettingsItem.mitm.label
             }
+            if settings.turnFeatureEnabled {
+                NavigationLink {
+                    TurnSettingsView()
+                } label: {
+                    SettingsItem.turn.label
+                }
+            }
         }
     }
 

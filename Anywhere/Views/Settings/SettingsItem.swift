@@ -21,6 +21,7 @@ enum SettingsItem: String {
     case purify
     case reflection
     case mitm
+    case turn
     case logs
     case requests
 
@@ -39,6 +40,7 @@ enum SettingsItem: String {
         case .purify: "Purify"
         case .reflection: "Reflection"
         case .mitm: "MITM"
+        case .turn: "TURN"
         case .logs: "Logs"
         case .requests: "Requests"
         }
@@ -59,6 +61,7 @@ enum SettingsItem: String {
         case .purify: "drop.fill"
         case .reflection: "arrow.turn.up.left"
         case .mitm: "key.horizontal.fill"
+        case .turn: "point.3.connected.trianglepath.dotted"
         case .logs:
             if #available(iOS 18.4, *) {
                 "info.circle.text.page.fill"
@@ -91,6 +94,7 @@ enum SettingsItem: String {
         case .purify: .blue
         case .reflection: .pink
         case .mitm: .mint
+        case .turn: .indigo
         case .logs: .blue
         case .requests: .blue
         }
