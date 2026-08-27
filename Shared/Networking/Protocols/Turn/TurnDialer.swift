@@ -86,6 +86,11 @@ nonisolated final class TurnDialer: Sendable {
         closed.withLock { $0 } ? 0 : dialer.sessionCount()
     }
 
+    /// How far along the connection pipeline the Go pool is (`AnywherePhase*`).
+    var phase: Int {
+        closed.withLock { $0 } ? 0 : dialer.phase()
+    }
+
     /// Streams handed out and not yet closed.
     var openStreamCount: Int {
         streamCounter.load(ordering: .relaxed)

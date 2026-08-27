@@ -140,7 +140,7 @@ nonisolated final class TurnDialerRegistry: Sendable {
     func statistics() -> [TurnHostStatistics] {
         state.withLock { $0.dialers }
             .values
-            .map { TurnHostStatistics(host: $0.host, sessions: $0.sessionCount, streams: $0.openStreamCount) }
+            .map { TurnHostStatistics(host: $0.host, sessions: $0.sessionCount, streams: $0.openStreamCount, phase: $0.phase) }
             .sorted { $0.host < $1.host }
     }
 
@@ -177,6 +177,9 @@ nonisolated struct TurnHostStatistics: Codable, Hashable, Sendable, Identifiable
     let host: String
     let sessions: Int
     let streams: Int
+    /// Raw `AnywherePhase*` value. Optional so that decoding stays tolerant across
+    /// an extension/app version skew in either direction.
+    let phase: Int?
 
     var id: String { host }
 }

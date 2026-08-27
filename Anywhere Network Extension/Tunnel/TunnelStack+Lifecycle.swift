@@ -44,7 +44,15 @@ extension TunnelStack {
         startTimeoutTimer()
         
         rootTask = Task { await self.run(packetFlow: packetFlow, udpPlane: udpPlane) }
-        
+
+        #if canImport(Turn)
+        // Warm the pool for the configured relay right away instead of waiting for the
+        // first flow: the VK handshake and any captcha are the slow part, and the app's
+        // connection graph has nothing to report until a dialer exists. Same registry key
+        // as the on-demand path in TCPConnection, so this only ever builds one pool.
+        Task.detached { _ = TurnDialerRegistry.shared.dialer(for: configuration.serverAddress) }
+        #endif
+
         logger.debug("[TunnelStack] Started")
 
         CertificatePolicy.startObserving()
