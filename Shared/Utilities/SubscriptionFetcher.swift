@@ -17,7 +17,14 @@ nonisolated struct SubscriptionFetcher {
         let download: Int64?
         let total: Int64?
         let expire: Date?
+        /// TURN relays advertised by the same endpoint, fetched separately. Always `nil`
+        /// for subscriptions that do not serve a sing-box document.
+        let turn: TurnMetadata?
     }
+
+    /// Remnawave renders a sing-box document — the only representation that carries the
+    /// `turn` block — when the client identifies itself as sing-box.
+    private static let singBoxUserAgent = "SFI/1.0 (iOS; sing-box 1.14.0)"
 
     static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
         guard let url = URL(string: urlString) else {
@@ -55,6 +62,10 @@ nonisolated struct SubscriptionFetcher {
         let profileTitle = parseProfileTitle(from: httpResponse)
         let userInfo = parseSubscriptionUserInfo(from: httpResponse)
 
+        // Second, optional request to the same URL: the sing-box rendering is the only
+        // one that carries the `turn` block. Never fatal — see fetchTurnMetadata.
+        let turn = await fetchTurnMetadata(url: url, withRemnawaveHWID: withRemnawaveHWID)
+
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
            let decodedString = String(data: decoded, encoding: .utf8),
@@ -77,7 +88,8 @@ nonisolated struct SubscriptionFetcher {
                 upload: userInfo.upload,
                 download: userInfo.download,
                 total: userInfo.total,
-                expire: userInfo.expire
+                expire: userInfo.expire,
+                turn: turn
             )
         }
 
@@ -97,8 +109,49 @@ nonisolated struct SubscriptionFetcher {
             upload: userInfo.upload,
             download: userInfo.download,
             total: userInfo.total,
-            expire: userInfo.expire
+            expire: userInfo.expire,
+            turn: turn
         )
+    }
+
+    // MARK: - TURN Metadata
+
+    /// Asks the same endpoint for its sing-box rendering and keeps only the `turn` block.
+    ///
+    /// Entirely best-effort: a non-JSON body, a missing `turn` block, an HTTP error or a
+    /// dead network all yield `nil`, and the subscription is added exactly as before.
+    /// Only an outright cancellation is allowed to propagate — and it does so as `nil`,
+    /// because the caller's own request has already succeeded by this point.
+    private static func fetchTurnMetadata(url: URL, withRemnawaveHWID: Bool) async -> TurnMetadata? {
+        guard AWCore.getTurnFeatureEnabled() else { return nil }
+
+        var request = URLRequest(url: url)
+        request.setValue(singBoxUserAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
+        if withRemnawaveHWID {
+            request.setValue(AWCore.getRemnawaveHWID(), forHTTPHeaderField: "x-hwid")
+        }
+
+        let allowInsecure = AWCore.getAllowInsecure()
+        let data: Data
+        do {
+            if let viaUpstream = try await fetchViaConfiguredDNS(request, allowInsecure: allowInsecure) {
+                data = viaUpstream.0
+            } else if allowInsecure {
+                let session = URLSession(configuration: .default, delegate: InsecureSessionDelegate(), delegateQueue: nil)
+                defer { session.finishTasksAndInvalidate() }
+                data = try await session.data(for: request).0
+            } else {
+                data = try await URLSession.shared.data(for: request).0
+            }
+        } catch {
+            logger.debug("TURN metadata probe failed: \(error.localizedDescription)")
+            return nil
+        }
+
+        guard let metadata = TurnMetadata.extract(fromSingBoxJSON: data) else { return nil }
+        logger.debug("TURN metadata: \(metadata.servers.count) server(s)")
+        return metadata
     }
 
     // MARK: - Configured DNS
