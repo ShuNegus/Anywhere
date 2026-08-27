@@ -53,10 +53,16 @@ nonisolated final class TurnDialerRegistry: Sendable {
         guard let server = TurnMetadataStore.shared.server(for: host), server.isUsable else { return nil }
 
         let vkLink = Self.effectiveVKLink()
-        // Trimmed to what the extension's remaining memory budget can actually carry.
-        let peers = TurnMemory.effectivePeers(requested: AWCore.getTurnPeers())
+        let requestedPeers = AWCore.getTurnPeers()
         let manualCaptcha = AWCore.getTurnCaptchaManual()
-        let fingerprint = "\(vkLink)|\(peers)|\(manualCaptcha)"
+        // Only what the *user* configured goes in here. The memory-derived session cap
+        // must not: it moves with the traffic the pools are carrying, and a pool that
+        // rebuilt mid-transfer would drop every live stream on the floor.
+        let fingerprint = TurnPoolFingerprint.make(
+            vkLink: vkLink,
+            peers: requestedPeers,
+            manualCaptcha: manualCaptcha
+        )
 
         // Drop everything if the settings behind the live pools have changed.
         let stale: [TurnDialer] = state.withLock { state in
@@ -69,11 +75,17 @@ nonisolated final class TurnDialerRegistry: Sendable {
             state.fingerprint = fingerprint
             return old
         }
-        stale.forEach { $0.close() }
+        if !stale.isEmpty {
+            logger.info("TURN settings changed: closing \(stale.count) live dialer(s), pools will be rebuilt")
+            stale.forEach { $0.close() }
+        }
 
         if let existing = state.withLock({ $0.dialers[server.host] }) { return existing }
 
         TurnMemory.applyBudget()
+        // Trimmed to what the extension's remaining budget can carry — applied to this
+        // new pool only, never to pools that are already running.
+        let peers = TurnMemory.effectivePeers(requested: requestedPeers)
 
         let dialer: TurnDialer
         do {
@@ -104,12 +116,22 @@ nonisolated final class TurnDialerRegistry: Sendable {
         guard let dialer = dialer(for: host) else { return nil }
         do {
             try await dialer.waitReady()
-            let stream = try dialer.openStream()
+            let stream: TurnStream
+            do {
+                stream = try dialer.openStream()
+            } catch {
+                // One session of the pool may be mid-reconnect; the Go side round-robins,
+                // so a single retry usually lands on a healthy one.
+                logger.debug("TURN stream to \(host) failed (\(error.localizedDescription)), retrying once")
+                stream = try dialer.openStream()
+            }
             return TurnProxyConnection(stream: stream) { [weak dialer] in
                 dialer?.noteStreamClosed()
             }
         } catch {
-            logger.debug("TURN tunnel to \(host) unavailable: \(error.localizedDescription)")
+            // Worth an info line: TURN is on because the direct path is expected to be
+            // blocked, so a silent fallback is a flow that dies for no visible reason.
+            logger.info("TURN tunnel to \(host) unavailable (\(error.localizedDescription)); falling back to a direct dial")
             return nil
         }
     }
@@ -131,11 +153,23 @@ nonisolated final class TurnDialerRegistry: Sendable {
             return all
         }
         guard !dialers.isEmpty else { return }
-        logger.debug("resetting \(dialers.count) TURN dialer(s)")
+        logger.info("TURN reset: closing \(dialers.count) dialer(s) (tunnel stop or reconfiguration)")
         dialers.forEach { $0.close() }
     }
 }
 #endif
+
+/// The identity of a live TURN pool: change any of these and the pools have to be rebuilt.
+///
+/// Declared unconditionally, and free of any global state, so the invariant that runtime
+/// conditions (memory headroom in particular) never enter it can be tested without
+/// linking `Turn.xcframework`.
+nonisolated enum TurnPoolFingerprint {
+    /// - Parameter peers: the *user's* setting, not the memory-adjusted session count.
+    static func make(vkLink: String, peers: Int, manualCaptcha: Bool) -> String {
+        "\(vkLink)|\(peers)|\(manualCaptcha)"
+    }
+}
 
 /// Per-relay live counts. Declared unconditionally so the UI can display it in targets
 /// that do not link `Turn.xcframework`.
