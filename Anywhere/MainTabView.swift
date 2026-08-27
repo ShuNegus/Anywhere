@@ -35,11 +35,22 @@ struct MainTabView: View {
         settings.turnFeatureEnabled && settings.turnEnabled && viewModel.status == .connected
     }
 
+    /// TURN is on by default and the settings screen may never be opened, so the
+    /// permission prompt also has to happen wherever the captcha watch starts.
+    private func requestCaptchaNotificationsIfWatching(_ watching: Bool) {
+        guard watching else { return }
+        Task { await TurnNotifications.requestAuthorizationIfNeeded() }
+    }
+
     var body: some View {
         tabView
-            .onAppear { captchaMonitor.setActive(isCaptchaWatchActive) }
+            .onAppear {
+                captchaMonitor.setActive(isCaptchaWatchActive)
+                requestCaptchaNotificationsIfWatching(isCaptchaWatchActive)
+            }
             .onChange(of: isCaptchaWatchActive) { _, newValue in
                 captchaMonitor.setActive(newValue)
+                requestCaptchaNotificationsIfWatching(newValue)
             }
             .sheet(isPresented: Binding(
                 get: { captchaMonitor.showCaptcha },

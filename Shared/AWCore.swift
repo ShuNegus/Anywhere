@@ -63,6 +63,7 @@ nonisolated final class AWCore {
         static let alwaysOnEnabled = "alwaysOnEnabled"
         static let alwaysTrustCellular = "alwaysTrustCellular"
         static let alwaysUntrustCellular = "alwaysUntrustCellular"
+        static let appIsForeground = "appIsForeground"
         static let blockUDP = "blockUDP"
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
@@ -687,6 +688,21 @@ nonisolated final class AWCore {
     /// one-time migration off the synced blob (see `MITMRuleSetStore.init`).
     static func hasMITMEnabled() -> Bool {
         userDefaults.object(forKey: UserDefaultsKey.mitmEnabled) != nil
+    }
+
+    // MARK: - App State
+
+    /// Whether the host app is currently frontmost. Written by the app, read by the
+    /// tunnel process to decide whether a waiting captcha needs a local notification.
+    static func setAppInForeground(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.appIsForeground)
+    }
+
+    /// False until the app has written the flag at least once — an app that has never
+    /// run is certainly not in the foreground, so notifying is the right call.
+    static func getAppInForeground() -> Bool {
+        guard userDefaults.object(forKey: UserDefaultsKey.appIsForeground) != nil else { return false }
+        return userDefaults.bool(forKey: UserDefaultsKey.appIsForeground)
     }
 
     // MARK: - Pro Mode
