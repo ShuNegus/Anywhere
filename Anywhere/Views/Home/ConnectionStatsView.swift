@@ -567,7 +567,7 @@ struct AnywhereRingGaugeStyle: GaugeStyle {
         fr: "FR · Paris", sg: "SG · Singapore",
     ]
     // Five proxies + direct → exercises the 4-row cap and the "Other" bucket.
-    return ZStack {
+    ZStack {
         LinearGradient(
             colors: [Color.connectedBackgroundStart, Color.connectedBackgroundEnd],
             startPoint: .top,
