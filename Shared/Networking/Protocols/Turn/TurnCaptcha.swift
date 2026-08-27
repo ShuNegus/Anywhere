@@ -15,6 +15,10 @@ nonisolated enum TurnCaptcha {
     static let port: UInt16 = 8765
     static var url: URL { URL(string: "http://\(host):\(port)/")! }
 
+    /// Identifier of the local notification the tunnel posts when a captcha appears
+    /// while the app is backgrounded. Shared so the app can route a tap on it.
+    static let notificationID = "turn-captcha"
+
     /// Pure TCP reachability check — no HTTP request is made, so probing has no side
     /// effect on the captcha flow. `true` means a captcha is waiting to be solved.
     static func probe(timeout: TimeInterval = 1) async -> Bool {

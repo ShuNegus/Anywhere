@@ -58,6 +58,12 @@ struct TurnSettingsView: View {
             reload()
             startPolling()
         }
+        .onChange(of: settings.turnEnabled) { _, enabled in
+            // A captcha can strand the relay while the app is backgrounded, so ask for
+            // notification permission at the moment TURN is switched on.
+            guard enabled else { return }
+            Task { await TurnNotifications.requestAuthorizationIfNeeded() }
+        }
         .onDisappear {
             pollTask?.cancel()
             pollTask = nil

@@ -17,6 +17,9 @@ nonisolated private let logger = AnywhereLogger(category: "PacketTunnelProvider"
 nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private let tunnelStack = TunnelStack()
     private let statsRecorder = StatsRecorder()
+#if canImport(Turn)
+    private let captchaNotifier = TurnCaptchaNotifier()
+#endif
 
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
 
@@ -60,6 +63,10 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
                 memoryBytes: Self.memoryFootprint()
             )
         }
+
+#if canImport(Turn)
+        captchaNotifier.start()
+#endif
     }
     
     private func resolveStartConfiguration(options: [String: NSObject]?) -> ProxyConfiguration? {
@@ -204,6 +211,10 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 #endif
         
         statsRecorder.stop()
+
+#if canImport(Turn)
+        captchaNotifier.stop()
+#endif
         
         let task = rootTask.withLock { task -> Task<Void, Never>? in
             defer { task = nil }
