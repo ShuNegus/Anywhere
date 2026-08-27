@@ -68,12 +68,18 @@ nonisolated final class TurnCaptchaNotifier: Sendable {
             .removeDeliveredNotifications(withIdentifiers: [TurnCaptcha.notificationID])
     }
 
-    // Literal strings, not `String(localized:)` — the string catalog is not a member of
-    // the extension target.
+    // The string catalog is a member of the extension target too, so lookups resolve
+    // against `Bundle.main` — which, inside an appex, is the appex bundle.
     private static func postNotification() async {
         let content = UNMutableNotificationContent()
-        content.title = "Captcha required"
-        content.body = "Open the app to solve the captcha and connect through TURN."
+        content.title = String(
+            localized: "turn.captcha.notification.title",
+            defaultValue: "Captcha required"
+        )
+        content.body = String(
+            localized: "turn.captcha.notification.body",
+            defaultValue: "Open the app to solve the captcha and connect through TURN."
+        )
         content.interruptionLevel = .timeSensitive
         content.sound = .default
         let request = UNNotificationRequest(
