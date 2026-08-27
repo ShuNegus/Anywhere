@@ -27,9 +27,6 @@ struct HomeView: View {
     @State private var showingStatsSheet = false
 
     @State private var captchaMonitor = TurnCaptchaMonitor.shared
-    /// Latches once the captcha sheet has been up, so the graph can tell "still
-    /// fetching VK access" from "captcha solved, tunnel coming up".
-    @State private var captchaSeen = false
 
     private var isLoading: Bool { !configStore.isLoaded }
 
@@ -41,22 +38,16 @@ struct HomeView: View {
 
     private var turnOn: Bool { settings.turnFeatureEnabled && settings.turnEnabled }
 
-    /// Stage for the connection graph. With TURN on there is no signal for the VK
-    /// branch beyond the captcha, so "VPN profile up" stands in for "past the captcha"
-    /// — see SPEC.md §4, the core does not report its phase yet.
+    /// Stage for the connection graph, driven by the phase the vk-turn core reports.
+    /// The captcha monitor stays in as an independent signal: it fires the moment the
+    /// sheet comes up, ahead of the next phase poll.
     private var stage: ConnectionStage {
         ConnectionStage.resolve(
             status: viewModel.status,
             turnEnabled: turnOn,
             turnPhase: viewModel.turnPhase,
             captchaPending: captchaMonitor.captchaWaiting,
-            vpnProfileUp: turnOn
-                ? (captchaSeen && !captchaMonitor.captchaWaiting)
-                : (viewModel.isManagerReady && viewModel.vpnStatus == .connecting),
-            // Gate the final node on real TURN traffic only when this connection did
-            // show a captcha: dialers are lazy, so an idle pool would otherwise pin
-            // the graph to "Tunnel Setup" forever.
-            turnPoolReady: !captchaSeen || viewModel.turnPoolReady
+            vpnProfileUp: viewModel.isManagerReady && viewModel.vpnStatus == .connecting
         )
     }
 
@@ -98,14 +89,6 @@ struct HomeView: View {
         .onChange(of: viewModel.isManagerReady, initial: true) { _, ready in
             guard ready, !connectionEffectsEnabled else { return }
             Task { @MainActor in connectionEffectsEnabled = true }
-        }
-        .onChange(of: captchaMonitor.showCaptcha) { _, showing in
-            if showing { captchaSeen = true }
-        }
-        .onChange(of: viewModel.status) { _, status in
-            // Only a real disconnect clears it: the readiness gate has to outlive the
-            // moment the tunnel reports ".connected".
-            if status == .disconnected { captchaSeen = false }
         }
     }
 
