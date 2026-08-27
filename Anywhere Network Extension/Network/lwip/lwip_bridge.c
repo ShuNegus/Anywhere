@@ -250,7 +250,7 @@ void lwip_bridge_init(void) {
     static int initialized = 0;
 
     if (!initialized) {
-        s_log = os_log_create("com.argsment.Anywhere.Network-Extension", "LWIP-Bridge");
+        s_log = os_log_create("su.smd.Anywhere.Network-Extension", "LWIP-Bridge");
         lwip_init();
         initialized = 1;
     }

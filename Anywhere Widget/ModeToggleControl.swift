@@ -12,7 +12,7 @@ import WidgetKit
 struct ModeToggleControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(
-            kind: "com.argsment.Anywhere.Widget.ModeToggle",
+            kind: "su.smd.Anywhere.Widget.ModeToggle",
             provider: ProxyModeProvider()
         ) { isGlobal in
             ControlWidgetToggle(

@@ -16,7 +16,7 @@ nonisolated final class MITMCertificateStore: Sendable {
     
     private static let accessGroup = AWCore.Identifier.appGroupSuite
     
-    private static let service = "com.argsment.Anywhere.MITM"
+    private static let service = "su.smd.Anywhere.MITM"
 
     private static let privateKeyTag = "\(service).caPrivateKey".data(using: .utf8)!
     private static let certAccount = "\(service).caCertificate"
@@ -118,7 +118,7 @@ nonisolated final class MITMCertificateStore: Sendable {
     func exportMobileConfig() -> Data? {
         guard let (caKey, certDER) = loadCA() else { return nil }
 
-        let identifier = "com.argsment.Anywhere.mitm.root"
+        let identifier = "su.smd.Anywhere.mitm.root"
         let payloadIdentifier = "\(identifier).payload"
         let payloadUUID = UUID().uuidString
         let outerUUID = UUID().uuidString

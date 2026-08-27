@@ -41,7 +41,7 @@ nonisolated struct AnywhereLogger {
     }
 
     init(category: String) {
-        self.osLogger = Logger(subsystem: "com.argsment.Anywhere", category: category)
+        self.osLogger = Logger(subsystem: "su.smd.Anywhere", category: category)
     }
 
     /// os.log only; compiled out of release, where the autoclosure is never built.

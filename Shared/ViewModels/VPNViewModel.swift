@@ -412,7 +412,7 @@ class VPNViewModel {
         }
     }
 
-    private static let providerBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
+    private static let providerBundleIdentifier = "su.smd.Anywhere.Network-Extension"
 
     private func setupVPNManager() {
         Task {
@@ -456,7 +456,7 @@ class VPNViewModel {
             let resolvedIP = await VPNViewModel.resolveServerAddress(configuration.serverAddress)
 
             let tunnelProtocol = NETunnelProviderProtocol()
-            tunnelProtocol.providerBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
+            tunnelProtocol.providerBundleIdentifier = "su.smd.Anywhere.Network-Extension"
             tunnelProtocol.serverAddress = "Anywhere"
             #if !os(tvOS)
             tunnelProtocol.includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()

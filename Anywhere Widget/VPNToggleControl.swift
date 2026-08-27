@@ -13,7 +13,7 @@ import WidgetKit
 struct VPNToggleControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(
-            kind: "com.argsment.Anywhere.Widget.VPNToggle",
+            kind: "su.smd.Anywhere.Widget.VPNToggle",
             provider: VPNStatusProvider()
         ) { isOn in
             ControlWidgetToggle(
@@ -32,7 +32,7 @@ struct VPNToggleControl: ControlWidget {
     }
 }
 
-private let anywhereNEBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
+private let anywhereNEBundleIdentifier = "su.smd.Anywhere.Network-Extension"
 
 private func loadManager() async throws -> NETunnelProviderManager? {
     let managers = try await NETunnelProviderManager.loadAllFromPreferences()

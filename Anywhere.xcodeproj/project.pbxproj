@@ -856,7 +856,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
@@ -876,7 +876,7 @@
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Tests;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -899,7 +899,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
@@ -919,7 +919,7 @@
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Tests;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -972,7 +972,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -1040,7 +1040,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -1074,7 +1074,7 @@
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1109,7 +1109,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -1131,7 +1131,7 @@
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1166,7 +1166,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -1186,7 +1186,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
@@ -1214,7 +1214,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.argsment.Anywhere.Network-Extension";
+				PRODUCT_BUNDLE_IDENTIFIER = "su.smd.Anywhere.Network-Extension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1238,7 +1238,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
@@ -1266,7 +1266,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.argsment.Anywhere.Network-Extension";
+				PRODUCT_BUNDLE_IDENTIFIER = "su.smd.Anywhere.Network-Extension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1291,7 +1291,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
@@ -1320,7 +1320,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1343,7 +1343,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
@@ -1372,7 +1372,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1395,7 +1395,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Widget";
@@ -1407,7 +1407,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Widget;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1427,7 +1427,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 340;
-				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Widget";
@@ -1439,7 +1439,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Widget;
+				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

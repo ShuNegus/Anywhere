@@ -10,7 +10,7 @@ import dnssd
 
 nonisolated final class DNSSyscallConcurrencyBridge: Sendable {
     private let queue: DispatchQueue = DispatchQueue(
-        label: "com.argsment.Anywhere.DNSSyscallConcurrencyBridge",
+        label: "su.smd.Anywhere.DNSSyscallConcurrencyBridge",
         qos: .userInitiated,
         attributes: .concurrent
     )

@@ -11,7 +11,7 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
     let executor: BridgeExecutor
 
     init() {
-        self.executor = BridgeExecutor(label: "com.argsment.Anywhere.NGTCP2ConcurrencyBridge")
+        self.executor = BridgeExecutor(label: "su.smd.Anywhere.NGTCP2ConcurrencyBridge")
     }
     
     private var queue: DispatchQueue { executor.queue }

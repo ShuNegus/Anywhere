@@ -96,7 +96,7 @@ struct SettingsView: View {
                 SettingsItem.globalMode.label
             }
             .onChange(of: settings.isGlobalMode) {
-                ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+                ControlCenter.shared.reloadControls(ofKind: "su.smd.Anywhere.Widget.VPNToggle")
             }
             if !settings.isGlobalMode {
                 Toggle(isOn: $adBlockEnabled) {

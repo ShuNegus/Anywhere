@@ -167,7 +167,7 @@ actor MITMProfileServer {
 nonisolated private final class LegacyMITMProfileListener: Sendable {
     private let listener: NWListener
     private let payload: Data
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.MITMProfileServer")
+    private let queue = DispatchQueue(label: "su.smd.Anywhere.MITMProfileServer")
 
     private struct State {
         var connections: [ObjectIdentifier: NWConnection] = [:]

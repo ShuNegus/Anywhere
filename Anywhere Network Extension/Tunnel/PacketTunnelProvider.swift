@@ -42,7 +42,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
 
 #if os(iOS)
-        ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+        ControlCenter.shared.reloadControls(ofKind: "su.smd.Anywhere.Widget.VPNToggle")
 #endif
 
         await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
@@ -200,7 +200,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
 #if os(iOS)
-        ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+        ControlCenter.shared.reloadControls(ofKind: "su.smd.Anywhere.Widget.VPNToggle")
 #endif
         
         statsRecorder.stop()
