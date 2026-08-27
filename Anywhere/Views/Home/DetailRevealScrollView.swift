@@ -32,7 +32,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
         ScrollView {
             VStack(spacing: 0) {
                 fold
-                    .frame(maxWidth: .infinity, minHeight: viewport.height)
+                    .frame(maxWidth: .infinity, minHeight: viewport.height, alignment: .top)
                     .overlay(alignment: .bottom) {
                         if revealsDetail && !isSettledOnDetail {
                             PullUpIndicator()
@@ -46,7 +46,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                         let previousHeight = metrics.foldHeight
                         metrics.foldHeight = frame.height
                         metrics.offset = -frame.minY
-                        if frame.minY >= -DetailRevealSnapBehavior.boundaryTolerance {
+                        if -frame.minY <= metrics.foldRestOffset + DetailRevealSnapBehavior.boundaryTolerance {
                             metrics.settledPage = .fold
                             if isSettledOnDetail {
                                 withAnimation { isSettledOnDetail = false }
@@ -127,7 +127,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
         Task { @MainActor in
             if playFeedback { snapFeedbackCount += 1 }
             withAnimation(.snappy(duration: 0.25, extraBounce: 0)) {
-                scrollPosition.scrollTo(y: page == .detail ? metrics.commitOffset : 0)
+                scrollPosition.scrollTo(y: page == .detail ? metrics.commitOffset : metrics.foldRestOffset)
             }
         }
     }
@@ -140,6 +140,10 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                 max(metrics.contentHeight - viewport.height, 0)
             )
             metrics.commitOffset = boundary
+            metrics.foldRestOffset = min(
+                max(min(metrics.foldHeight, metrics.contentHeight) - viewport.height, 0),
+                boundary
+            )
             guard metrics.settledPage == .detail,
                   abs(metrics.offset - boundary) > DetailRevealSnapBehavior.boundaryTolerance
             else { return }
@@ -175,6 +179,10 @@ private final class DetailRevealMetrics {
     /// Offset of the detail page boundary, stashed by the snap behavior so the
     /// explicit snap animation can target it.
     var commitOffset: CGFloat = 0
+    /// Offset at which the fold page rests: 0 while the fold fits the viewport,
+    /// otherwise the offset that puts the bottom of the fold at the bottom of
+    /// the viewport, so a taller-than-viewport fold can scroll on its own.
+    var foldRestOffset: CGFloat = 0
     /// True while the explicit snap animation is driving the scroll; the snap
     /// behavior stays passive so the two never fight.
     var snapInFlight = false
@@ -202,6 +210,18 @@ private struct DetailRevealSnapBehavior: ScrollTargetBehavior {
             return
         }
 
+        // Offset at which the fold's own content is scrolled to its end. Zero
+        // while the fold fits the viewport; taller folds scroll freely up to it
+        // before the detail page comes into play.
+        let foldRest = min(
+            max(
+                min(metrics.foldHeight, context.contentSize.height) - context.containerSize.height,
+                0
+            ),
+            commitOffset
+        )
+        metrics.foldRestOffset = foldRest
+
         let projected = target.rect.origin.y
 
         // Scrolled within the detail content: keep flings from sailing back
@@ -217,15 +237,15 @@ private struct DetailRevealSnapBehavior: ScrollTargetBehavior {
 
         // Otherwise only intervene around the fold: the gesture either ends
         // between the two pages or would cross a page in one go.
-        let landsBetweenPages = projected > 0 && projected < commitOffset
+        let landsBetweenPages = projected > foldRest + Self.boundaryTolerance && projected < commitOffset
         let crossesIntoDetail = metrics.offset < commitOffset - Self.boundaryTolerance && projected >= commitOffset
-        let crossesToTop = metrics.offset > Self.boundaryTolerance && projected <= 0
+        let crossesToTop = metrics.offset > foldRest + Self.boundaryTolerance && projected <= foldRest
         guard landsBetweenPages || crossesIntoDetail || crossesToTop else {
             metrics.pendingSnap = nil
             return
         }
 
-        let page: DetailRevealPage = projected >= commitOffset / 2 ? .detail : .fold
+        let page: DetailRevealPage = projected >= (foldRest + commitOffset) / 2 ? .detail : .fold
         // Freeze the native deceleration where it is; the explicit snap
         // animation fired on the next phase change is the only thing that
         // moves the scroll from here.
