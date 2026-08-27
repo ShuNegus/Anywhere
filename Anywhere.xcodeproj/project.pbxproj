@@ -163,6 +163,7 @@
 				Networking/Protocols/Turn/TurnDialer.swift,
 				Networking/Protocols/Turn/TurnDialerRegistry.swift,
 				Networking/Protocols/Turn/TurnError.swift,
+				Networking/Protocols/Turn/TurnMemory.swift,
 				Networking/Protocols/Turn/TurnProxyConnection.swift,
 				Networking/Protocols/Turn/TurnStream.swift,
 				Networking/Protocols/Crypto/BLAKE2/blake2b.c,
