@@ -11,7 +11,6 @@ import SwiftUI
 struct AnywhereApp: App {
     init() {
         CloudBlobSync.start()
-        WatchSessionManager.shared.start()
     }
 
     var body: some Scene {
