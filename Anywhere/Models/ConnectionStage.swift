@@ -130,11 +130,12 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
 
 /// Фаза обхода, которую сообщает Go-ядро vk-turn через IPC расширения.
 ///
-/// Пока ядро её не отдаёт — см. `ConnectionStage.resolve(...)`, ветка Fallback.
+/// Значения повторяют `clientcore.Phase` один в один — менять нумерацию нельзя.
 nonisolated enum TurnPhase: Int, Sendable {
     case inactive = 0   // обход не используется
     case vkAccess       // тянем VK-креды по vk_link
-    case captcha        // ждём решения капчи
+    case captchaAuto    // капча решается автоматически
+    case captchaWait    // капча ждёт пользователя
     case tunnelSetup    // allocate + поднятие пула стримов
     case ready          // туннель поднят
 }
@@ -153,16 +154,12 @@ extension ConnectionStage {
     ///   - vpnProfileUp: профиль поднят, идёт установка соединения.
     ///     Если такого сигнала нет — передавай `false`, узел «Настройка VPN»
     ///     тогда загорится вместе с фазой TURN или по факту подключения.
-    ///   - turnPoolReady: пул TURN-стримов реально поднят (в статистике есть сессии).
-    ///     Системный статус становится `.connected`, как только встал туннель, —
-    ///     то есть ещё до того, как обход заработал.
     static func resolve(
         status: VPNStatus,
         turnEnabled: Bool,
         turnPhase: TurnPhase?,
         captchaPending: Bool,
-        vpnProfileUp: Bool,
-        turnPoolReady: Bool = true
+        vpnProfileUp: Bool
     ) -> ConnectionStage {
 
         switch status {
@@ -172,14 +169,16 @@ extension ConnectionStage {
             if captchaPending { return .captcha }
             if let phase = turnPhase {
                 switch phase {
-                case .inactive:    return .connectedViaTurn
-                case .vkAccess:    return .vkAccess
-                case .captcha:     return .captcha
-                case .tunnelSetup: return .tunnelSetup
-                case .ready:       return .connectedViaTurn
+                case .inactive:     return .connectedViaTurn
+                case .vkAccess:     return .vkAccess
+                case .captchaAuto,
+                     .captchaWait:  return .captcha
+                case .tunnelSetup:  return .tunnelSetup
+                case .ready:        return .connectedViaTurn
                 }
             }
-            return turnPoolReady ? .connectedViaTurn : .tunnelSetup
+            // Фазы ещё нет: туннель поднят, но обход своего пула пока не собрал.
+            return .tunnelSetup
 
         case .disconnected, .invalid, .disconnecting:
             return .idle
@@ -195,20 +194,16 @@ extension ConnectionStage {
 
         if let phase = turnPhase {
             switch phase {
-            case .inactive:    return vpnProfileUp ? .vpnSetup : .connecting
-            case .vkAccess:    return .vkAccess
-            case .captcha:     return .captcha
-            case .tunnelSetup: return .tunnelSetup
-            case .ready:       return .tunnelSetup   // ждём, пока поднимется сам VPN
+            case .inactive:     return vpnProfileUp ? .vpnSetup : .connecting
+            case .vkAccess:     return .vkAccess
+            case .captchaAuto,
+                 .captchaWait:  return .captcha
+            case .tunnelSetup:  return .tunnelSetup
+            case .ready:        return .tunnelSetup   // ждём, пока поднимется сам VPN
             }
         }
 
-        // MARK: - Fallback
-        // Ядро ещё не сообщает фазу. Единственный настоящий сигнал с ветки —
-        // капча; остальное восстанавливается «оптимистично» и не покажет,
-        // на какой именно фазе всё встало. Убрать, как только появится turnPhase.
-        if captchaPending { return .captcha }
-        if vpnProfileUp { return .tunnelSetup }
-        return .vkAccess
+        // Фазы ещё нет — расширение либо не запущено, либо пул ещё не создан.
+        return vpnProfileUp ? .vpnSetup : .connecting
     }
 }

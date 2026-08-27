@@ -34,15 +34,10 @@ class VPNViewModel {
     private(set) var selectedChainId: UUID?
     var latencyResults: [UUID: LatencyResult] = [:]
     var chainLatencyResults: [UUID: LatencyResult] = [:]
-    /// TURN handshake phase reported by the tunnel. Still always `nil`: the vk-turn core
-    /// does not expose its phase yet, so the connection graph falls back to the signals
-    /// it already has (SPEC.md §4). Fill this in once the core starts reporting.
-    var turnPhase: TurnPhase? = nil
-    /// Latches once the tunnel reports at least one live TURN session, i.e. the bypass
-    /// pool is really up. The system status flips to `.connected` as soon as the tunnel
-    /// stands, which is earlier than that — see `ConnectionStage.resolve`.
-    private(set) var turnPoolReady = false
-    @ObservationIgnored private var turnPoolTask: Task<Void, Never>?
+    /// TURN handshake phase reported by the tunnel, polled while connected. `nil` when
+    /// the bypass is off or the extension has no dialer yet.
+    private(set) var turnPhase: TurnPhase? = nil
+    @ObservationIgnored private var turnPhaseTask: Task<Void, Never>?
     var startError: String?
 
     private(set) var isManagerReady = false
@@ -408,12 +403,12 @@ class VPNViewModel {
         if status == .connected {
             if let session = connection as? NETunnelProviderSession {
                 stats.startPolling(session: session)
-                startTurnPoolWatch(session: session)
+                startTurnPhaseWatch(session: session)
             }
         } else {
             stats.stopPolling()
             if status == .disconnected || status == .disconnecting || status == .invalid {
-                stopTurnPoolWatch()
+                stopTurnPhaseWatch()
             }
             if status == .disconnected || status == .invalid {
                 stats.reset()
@@ -425,42 +420,45 @@ class VPNViewModel {
         }
     }
 
-    // MARK: - TURN Pool Readiness
+    // MARK: - TURN Phase
 
-    private static let turnPoolPollInterval: Duration = .seconds(2)
+    private static let turnPhasePollInterval: Duration = .seconds(1)
 
-    /// Polls the tunnel's TURN statistics until the stream pool has a live session, then
-    /// latches ``turnPoolReady``. Reuses the existing `fetchTurnStats` IPC — the core has
-    /// no dedicated readiness signal.
-    private func startTurnPoolWatch(session: NETunnelProviderSession) {
+    /// Polls the tunnel for the vk-turn core's connection phase, reusing the existing
+    /// `fetchTurnStats` IPC. Keeps polling past `.ready`: the phase has to be able to
+    /// fall back when a pool reconnects, so it is deliberately never latched.
+    private func startTurnPhaseWatch(session: NETunnelProviderSession) {
         guard AWCore.getTurnFeatureEnabled(), AWCore.getTurnEnabled() else { return }
-        guard turnPoolTask == nil, !turnPoolReady else { return }
-        turnPoolTask = Task { @MainActor [weak self] in
+        guard turnPhaseTask == nil else { return }
+        turnPhaseTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                if await Self.hasLiveTurnSession(session: session) {
-                    self?.turnPoolReady = true
-                    break
-                }
-                try? await Task.sleep(for: Self.turnPoolPollInterval)
+                self?.turnPhase = await Self.fetchTurnPhase(session: session)
+                try? await Task.sleep(for: Self.turnPhasePollInterval)
             }
-            self?.turnPoolTask = nil
         }
     }
 
-    private func stopTurnPoolWatch() {
-        turnPoolTask?.cancel()
-        turnPoolTask = nil
-        turnPoolReady = false
+    private func stopTurnPhaseWatch() {
+        turnPhaseTask?.cancel()
+        turnPhaseTask = nil
+        turnPhase = nil
     }
 
-    private static func hasLiveTurnSession(session: NETunnelProviderSession) async -> Bool {
+    /// The least-advanced phase across the live dialers: the graph should show the step
+    /// the connection is still working on, not the one furthest along.
+    private static func fetchTurnPhase(session: NETunnelProviderSession) async -> TurnPhase? {
         guard session.status == .connected,
               let request = try? JSONEncoder().encode(TunnelMessage.fetchTurnStats),
               let response = await ProviderMessageConcurrencyBridge.send(request, over: session),
               let stats = try? JSONDecoder().decode(TurnStatsResponse.self, from: response) else {
-            return false
+            return nil
         }
-        return stats.totalSessions > 0
+        let phases = stats.hosts
+            .compactMap(\.phase)
+            .compactMap(TurnPhase.init(rawValue:))
+            .filter { $0 != .inactive }
+        return phases.min(by: { $0.rawValue < $1.rawValue })
+            ?? (stats.totalSessions > 0 ? .ready : nil)
     }
 
     private static let providerBundleIdentifier = "su.smd.Anywhere.Network-Extension"
