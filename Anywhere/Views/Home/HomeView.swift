@@ -49,10 +49,14 @@ struct HomeView: View {
             status: viewModel.status,
             turnEnabled: turnOn,
             turnPhase: viewModel.turnPhase,
-            captchaPending: captchaMonitor.showCaptcha,
+            captchaPending: captchaMonitor.captchaWaiting,
             vpnProfileUp: turnOn
-                ? (captchaSeen && !captchaMonitor.showCaptcha)
-                : (viewModel.isManagerReady && viewModel.vpnStatus == .connecting)
+                ? (captchaSeen && !captchaMonitor.captchaWaiting)
+                : (viewModel.isManagerReady && viewModel.vpnStatus == .connecting),
+            // Gate the final node on real TURN traffic only when this connection did
+            // show a captcha: dialers are lazy, so an idle pool would otherwise pin
+            // the graph to "Tunnel Setup" forever.
+            turnPoolReady: !captchaSeen || viewModel.turnPoolReady
         )
     }
 
@@ -99,7 +103,9 @@ struct HomeView: View {
             if showing { captchaSeen = true }
         }
         .onChange(of: viewModel.status) { _, status in
-            if status == .connected || status == .disconnected { captchaSeen = false }
+            // Only a real disconnect clears it: the readiness gate has to outlive the
+            // moment the tunnel reports ".connected".
+            if status == .disconnected { captchaSeen = false }
         }
     }
 
@@ -280,7 +286,7 @@ struct HomeView: View {
             showingStatsSheet = true
         } label: {
             HStack(spacing: 4) {
-                Text(viewModel.statusText)
+                Text(stage.statusText)
                     .font(.headline)
                 if isConnected {
                     Image(systemName: "chevron.right")

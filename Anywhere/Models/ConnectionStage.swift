@@ -153,17 +153,33 @@ extension ConnectionStage {
     ///   - vpnProfileUp: профиль поднят, идёт установка соединения.
     ///     Если такого сигнала нет — передавай `false`, узел «Настройка VPN»
     ///     тогда загорится вместе с фазой TURN или по факту подключения.
+    ///   - turnPoolReady: пул TURN-стримов реально поднят (в статистике есть сессии).
+    ///     Системный статус становится `.connected`, как только встал туннель, —
+    ///     то есть ещё до того, как обход заработал.
     static func resolve(
         status: VPNStatus,
         turnEnabled: Bool,
         turnPhase: TurnPhase?,
         captchaPending: Bool,
-        vpnProfileUp: Bool
+        vpnProfileUp: Bool,
+        turnPoolReady: Bool = true
     ) -> ConnectionStage {
 
         switch status {
         case .connected:
-            return turnEnabled ? .connectedViaTurn : .connectedDirect
+            guard turnEnabled else { return .connectedDirect }
+            // Капча важнее статуса: туннель поднят, но обход ещё не работает.
+            if captchaPending { return .captcha }
+            if let phase = turnPhase {
+                switch phase {
+                case .inactive:    return .connectedViaTurn
+                case .vkAccess:    return .vkAccess
+                case .captcha:     return .captcha
+                case .tunnelSetup: return .tunnelSetup
+                case .ready:       return .connectedViaTurn
+                }
+            }
+            return turnPoolReady ? .connectedViaTurn : .tunnelSetup
 
         case .disconnected, .invalid, .disconnecting:
             return .idle
