@@ -116,3 +116,65 @@ struct TurnMetadataTests {
         #expect(!solo.isUsable)
     }
 }
+
+/// The credential-cache invariant: the Go core buckets sessions by
+/// `streamID / streams_per_cred` and authenticates each bucket separately, so anything
+/// below the session count means one VK captcha per extra bucket.
+struct TurnDialerConfigTests {
+
+    private static let server = TurnServerInfo(
+        host: "alpha.example.invalid",
+        supported: true,
+        peerAddr: "203.0.113.10:56000",
+        wrapKeyHex: "00112233445566778899aabbccddeeff"
+    )
+
+    private static func config(peers: Int, defaults: TurnDefaults?) -> [String: Any] {
+        TurnDialerConfig.make(
+            server: server,
+            vkLink: "https://example.invalid/call/join/AAAAAAAAAAAAAAAA",
+            defaults: defaults,
+            peers: peers,
+            manualCaptcha: false
+        )
+    }
+
+    @Test(arguments: [1, 4, 5, 10, 50])
+    func streamsPerCredNeverBelowNumStreams(peers: Int) throws {
+        // The subscription's own suggestion (2) must not split the pool.
+        let config = Self.config(peers: peers, defaults: TurnDefaults(streamsPerCred: 2))
+        let numStreams = try #require(config["num_streams"] as? Int)
+        let streamsPerCred = try #require(config["streams_per_cred"] as? Int)
+
+        #expect(numStreams == peers)
+        #expect(streamsPerCred >= numStreams, "would create \(numStreams / streamsPerCred) credential caches")
+    }
+
+    @Test func honoursALargerServerSuggestion() throws {
+        let config = Self.config(peers: 10, defaults: TurnDefaults(streamsPerCred: 64))
+        #expect(config["streams_per_cred"] as? Int == 64)
+    }
+
+    @Test func staysSingleCacheWithoutServerDefaults() throws {
+        let config = Self.config(peers: 10, defaults: nil)
+        #expect(config["num_streams"] as? Int == 10)
+        #expect(config["streams_per_cred"] as? Int == 10)
+    }
+
+    /// Memory pressure trims the session count before it reaches the dialer; the
+    /// credential math has to follow it down, not stay at the requested value.
+    @Test func followsAMemoryTrimmedSessionCount() throws {
+        let config = Self.config(peers: 4, defaults: TurnDefaults(streamsPerCred: 2))
+        #expect(config["num_streams"] as? Int == 4)
+        #expect(config["streams_per_cred"] as? Int == 4)
+    }
+
+    @Test func carriesWrapAndSolverSettings() throws {
+        let config = Self.config(peers: 10, defaults: TurnDefaults(wrapMode: true, captchaSolver: "v2", streamsPerCred: 2))
+        #expect(config["wrap_mode"] as? Bool == true)
+        #expect(config["wrap_key_hex"] as? String == Self.server.wrapKeyHex)
+        #expect(config["captcha_solver"] as? String == "v2")
+        #expect(config["vless_mode"] as? Bool == true)
+        #expect(config["peer_addr"] as? String == "203.0.113.10:56000")
+    }
+}
