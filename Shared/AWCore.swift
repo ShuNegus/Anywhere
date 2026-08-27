@@ -46,6 +46,10 @@ nonisolated final class AWCore {
             UserDefaultsKey.subscriptionDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.trustedCertificateSHA256s: [],
             UserDefaultsKey.trustedSSIDs: [],
+            UserDefaultsKey.turnCaptchaManual: false,
+            UserDefaultsKey.turnEnabled: true,
+            UserDefaultsKey.turnFeatureEnabled: true,
+            UserDefaultsKey.turnPeers: TurnLimits.defaultPeers,
         ])
         return defaults
     }()
@@ -105,6 +109,11 @@ nonisolated final class AWCore {
         static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
         static let tunnelIncludedRoutes = "tunnelIncludedRoutes"
         static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
+        static let turnCaptchaManual = "turnCaptchaManual"
+        static let turnEnabled = "turnEnabled"
+        static let turnFeatureEnabled = "turnFeatureEnabled"
+        static let turnPeers = "turnPeers"
+        static let turnVKLink = "turnVKLink"
         static let voyagerMembership = "voyagerMembership"
     }
 
@@ -652,5 +661,66 @@ nonisolated final class AWCore {
     /// one-time migration off the synced blob (see `MITMRuleSetStore.init`).
     static func hasMITMEnabled() -> Bool {
         userDefaults.object(forKey: UserDefaultsKey.mitmEnabled) != nil
+    }
+
+    // MARK: - TURN
+
+    /// Master switch for the whole vk-turn feature. When false the Settings entry is
+    /// hidden and no TURN code runs, whatever the other preferences say.
+    static func getTurnFeatureEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.turnFeatureEnabled)
+    }
+
+    static func setTurnFeatureEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.turnFeatureEnabled)
+    }
+
+    /// User-facing toggle: route proxy flows through the TURN tunnel.
+    static func getTurnEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.turnEnabled)
+    }
+
+    static func setTurnEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.turnEnabled)
+    }
+
+    /// The VK Calls join link the TURN relay authenticates against. Ephemeral, so it is
+    /// either delivered with the subscription or typed in by hand.
+    static func getTurnVKLink() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.turnVKLink) ?? ""
+    }
+
+    static func setTurnVKLink(_ value: String) {
+        userDefaults.set(value.trimmingCharacters(in: .whitespacesAndNewlines), forKey: UserDefaultsKey.turnVKLink)
+    }
+
+    /// Number of TURN sessions ("peers") the dialer keeps warm.
+    static func getTurnPeers() -> Int {
+        TurnLimits.clampPeers(userDefaults.integer(forKey: UserDefaultsKey.turnPeers))
+    }
+
+    static func setTurnPeers(_ value: Int) {
+        userDefaults.set(TurnLimits.clampPeers(value), forKey: UserDefaultsKey.turnPeers)
+    }
+
+    /// Solve VK captchas by hand in a web view instead of using the automatic solver.
+    static func getTurnCaptchaManual() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.turnCaptchaManual)
+    }
+
+    static func setTurnCaptchaManual(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.turnCaptchaManual)
+    }
+}
+
+// MARK: - TURN Limits
+
+nonisolated enum TurnLimits {
+    static let defaultPeers = 10
+    static let minPeers = 1
+    static let maxPeers = 50
+
+    static func clampPeers(_ value: Int) -> Int {
+        value <= 0 ? defaultPeers : min(max(value, minPeers), maxPeers)
     }
 }
