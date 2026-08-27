@@ -10,6 +10,7 @@ import SwiftUI
 enum SettingsItem: String {
     case iCloudSync
     case personalization
+    case proMode
     case alwaysOn
     case globalMode
     case adBlocking
@@ -29,6 +30,7 @@ enum SettingsItem: String {
         switch self {
         case .iCloudSync: "iCloud Sync"
         case .personalization: "Personalization"
+        case .proMode: "Pro Mode"
         case .alwaysOn: "Always On"
         case .globalMode: "Global Mode"
         case .adBlocking: "AD Blocking"
@@ -50,6 +52,7 @@ enum SettingsItem: String {
         switch self {
         case .iCloudSync: "icloud.fill"
         case .personalization: "paintpalette.fill"
+        case .proMode: "wrench.and.screwdriver.fill"
         case .alwaysOn: "poweron"
         case .globalMode: "arrow.merge"
         case .adBlocking: "shield.checkered"
@@ -83,6 +86,7 @@ enum SettingsItem: String {
         switch self {
         case .iCloudSync: .white
         case .personalization: .pink
+        case .proMode: .gray
         case .alwaysOn: .green
         case .globalMode: .orange
         case .adBlocking: .red

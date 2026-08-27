@@ -22,6 +22,10 @@ final class AppSettings {
     var iCloudSyncEnabled: Bool {
         didSet { AWCore.setICloudSyncEnabled(iCloudSyncEnabled) }
     }
+
+    var proModeEnabled: Bool {
+        didSet { AWCore.setProModeEnabled(proModeEnabled) }
+    }
     
     var showVoyagerCard: Bool {
         didSet { AWCore.setShowVoyagerCard(showVoyagerCard) }
@@ -337,6 +341,7 @@ final class AppSettings {
     private init() {
         experimentalEnabled = AWCore.getExperimentalEnabled()
         iCloudSyncEnabled = AWCore.getICloudSyncEnabled()
+        proModeEnabled = AWCore.getProModeEnabled()
         homeColorScheme = AWCore.getHomeColorScheme().flatMap(HomeColorScheme.init(rawValue:)) ?? .dark
         connectedBackgroundStartData = AWCore.getThemeColorData(.connectedBackgroundStart)
         connectedBackgroundEndData = AWCore.getThemeColorData(.connectedBackgroundEnd)
