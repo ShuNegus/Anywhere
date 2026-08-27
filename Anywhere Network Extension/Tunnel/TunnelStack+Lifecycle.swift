@@ -95,6 +95,10 @@ extension TunnelStack {
     
     private func finishShutdown() {
         shutdownInternal()
+        #if canImport(Turn)
+        // TURN pools are bound to the tunnel session; a new session must not inherit them.
+        TurnDialerRegistry.shared.reset()
+        #endif
         lwip_bridge_set_host_ctx(nil)
         OutboundConnector.setRoutingContext(nil)
         fakeIPPool.reset()
@@ -114,6 +118,9 @@ extension TunnelStack {
     
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
         logger.info("[VPN] Configuration switched")
+        #if canImport(Turn)
+        TurnDialerRegistry.shared.reset()
+        #endif
         restartStack(configuration: newConfiguration)
     }
     

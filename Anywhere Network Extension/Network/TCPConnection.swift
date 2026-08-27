@@ -460,6 +460,32 @@ actor TCPConnection: MITMSessionHost {
         return stream
     }
 
+    // MARK: TURN
+
+    /// Outbound protocols whose stack is a plain TCP byte stream, and so can ride a TURN
+    /// stream unchanged. UDP-shaped transports (Hysteria/QUIC) are excluded, as is the
+    /// UDP flow entirely.
+    private static let turnEligibleProtocols: Set<OutboundProtocol> = [.vless, .trojan, .shadowsocks]
+
+    /// A TURN tunnel for this flow's proxy, or `nil` to dial directly.
+    private func turnTunnelIfEligible() async -> ProxyConnection? {
+        #if canImport(Turn)
+        guard TurnDialerRegistry.isActive else { return nil }
+        guard Self.turnEligibleProtocols.contains(configuration.outboundProtocol) else { return nil }
+        // A chained proxy already builds its own tunnel stack; do not fight it for the slot.
+        guard configuration.chain?.isEmpty ?? true else { return nil }
+
+        guard let tunnel = await TurnDialerRegistry.shared.tunnel(for: configuration.serverAddress) else {
+            logger.debug("[TURN] no relay for \(configuration.serverAddress), dialing directly")
+            return nil
+        }
+        logger.debug("[TURN] routing \(configuration.name) through relay \(configuration.serverAddress)")
+        return tunnel
+        #else
+        return nil
+        #endif
+    }
+
     // MARK: Proxy connection
 
     private func connectProxy() async -> Establishment {
@@ -475,8 +501,15 @@ actor TCPConnection: MITMSessionHost {
             initialData = nil
         }
 
+        // When TURN is on and the subscription advertises a relay for this proxy's host,
+        // the whole proxy stack is built on top of a TURN stream (ProxyClient's `tunnel`
+        // is the direct analogue of a sing-box `detour`). Anything that does not line up
+        // — TURN off, no relay, relay unreachable — falls back to a plain dial.
+        let turnTunnel = await turnTunnelIfEligible()
+
         let client = ProxyClient(
             configuration: configuration,
+            tunnel: turnTunnel,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         self.proxyClient = client
