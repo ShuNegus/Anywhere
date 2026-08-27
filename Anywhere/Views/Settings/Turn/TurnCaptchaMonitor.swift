@@ -23,6 +23,10 @@ final class TurnCaptchaMonitor {
     /// True while a captcha is waiting and the user has not closed the sheet.
     private(set) var showCaptcha = false
 
+    /// Raw poll result: a captcha is waiting, whether or not the sheet is up.
+    /// The connection graph needs this — a dismissed captcha is still unsolved.
+    private(set) var captchaWaiting = false
+
     @ObservationIgnored private var task: Task<Void, Never>?
     /// Set when the user closes the sheet; cleared when the server cycles, so a fresh
     /// captcha re-opens it but a dismissed one stays closed.
@@ -39,6 +43,7 @@ final class TurnCaptchaMonitor {
             task = nil
             suppressed = false
             showCaptcha = false
+            captchaWaiting = false
         }
     }
 
@@ -58,9 +63,11 @@ final class TurnCaptchaMonitor {
         while !Task.isCancelled {
             if AWCore.getTurnFeatureEnabled(), AWCore.getTurnEnabled() {
                 if await TurnCaptcha.probe() {
+                    captchaWaiting = true
                     if !suppressed { showCaptcha = true }
                 } else {
                     // Server gone: the captcha was solved or abandoned.
+                    captchaWaiting = false
                     suppressed = false
                     showCaptcha = false
                 }
