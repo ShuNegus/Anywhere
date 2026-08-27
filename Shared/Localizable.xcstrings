@@ -7741,6 +7741,134 @@
         }
       }
     },
+    "graph.a11y.idle" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connection not started"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключение не начато"
+          }
+        }
+      }
+    },
+    "graph.a11y.stage" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connection stage: %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Этап подключения: %@"
+          }
+        }
+      }
+    },
+    "graph.node.captcha" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Solving Captcha"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Решение капчи"
+          }
+        }
+      }
+    },
+    "graph.node.connect" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connecting"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключение"
+          }
+        }
+      }
+    },
+    "graph.node.connected" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено"
+          }
+        }
+      }
+    },
+    "graph.node.tunnelSetup" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tunnel Setup"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройка туннеля"
+          }
+        }
+      }
+    },
+    "graph.node.vkAccess" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VK Access"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Доступ к VK"
+          }
+        }
+      }
+    },
+    "graph.node.vpnSetup" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN Setup"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройка VPN"
+          }
+        }
+      }
+    },
     "gRPC" : {
       "shouldTranslate" : false
     },
@@ -15644,6 +15772,38 @@
         }
       }
     },
+    "server.list.header" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SERVER"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "СЕРВЕР"
+          }
+        }
+      }
+    },
+    "server.list.measurePing" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Measure server ping"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Проверить пинг серверов"
+          }
+        }
+      }
+    },
     "Servers" : {
       "localizations" : {
         "ar" : {
@@ -17873,6 +18033,38 @@
         }
       }
     },
+    "turn.captcha.notification.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open the app to solve the captcha and connect through TURN."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Откройте приложение, чтобы решить капчу и подключиться через TURN."
+          }
+        }
+      }
+    },
+    "turn.captcha.notification.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Captcha required"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Требуется капча"
+          }
+        }
+      }
+    },
     "Type" : {
       "localizations" : {
         "ar" : {
@@ -18831,7 +19023,20 @@
       "shouldTranslate" : false
     },
     "Voyager is unavailable in this build." : {
-
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voyager is unavailable in this build."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voyager недоступен в этой сборке."
+          }
+        }
+      }
     },
     "Voyager Member Card" : {
       "shouldTranslate" : false
