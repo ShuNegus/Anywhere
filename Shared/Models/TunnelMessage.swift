@@ -26,6 +26,9 @@ nonisolated enum TunnelMessage: Codable, Sendable {
 
     /// Query the recent request log. Reply: `RequestsResponse`.
     case fetchRequests
+
+    /// Query live TURN relay counts. Reply: `TurnStatsResponse`.
+    case fetchTurnStats
 }
 
 // MARK: - Responses
@@ -176,4 +179,16 @@ nonisolated enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {
     case tcp
     case udp
     case unknown
+}
+
+/// Live TURN counts, gathered in the extension where the dialers actually live.
+nonisolated struct TurnStatsResponse: Codable, Sendable {
+    var hosts: [TurnHostStatistics]
+
+    var totalSessions: Int { hosts.reduce(0) { $0 + $1.sessions } }
+    var totalStreams: Int { hosts.reduce(0) { $0 + $1.streams } }
+
+    init(hosts: [TurnHostStatistics] = []) {
+        self.hosts = hosts
+    }
 }
