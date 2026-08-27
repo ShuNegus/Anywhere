@@ -1405,6 +1405,7 @@
       }
     },
     "A single purchase, yours to keep." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -1717,6 +1718,7 @@
       }
     },
     "Add a configuration on your iPhone." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -3884,6 +3886,7 @@
       }
     },
     "Build custom themes and use alternate icons." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -4202,6 +4205,7 @@
       }
     },
     "Configurations" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -6565,6 +6569,7 @@
       }
     },
     "Enjoy Anywhere features with no restrictions." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -7364,6 +7369,7 @@
       }
     },
     "Family Sharing" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -7423,6 +7429,7 @@
       "shouldTranslate" : false
     },
     "Full Features Unlocked" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -9338,6 +9345,7 @@
       }
     },
     "Join Public Beta and try new features first." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -9446,6 +9454,7 @@
       "shouldTranslate" : false
     },
     "Lifetime Access" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -9814,6 +9823,7 @@
       "shouldTranslate" : false
     },
     "Member %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -10710,6 +10720,7 @@
       }
     },
     "No previous purchase found to restore." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -11491,6 +11502,7 @@
       }
     },
     "Open Anywhere on your iPhone to sync." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -12338,6 +12350,7 @@
       }
     },
     "Privacy" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -12754,6 +12767,7 @@
       }
     },
     "Public Beta Access" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -14328,6 +14342,7 @@
       }
     },
     "Restore Purchases" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -15793,6 +15808,7 @@
       "shouldTranslate" : false
     },
     "Share Voyager membership with family." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -15910,6 +15926,7 @@
       "shouldTranslate" : false
     },
     "Start Journey" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -16335,6 +16352,7 @@
       "shouldTranslate" : false
     },
     "Support Open Source" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -16595,6 +16613,7 @@
       }
     },
     "Syncing with iPhone" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -16702,6 +16721,7 @@
       "shouldTranslate" : false
     },
     "Terms" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -16910,6 +16930,7 @@
       }
     },
     "The road is long. Walk it with us." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -18064,6 +18085,7 @@
       }
     },
     "Unlock Voyager — %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -18808,8 +18830,8 @@
     "VLESS" : {
       "shouldTranslate" : false
     },
-    "Voyager" : {
-      "shouldTranslate" : false
+    "Voyager is unavailable in this build." : {
+
     },
     "Voyager Member Card" : {
       "shouldTranslate" : false
