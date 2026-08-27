@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		78AA0002300E000000000002 /* Turn.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 78AA0001300E000000000001 /* Turn.xcframework */; };
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB2B54B22F6C3E2800F24AC2 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -75,6 +76,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		78AA0001300E000000000001 /* Turn.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Turn.xcframework; path = Frameworks/Turn.xcframework; sourceTree = "<group>"; };
 		78B6DF9A2FE7B70D0084897A /* Anywhere Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Anywhere Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10652F23B81500B74CD8 /* Anywhere.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Anywhere.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Network Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -507,6 +509,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
+				78AA0002300E000000000002 /* Turn.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -559,6 +562,7 @@
 		CB1C10782F23B82F00B74CD8 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				78AA0001300E000000000001 /* Turn.xcframework */,
 				CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */,
 				CB71CDC42F837D11002B9E1D /* WidgetKit.framework */,
 				CB71CDC62F837D11002B9E1D /* SwiftUI.framework */,
