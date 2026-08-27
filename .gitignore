@@ -41,3 +41,6 @@ build/
 
 # TURN core (built by Scripts/build-turn-xcframework.sh)
 Frameworks/Turn.xcframework/
+
+# Rules database (not redistributed; see LocalPackages/AnywhereRules/README.md)
+LocalPackages/AnywhereRules/Sources/AnywhereRules/Resources/Rules.db
