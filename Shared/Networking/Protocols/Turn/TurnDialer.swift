@@ -5,6 +5,62 @@
 
 import Foundation
 
+/// Builds the `clientcore.Config` payload handed to the Go dialer.
+///
+/// Kept outside the `canImport(Turn)` guard so it can be exercised without the framework.
+///
+/// The Go core buckets sessions into credential caches by `streamID / streams_per_cred`,
+/// and every cache authenticates against VK on its own — which means its own captcha.
+/// With the subscription's `streams_per_cred` (2) against ten sessions that is five
+/// separate captchas for one connect. Pinning `streams_per_cred` to at least the number
+/// of sessions collapses that to a single cache (`cacheID` is always 0), so one solved
+/// captcha warms the whole pool.
+nonisolated enum TurnDialerConfig {
+
+    /// Sessions the pool will actually run, after clamping. `peers` has usually already
+    /// been trimmed by ``TurnMemory/effectivePeers(requested:)``; clamping again is what
+    /// the Go side is handed, so the credential math has to be based on this value.
+    static func sessionCount(peers: Int) -> Int {
+        TurnLimits.clampPeers(peers)
+    }
+
+    /// Streams one credential set covers. Never below the session count, so the pool
+    /// keeps exactly one credential cache regardless of what the subscription suggests.
+    static func streamsPerCred(peers: Int, defaults: TurnDefaults?) -> Int {
+        max(sessionCount(peers: peers), defaults?.streamsPerCred ?? 0)
+    }
+
+    /// Mirrors `clientcore.Config`. VLESS mode is forced on the Go side; the peer always
+    /// forwards to its own configured backend, so no destination is carried here.
+    ///
+    /// - Parameter vkLink: already trimmed and validated by the caller.
+    static func make(
+        server: TurnServerInfo,
+        vkLink: String,
+        defaults: TurnDefaults?,
+        peers: Int,
+        manualCaptcha: Bool
+    ) -> [String: Any] {
+        var config: [String: Any] = [
+            "peer_addr": server.peerAddr,
+            "vk_link": vkLink,
+            "vless_mode": true,
+            "num_streams": sessionCount(peers: peers),
+            "streams_per_cred": streamsPerCred(peers: peers, defaults: defaults),
+            "manual_captcha": manualCaptcha,
+        ]
+        let wrapMode = defaults?.wrapMode ?? !server.wrapKeyHex.isEmpty
+        if wrapMode {
+            config["wrap_mode"] = true
+            config["wrap_key_hex"] = server.wrapKeyHex
+        }
+        if let solver = defaults?.captchaSolver, !solver.isEmpty {
+            config["captcha_solver"] = solver
+        }
+        return config
+    }
+}
+
 #if canImport(Turn)
 import Turn
 import Synchronization
@@ -43,26 +99,15 @@ nonisolated final class TurnDialer: Sendable {
         self.host = server.host
         self.readyTimeout = TimeInterval(defaults?.readyTimeout ?? 30)
 
-        // Mirrors clientcore.Config. VLESS mode is forced on the Go side; the peer always
-        // forwards to its own configured backend, so no destination is carried here.
-        var config: [String: Any] = [
-            "peer_addr": server.peerAddr,
-            "vk_link": link,
-            "vless_mode": true,
-            "num_streams": TurnLimits.clampPeers(peers),
-            "manual_captcha": manualCaptcha,
-        ]
-        let wrapMode = defaults?.wrapMode ?? !server.wrapKeyHex.isEmpty
-        if wrapMode {
-            config["wrap_mode"] = true
-            config["wrap_key_hex"] = server.wrapKeyHex
-        }
-        if let streamsPerCred = defaults?.streamsPerCred, streamsPerCred > 0 {
-            config["streams_per_cred"] = streamsPerCred
-        }
-        if let solver = defaults?.captchaSolver, !solver.isEmpty {
-            config["captcha_solver"] = solver
-        }
+        let config = TurnDialerConfig.make(
+            server: server,
+            vkLink: link,
+            defaults: defaults,
+            peers: peers,
+            manualCaptcha: manualCaptcha
+        )
+        let sessions = TurnDialerConfig.sessionCount(peers: peers)
+        let streamsPerCred = TurnDialerConfig.streamsPerCred(peers: peers, defaults: defaults)
 
         let json = try JSONSerialization.data(withJSONObject: config)
         guard let configJSON = String(data: json, encoding: .utf8) else {
@@ -74,7 +119,9 @@ nonisolated final class TurnDialer: Sendable {
             throw error.map { TurnError.io($0) } ?? TurnError.unsupportedServer(host: server.host)
         }
         self.dialer = dialer
-        logger.debug("TURN dialer created for \(server.host) via \(server.peerAddr), peers=\(TurnLimits.clampPeers(peers))")
+        // One line per dialer: the check that the pool runs a single credential cache
+        // (streams_per_cred >= num_streams) and therefore asks for one captcha.
+        logger.info("TURN dialer \(server.host): num_streams=\(sessions) streams_per_cred=\(streamsPerCred) (credential caches: \(sessions <= streamsPerCred ? 1 : (sessions + streamsPerCred - 1) / streamsPerCred))")
     }
 
     /// Blocks until at least one session is up. Cheap to call repeatedly — it returns
