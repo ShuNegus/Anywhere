@@ -15,7 +15,7 @@ nonisolated final class AWCore {
 
     enum Identifier {
         static let appGroupSuite = "group.\(bundle)"
-        static let bundle = "com.argsment.Anywhere"
+        static let bundle = "su.smd.Anywhere"
         static let errorDomain = bundle
         static let iCloudContainer = "iCloud.\(bundle)"
         static let lwipQueue = "\(bundle).lwip"

@@ -14,7 +14,7 @@ nonisolated final class PathMonitorConcurrencyBridge: Sendable {
     private let queue: DispatchQueue
 
     init() {
-        self.queue = DispatchQueue(label: "com.argsment.Anywhere.PathMonitorConcurrencyBridge")
+        self.queue = DispatchQueue(label: "su.smd.Anywhere.PathMonitorConcurrencyBridge")
     }
     
     func paths() -> AsyncStream<Network.NWPath> {

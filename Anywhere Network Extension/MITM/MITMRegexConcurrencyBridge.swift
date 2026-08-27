@@ -17,7 +17,7 @@ nonisolated final class MITMRegexConcurrencyBridge: Sendable {
     /// Dispatch is the right tool precisely because a pinned worker must burn a queue thread —
     /// not a cooperative-pool lane — while the hard-cap watchdog decides its fate.
     private let queue = DispatchQueue(
-        label: "com.argsment.Anywhere.MITMRegexConcurrencyBridge",
+        label: "su.smd.Anywhere.MITMRegexConcurrencyBridge",
         qos: .userInitiated,
         attributes: .concurrent
     )
