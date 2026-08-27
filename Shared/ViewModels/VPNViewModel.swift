@@ -34,6 +34,10 @@ class VPNViewModel {
     private(set) var selectedChainId: UUID?
     var latencyResults: [UUID: LatencyResult] = [:]
     var chainLatencyResults: [UUID: LatencyResult] = [:]
+    /// TURN handshake phase reported by the tunnel. Still always `nil`: the vk-turn core
+    /// does not expose its phase yet, so the connection graph falls back to the signals
+    /// it already has (SPEC.md §4). Fill this in once the core starts reporting.
+    var turnPhase: TurnPhase? = nil
     var startError: String?
 
     private(set) var isManagerReady = false
