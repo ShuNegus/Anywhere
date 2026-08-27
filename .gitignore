@@ -35,3 +35,6 @@ build/
 !default.perspectivev3
 *.hmap
 *.moved-aside
+
+# Local package user data
+.swiftpm/xcode/xcuserdata/
