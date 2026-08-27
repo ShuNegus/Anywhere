@@ -16,18 +16,15 @@ struct HomeView: View {
     @Environment(SubscriptionStore.self) private var subscriptionStore
     
     private static let horizontalPadding: CGFloat = 20
-    private static let paneSpacing: CGFloat = 20
-    private static let minControlPaneWidth: CGFloat = 320
     private static let maxControlPaneWidth: CGFloat = 500
+    /// Clears the last row from under ``tabBarScrim`` (112 tall) when scrolled to the end.
+    private static let scrollBottomInset: CGFloat = 96
 
-    @Namespace private var namespace
-
-    @State private var containerSize = CGSize.zero
-    
     @State private var connectionEffectsEnabled = false
-    
+
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
+    @State private var showingStatsSheet = false
 
     @State private var captchaMonitor = TurnCaptchaMonitor.shared
     /// Latches once the captcha sheet has been up, so the graph can tell "still
@@ -64,13 +61,7 @@ struct HomeView: View {
             BackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
 
-            Group {
-                if isConnected && Self.allowsSideBySide(contentWidth: contentWidth) {
-                    sideBySideLayout
-                } else {
-                    stackedLayout
-                }
-            }
+            stackedLayout
             .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
             .sensoryFeedback(trigger: isConnected) { _, _ in
                 guard connectionEffectsEnabled else { return nil }
@@ -79,11 +70,6 @@ struct HomeView: View {
         }
         .overlay(alignment: .bottom) { tabBarScrim }
         .colorScheme(settings.homeColorScheme.colorSceme)
-        .onGeometryChange(for: CGSize.self) { proxy in
-            proxy.size
-        } action: { size in
-            containerSize = size
-        }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                 AddProxyView(showingManualAddSheet: $showingManualAddSheet)
@@ -93,6 +79,9 @@ struct HomeView: View {
             ProxyEditorView { configuration in
                 configStore.add(configuration); viewModel.selectIfNone(configuration)
             }
+        }
+        .sheet(isPresented: $showingStatsSheet) {
+            statsSheet
         }
         .alert("VPN Error", isPresented: Binding(
             get: { viewModel.startError != nil },
@@ -116,54 +105,33 @@ struct HomeView: View {
 
     // MARK: - Layouts
 
-    private var contentWidth: CGFloat {
-        containerSize.width - 2 * Self.horizontalPadding
-    }
-
-    private static func allowsSideBySide(contentWidth: CGFloat) -> Bool {
-        StatCardSize.columnCount(fitting: contentWidth) > ConnectionStatsView.maxColumnCount
-    }
-
     private var stackedLayout: some View {
-        DetailRevealScrollView(revealsDetail: isConnected) {
+        ScrollView {
             connectionControls
+                .frame(maxWidth: .infinity)
                 .padding(.horizontal, Self.horizontalPadding)
-        } detail: {
-            ConnectionStatsView()
-                .padding(.top, 16)
-                .padding(.horizontal, Self.horizontalPadding)
+                .padding(.bottom, Self.scrollBottomInset)
         }
+        .scrollIndicators(.never)
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
     }
-    
-    private var sideBySideLayout: some View {
-        // Give the stats pane what a fully grown grid needs, but never squeeze
-        // the controls pane below its minimum width.
-        let detailWidth = min(
-            StatCardSize.gridWidth(
-                columns: ConnectionStatsView.maxColumnCount,
-                unitLength: StatCardSize.maxUnitLength
-            ),
-            contentWidth - Self.minControlPaneWidth - Self.paneSpacing
-        )
-        return HStack(spacing: Self.paneSpacing) {
-            ScrollView {
-                connectionControls
-                    .frame(maxWidth: .infinity, minHeight: containerSize.height)
-            }
-            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
 
+    private var statsSheet: some View {
+        NavigationStack {
             ScrollView {
                 ConnectionStatsView()
-                    .padding(.vertical, 16)
-                    .frame(minHeight: containerSize.height)
+                    .padding(20)
             }
-            .frame(width: detailWidth)
-            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-            .transition(.move(edge: .trailing).combined(with: .opacity))
+            .navigationTitle(String(localized: "stats.sheet.title", defaultValue: "Statistics", comment: "Заголовок шита со статистикой подключения"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showingStatsSheet = false }
+                }
+            }
         }
-        .frame(maxWidth: Self.maxControlPaneWidth + Self.paneSpacing + detailWidth)
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, Self.horizontalPadding)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     private var connectionControls: some View {
@@ -171,15 +139,11 @@ struct HomeView: View {
         VStack(spacing: 32) {
             VStack(spacing: 20) {
                 powerButton
-                    .matchedGeometryEffect(id: "powerButton", in: namespace)
                 statusLabel
-                    .matchedGeometryEffect(id: "statusLabel", in: namespace)
             }
             VStack(spacing: 20) {
                 ConnectionGraphView(stage: stage)
-                    .matchedGeometryEffect(id: "connectionGraph", in: namespace)
                 serverList
-                    .matchedGeometryEffect(id: "serverList", in: namespace)
             }
         }
         .frame(maxWidth: Self.maxControlPaneWidth)
@@ -309,10 +273,24 @@ struct HomeView: View {
             .clipShape(.rect(cornerRadius: 16, style: .continuous))
     }
     
+    /// Tapping the status opens the statistics sheet — the stats no longer live on
+    /// the home screen itself.
     private var statusLabel: some View {
-        Text(viewModel.statusText)
-            .font(.headline)
+        Button {
+            showingStatsSheet = true
+        } label: {
+            HStack(spacing: 4) {
+                Text(viewModel.statusText)
+                    .font(.headline)
+                if isConnected {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                }
+            }
             .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isConnected)
     }
 }
 
