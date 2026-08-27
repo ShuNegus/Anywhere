@@ -649,6 +649,30 @@ nonisolated final class AWCore {
         }
     }
     
+    // MARK: - TURN Data
+
+    private static let turnDataURL = FileManager.default
+        .containerURL(forSecurityApplicationGroupIdentifier: Identifier.appGroupSuite)!
+        .appendingPathComponent("turn.bin")
+
+    static func getTurnData() -> Data? {
+        try? Data(contentsOf: turnDataURL, options: .mappedIfSafe)
+    }
+
+    static func setTurnData(_ data: Data) {
+        do {
+            try data.write(to: turnDataURL, options: [.atomic, .noFileProtection])
+        } catch {
+            logger.report(AnywhereError.store(.saveFailed(.turnPayload, underlying: error)))
+        }
+    }
+
+    /// Last-write timestamp of the TURN payload, used to invalidate in-process caches
+    /// across the app/extension boundary.
+    static func turnDataModificationDate() -> Date? {
+        try? FileManager.default.attributesOfItem(atPath: turnDataURL.path)[.modificationDate] as? Date
+    }
+
     static func getMITMEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.mitmEnabled)
     }

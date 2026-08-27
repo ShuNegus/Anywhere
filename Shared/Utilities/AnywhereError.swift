@@ -233,7 +233,7 @@ nonisolated enum AnywhereError: Error {
         enum Resource: String, Sendable {
             case configurations, chains, subscriptions, certificates
             case routingRuleSets, mitmRuleSets, routingDatabase
-            case routingPayload, mitmPayload, scripts
+            case routingPayload, mitmPayload, turnPayload, scripts
         }
 
         case loadFailed(Resource, underlying: any Error)
