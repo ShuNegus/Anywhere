@@ -267,10 +267,15 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             return encodeReply(RequestsResponse(requests: tunnelStack.requestLog.snapshot()))
 
         case .fetchTurnStats:
+            // Only meaningful in auto mode; the other two need no explanation in the UI.
+            let autoDecision = AWCore.getTurnMode() == .auto
+                ? TurnAutoState.shared.decision.rawValue
+                : nil
             #if canImport(Turn)
-            return encodeReply(TurnStatsResponse(hosts: TurnDialerRegistry.shared.statistics()))
+            return encodeReply(TurnStatsResponse(hosts: TurnDialerRegistry.shared.statistics(),
+                                                 autoDecision: autoDecision))
             #else
-            return encodeReply(TurnStatsResponse())
+            return encodeReply(TurnStatsResponse(autoDecision: autoDecision))
             #endif
         }
     }
