@@ -184,11 +184,15 @@ nonisolated enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {
 /// Live TURN counts, gathered in the extension where the dialers actually live.
 nonisolated struct TurnStatsResponse: Codable, Sendable {
     var hosts: [TurnHostStatistics]
+    /// `TurnAutoState.Decision` raw value while the mode is `.auto`, `nil` otherwise.
+    /// Optional so an older extension binary still decodes.
+    var autoDecision: String? = nil
 
     var totalSessions: Int { hosts.reduce(0) { $0 + $1.sessions } }
     var totalStreams: Int { hosts.reduce(0) { $0 + $1.streams } }
 
-    init(hosts: [TurnHostStatistics] = []) {
+    init(hosts: [TurnHostStatistics] = [], autoDecision: String? = nil) {
         self.hosts = hosts
+        self.autoDecision = autoDecision
     }
 }

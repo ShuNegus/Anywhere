@@ -37,6 +37,8 @@ class VPNViewModel {
     /// TURN handshake phase reported by the tunnel, polled while connected. `nil` when
     /// the bypass is off or the extension has no dialer yet.
     private(set) var turnPhase: TurnPhase? = nil
+    /// `TurnAutoState.Decision` raw value from the extension while the mode is `.auto`.
+    private(set) var turnAutoDecision: String? = nil
     @ObservationIgnored private var turnPhaseTask: Task<Void, Never>?
     var startError: String?
     /// A reachability probe is running ahead of the tunnel; the button stays busy so a
@@ -435,7 +437,9 @@ class VPNViewModel {
         guard turnPhaseTask == nil else { return }
         turnPhaseTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                self?.turnPhase = await Self.fetchTurnPhase(session: session)
+                let status = await Self.fetchTurnStatus(session: session)
+                self?.turnPhase = status.phase
+                self?.turnAutoDecision = status.autoDecision
                 try? await Task.sleep(for: Self.turnPhasePollInterval)
             }
         }
@@ -445,23 +449,27 @@ class VPNViewModel {
         turnPhaseTask?.cancel()
         turnPhaseTask = nil
         turnPhase = nil
+        turnAutoDecision = nil
     }
 
     /// The least-advanced phase across the live dialers: the graph should show the step
     /// the connection is still working on, not the one furthest along.
-    private static func fetchTurnPhase(session: NETunnelProviderSession) async -> TurnPhase? {
+    private static func fetchTurnStatus(
+        session: NETunnelProviderSession
+    ) async -> (phase: TurnPhase?, autoDecision: String?) {
         guard session.status == .connected,
               let request = try? JSONEncoder().encode(TunnelMessage.fetchTurnStats),
               let response = await ProviderMessageConcurrencyBridge.send(request, over: session),
               let stats = try? JSONDecoder().decode(TurnStatsResponse.self, from: response) else {
-            return nil
+            return (nil, nil)
         }
         let phases = stats.hosts
             .compactMap(\.phase)
             .compactMap(TurnPhase.init(rawValue:))
             .filter { $0 != .inactive }
-        return phases.min(by: { $0.rawValue < $1.rawValue })
+        let phase = phases.min(by: { $0.rawValue < $1.rawValue })
             ?? (stats.totalSessions > 0 ? .ready : nil)
+        return (phase, stats.autoDecision)
     }
 
     private static let providerBundleIdentifier = "su.smd.Anywhere.Network-Extension"

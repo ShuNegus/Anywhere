@@ -31,6 +31,9 @@ struct TurnSettingsView: View {
                 } label: {
                     SettingsItem.turn.label
                 }
+                if settings.turnMode == .auto, let autoStatus {
+                    LabeledContent("Route", value: autoStatus)
+                }
             } footer: {
                 Text("Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked.")
             }
@@ -71,6 +74,22 @@ struct TurnSettingsView: View {
         .onDisappear {
             pollTask?.cancel()
             pollTask = nil
+        }
+    }
+
+    /// What auto mode has settled on, straight from the extension. `nil` while the VPN
+    /// is down — there is no decision to report until the tunnel is up.
+    private var autoStatus: String? {
+        switch stats.autoDecision {
+        case TurnAutoState.Decision.turn.rawValue:
+            return String(localized: "turn.auto.status.turn", defaultValue: "Using TURN")
+        case TurnAutoState.Decision.direct.rawValue:
+            return String(localized: "turn.auto.status.direct", defaultValue: "Direct")
+        case TurnAutoState.Decision.undecided.rawValue,
+             TurnAutoState.Decision.offline.rawValue:
+            return String(localized: "turn.auto.status.probing", defaultValue: "Checking\u{2026}")
+        default:
+            return nil
         }
     }
 
