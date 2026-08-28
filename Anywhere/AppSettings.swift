@@ -276,8 +276,8 @@ final class AppSettings {
         didSet { AWCore.setTurnFeatureEnabled(turnFeatureEnabled) }
     }
 
-    var turnEnabled: Bool {
-        didSet { AWCore.setTurnEnabled(turnEnabled) }
+    var turnMode: TurnMode {
+        didSet { AWCore.setTurnMode(turnMode) }
     }
 
     var turnVKLink: String {
@@ -380,7 +380,7 @@ final class AppSettings {
         tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
 
         turnFeatureEnabled = AWCore.getTurnFeatureEnabled()
-        turnEnabled = AWCore.getTurnEnabled()
+        turnMode = AWCore.getTurnMode()
         turnVKLink = AWCore.getTurnVKLink()
         turnPeers = AWCore.getTurnPeers()
         turnCaptchaManual = AWCore.getTurnCaptchaManual()

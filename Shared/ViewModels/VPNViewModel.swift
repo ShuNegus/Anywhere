@@ -428,7 +428,7 @@ class VPNViewModel {
     /// `fetchTurnStats` IPC. Keeps polling past `.ready`: the phase has to be able to
     /// fall back when a pool reconnects, so it is deliberately never latched.
     private func startTurnPhaseWatch(session: NETunnelProviderSession) {
-        guard AWCore.getTurnFeatureEnabled(), AWCore.getTurnEnabled() else { return }
+        guard AWCore.getTurnFeatureEnabled(), AWCore.getTurnMode() != .off else { return }
         guard turnPhaseTask == nil else { return }
         turnPhaseTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {

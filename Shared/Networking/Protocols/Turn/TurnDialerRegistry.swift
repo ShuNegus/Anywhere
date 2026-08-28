@@ -33,7 +33,7 @@ nonisolated final class TurnDialerRegistry: Sendable {
     /// Whether TURN should be used at all right now.
     static var isActive: Bool {
         AWCore.getTurnFeatureEnabled()
-            && AWCore.getTurnEnabled()
+            && AWCore.getTurnMode() != .off
             && !effectiveVKLink().isEmpty
     }
 

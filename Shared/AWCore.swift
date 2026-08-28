@@ -48,7 +48,6 @@ nonisolated final class AWCore {
             UserDefaultsKey.trustedCertificateSHA256s: [],
             UserDefaultsKey.trustedSSIDs: [],
             UserDefaultsKey.turnCaptchaManual: false,
-            UserDefaultsKey.turnEnabled: true,
             UserDefaultsKey.turnFeatureEnabled: true,
             UserDefaultsKey.turnPeers: TurnLimits.defaultPeers,
         ])
@@ -115,6 +114,7 @@ nonisolated final class AWCore {
         static let turnCaptchaManual = "turnCaptchaManual"
         static let turnEnabled = "turnEnabled"
         static let turnFeatureEnabled = "turnFeatureEnabled"
+        static let turnMode = "turnMode"
         static let turnPeers = "turnPeers"
         static let turnVKLink = "turnVKLink"
         static let voyagerMembership = "voyagerMembership"
@@ -729,13 +729,25 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.turnFeatureEnabled)
     }
 
-    /// User-facing toggle: route proxy flows through the TURN tunnel.
-    static func getTurnEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.turnEnabled)
+    /// User-facing choice: route proxy flows through the TURN tunnel always, never, or
+    /// only when a reachability probe says the direct path is censored.
+    ///
+    /// Migrates the old boolean `turnEnabled` on first read; a fresh install has neither
+    /// key and lands on `.auto`. `turnMode` is deliberately absent from `register(defaults:)`
+    /// so the legacy lookup can still tell "never set" from "set to off".
+    static func getTurnMode() -> TurnMode {
+        if let raw = userDefaults.string(forKey: UserDefaultsKey.turnMode),
+           let mode = TurnMode(rawValue: raw) { return mode }
+        if let legacy = userDefaults.persistentDomain(forName: Identifier.appGroupSuite)?[UserDefaultsKey.turnEnabled] as? Bool {
+            let mode: TurnMode = legacy ? .on : .off
+            userDefaults.set(mode.rawValue, forKey: UserDefaultsKey.turnMode)
+            return mode
+        }
+        return .auto
     }
 
-    static func setTurnEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.turnEnabled)
+    static func setTurnMode(_ mode: TurnMode) {
+        userDefaults.set(mode.rawValue, forKey: UserDefaultsKey.turnMode)
     }
 
     /// The VK Calls join link the TURN relay authenticates against. Ephemeral, so it is

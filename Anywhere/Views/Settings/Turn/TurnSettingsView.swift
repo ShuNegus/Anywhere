@@ -24,16 +24,20 @@ struct TurnSettingsView: View {
         @Bindable var settings = settings
         Form {
             Section {
-                Toggle(isOn: $settings.turnEnabled) {
+                Picker(selection: $settings.turnMode) {
+                    ForEach(TurnMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                } label: {
                     SettingsItem.turn.label
                 }
             } footer: {
-                Text("Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call.")
+                Text("Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked.")
             }
 
             vkLinkSection
 
-            if settings.turnEnabled {
+            if settings.turnMode != .off {
                 Section("Relay") {
                     Stepper(value: $settings.turnPeers, in: TurnLimits.minPeers...TurnLimits.maxPeers) {
                         LabeledContent("Peers", value: "\(settings.turnPeers)")
@@ -45,7 +49,7 @@ struct TurnSettingsView: View {
                 }
             }
 
-            if settings.turnEnabled {
+            if settings.turnMode != .off {
                 statisticsSection
                 captchaSection
             }
@@ -58,10 +62,10 @@ struct TurnSettingsView: View {
             reload()
             startPolling()
         }
-        .onChange(of: settings.turnEnabled) { _, enabled in
+        .onChange(of: settings.turnMode) { _, mode in
             // A captcha can strand the relay while the app is backgrounded, so ask for
             // notification permission at the moment TURN is switched on.
-            guard enabled else { return }
+            guard mode != .off else { return }
             Task { await TurnNotifications.requestAuthorizationIfNeeded() }
         }
         .onDisappear {

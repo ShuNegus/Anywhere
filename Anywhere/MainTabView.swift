@@ -32,7 +32,7 @@ struct MainTabView: View {
     /// A waiting captcha blocks every TURN relay, so it is watched app-wide rather than
     /// only while the TURN settings screen is open.
     private var isCaptchaWatchActive: Bool {
-        settings.turnFeatureEnabled && settings.turnEnabled && viewModel.status == .connected
+        settings.turnFeatureEnabled && settings.turnMode != .off && viewModel.status == .connected
     }
 
     /// TURN is on by default and the settings screen may never be opened, so the
