@@ -39,6 +39,9 @@ class VPNViewModel {
     private(set) var turnPhase: TurnPhase? = nil
     @ObservationIgnored private var turnPhaseTask: Task<Void, Never>?
     var startError: String?
+    /// A reachability probe is running ahead of the tunnel; the button stays busy so a
+    /// second tap cannot start the VPN behind the check.
+    private(set) var isPreflighting = false
 
     private(set) var isManagerReady = false
     @ObservationIgnored private var vpnManager: NETunnelProviderManager?
@@ -139,7 +142,7 @@ class VPNViewModel {
     }
 
     func isButtonDisabled(hasConfigurations: Bool) -> Bool {
-        !isManagerReady || !hasConfigurations || vpnStatus.isTransitioning
+        !isManagerReady || !hasConfigurations || vpnStatus.isTransitioning || isPreflighting
     }
 
     // MARK: - Chain Selection
@@ -500,6 +503,22 @@ class VPNViewModel {
               let configuration = selectedConfiguration else { return }
 
         Task { [self] in
+            // Auto mode is the only one that probes: it is also the only one that has to
+            // tell "no network" apart from "censored network", and refusing to start on a
+            // dead network beats a tunnel that silently carries nothing.
+            if AWCore.getTurnFeatureEnabled(), AWCore.getTurnMode() == .auto {
+                isPreflighting = true
+                let verdict = await ConnectivityProbe.classify()
+                isPreflighting = false
+                if verdict == .offline {
+                    startError = String(
+                        localized: "vpn.error.noInternet",
+                        defaultValue: "No internet connection. Check your network and try again."
+                    )
+                    return
+                }
+            }
+
             // Resolves on DNSResolver's worker queue, off both the main actor and
             // the cooperative pool.
             let resolvedIP = await VPNViewModel.resolveServerAddress(configuration.serverAddress)
