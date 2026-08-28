@@ -50,7 +50,12 @@ extension TunnelStack {
         // first flow: the VK handshake and any captcha are the slow part, and the app's
         // connection graph has nothing to report until a dialer exists. Same registry key
         // as the on-demand path in TCPConnection, so this only ever builds one pool.
-        Task.detached { _ = TurnDialerRegistry.shared.dialer(for: configuration.serverAddress) }
+        Task.detached {
+            // In auto mode there is nothing to warm until the probe has spoken; the
+            // registry would hand back nil and the pool would never be built.
+            if AWCore.getTurnMode() == .auto { await TurnAutoState.shared.waitForDecision() }
+            _ = TurnDialerRegistry.shared.dialer(for: configuration.serverAddress)
+        }
         #endif
 
         logger.debug("[TunnelStack] Started")
@@ -138,6 +143,15 @@ extension TunnelStack {
         invalidateOutboundState(configuration: configuration)
     }
     
+    /// Auto mode flipped to TURN mid-session: existing flows were built on direct dials
+    /// that the network is now censoring, so they are closed and the pools reclaimed.
+    /// The stack itself keeps running — only the outbound state is stale.
+    func handleTurnRouteChanged() {
+        guard running.load(ordering: .relaxed), let configuration else { return }
+        logger.info("[VPN] TURN route changed, rebuilding outbound state")
+        invalidateOutboundState(configuration: configuration)
+    }
+
     func suspendOutbound() {
         guard running.load(ordering: .relaxed) else { return }
         logger.info("[VPN] Path offline/sleep")

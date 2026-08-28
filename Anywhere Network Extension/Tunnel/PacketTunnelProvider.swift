@@ -19,6 +19,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     private let statsRecorder = StatsRecorder()
 #if canImport(Turn)
     private let captchaNotifier = TurnCaptchaNotifier()
+    private let turnAutoPilot = TurnAutoPilot()
 #endif
 
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
@@ -33,6 +34,14 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             logger.report("[VPN] Start failed", error: error)
             throw error
         }
+
+#if canImport(Turn)
+        // Kicked off before the tunnel settings are applied so the probe overlaps with
+        // the stack coming up; flows that beat it wait on TurnAutoState.
+        turnAutoPilot.start { [tunnelStack] in
+            Task { await tunnelStack.handleTurnRouteChanged() }
+        }
+#endif
 
         let settings = buildTunnelSettings()
         
@@ -214,6 +223,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
 #if canImport(Turn)
         captchaNotifier.stop()
+        turnAutoPilot.stop()
 #endif
         
         let task = rootTask.withLock { task -> Task<Void, Never>? in
@@ -294,6 +304,10 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     override func wake() {
         statsRecorder.noteWake()
+#if canImport(Turn)
+        // The device may have woken on a different network than it slept on.
+        turnAutoPilot.noteNetworkChange()
+#endif
         Task { await tunnelStack.handleWake() }
     }
 
@@ -319,6 +333,10 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) async {
         DNSResolver.shared.flush()
+#if canImport(Turn)
+        // Whatever the last probe concluded was about the *previous* network.
+        turnAutoPilot.noteNetworkChange()
+#endif
 
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
