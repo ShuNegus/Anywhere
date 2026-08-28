@@ -103,6 +103,7 @@
 				Models/TurnMetadata.swift,
 				Models/TurnMode.swift,
 				Networking/ConnectionMetrics.swift,
+				Networking/ConnectivityProbe.swift,
 				Networking/DNSMessage.swift,
 				Networking/DNSResolver.swift,
 				Networking/DNSUpstreamClient.swift,
