@@ -61,7 +61,7 @@ final class TurnCaptchaMonitor {
 
     private func loop() async {
         while !Task.isCancelled {
-            if AWCore.getTurnFeatureEnabled(), AWCore.getTurnEnabled() {
+            if AWCore.getTurnFeatureEnabled(), AWCore.getTurnMode() != .off {
                 if await TurnCaptcha.probe() {
                     captchaWaiting = true
                     if !suppressed { showCaptcha = true }

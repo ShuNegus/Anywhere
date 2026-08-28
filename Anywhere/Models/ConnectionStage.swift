@@ -148,7 +148,8 @@ extension ConnectionStage {
     ///
     /// - Parameters:
     ///   - status: `VPNViewModel.vpnStatus`.
-    ///   - turnEnabled: `AWCore.getTurnFeatureEnabled() && AWCore.getTurnEnabled()`.
+    ///   - turnEnabled: TURN участвует в этом подключении — фича включена и режим не `.off`
+    ///     (в режиме `.auto` — по факту решения автопилота).
     ///   - turnPhase: фаза от расширения; `nil`, пока ядро её не отдаёт.
     ///   - captchaPending: `TurnCaptchaMonitor.shared.showCaptcha`.
     ///   - vpnProfileUp: профиль поднят, идёт установка соединения.

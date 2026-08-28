@@ -36,7 +36,7 @@ struct HomeView: View {
 
     private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
 
-    private var turnOn: Bool { settings.turnFeatureEnabled && settings.turnEnabled }
+    private var turnOn: Bool { settings.turnFeatureEnabled && settings.turnMode != .off }
 
     /// Stage for the connection graph, driven by the phase the vk-turn core reports.
     /// The captcha monitor stays in as an independent signal: it fires the moment the
