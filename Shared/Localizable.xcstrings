@@ -18049,6 +18049,54 @@
         }
       }
     },
+    "turn.auto.status.direct" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Direct"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сейчас: напрямую"
+          }
+        }
+      }
+    },
+    "turn.auto.status.probing" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking\u2026"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Определяется\u2026"
+          }
+        }
+      }
+    },
+    "turn.auto.status.turn" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Using TURN"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сейчас: через TURN"
+          }
+        }
+      }
+    },
     "turn.captcha.notification.body" : {
       "localizations" : {
         "en" : {
@@ -18077,6 +18125,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Требуется капча"
+          }
+        }
+      }
+    },
+    "turn.mode.auto" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Auto"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Авто"
+          }
+        }
+      }
+    },
+    "turn.mode.off" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disabled"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выключен"
+          }
+        }
+      }
+    },
+    "turn.mode.on" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enabled"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включён"
           }
         }
       }
@@ -19261,6 +19357,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "VPN 错误"
+          }
+        }
+      }
+    },
+    "vpn.error.noInternet" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No internet connection. Check your network and try again."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет подключения к интернету. Проверьте сеть и попробуйте снова."
           }
         }
       }
