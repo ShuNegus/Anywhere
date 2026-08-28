@@ -134,6 +134,7 @@
 				Networking/Protocols/Core/TransportReclaim.swift,
 				Networking/Protocols/Core/TunneledTransport.swift,
 				Networking/Protocols/Core/UDPFraming.swift,
+				Networking/Protocols/Turn/TurnAutoState.swift,
 				Networking/Protocols/Turn/TurnCaptcha.swift,
 				Networking/Protocols/Turn/TurnDialer.swift,
 				Networking/Protocols/Turn/TurnDialerRegistry.swift,

@@ -30,11 +30,15 @@ nonisolated final class TurnDialerRegistry: Sendable {
 
     private init() {}
 
-    /// Whether TURN should be used at all right now.
+    /// Whether TURN should be used at all right now. In `.auto` this follows the
+    /// autopilot's verdict, so flows go direct until a probe says the network is censored.
     static var isActive: Bool {
-        AWCore.getTurnFeatureEnabled()
-            && AWCore.getTurnMode() != .off
-            && !effectiveVKLink().isEmpty
+        guard AWCore.getTurnFeatureEnabled(), !effectiveVKLink().isEmpty else { return false }
+        switch AWCore.getTurnMode() {
+        case .off: return false
+        case .on: return true
+        case .auto: return TurnAutoState.shared.decision == .turn
+        }
     }
 
     /// The VK Calls link to dial with: the user's own entry wins, otherwise the one the
