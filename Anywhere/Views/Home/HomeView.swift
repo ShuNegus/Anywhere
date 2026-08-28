@@ -34,7 +34,7 @@ struct HomeView: View {
         viewModel.vpnStatus == .connected
     }
 
-    private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
+    private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning || viewModel.isPreflighting }
 
     private var turnOn: Bool { settings.turnFeatureEnabled && settings.turnMode != .off }
 
