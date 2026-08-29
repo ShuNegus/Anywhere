@@ -140,3 +140,19 @@ nonisolated enum ConnectivityProbe {
         return HostResult(host: host, reachable: ok, elapsedMs: millis)
     }
 }
+
+// MARK: - Pre-flight hand-off
+
+nonisolated extension AWCore {
+
+    /// Records what the app saw right before it asked for the tunnel.
+    static func setPreflightVerdict(_ verdict: ConnectivityVerdict) {
+        setPreflightVerdictRaw(verdict.rawValue)
+    }
+
+    /// The app's pre-flight verdict if it is recent enough to still be about this
+    /// network, `nil` otherwise.
+    static func getRecentPreflightVerdict(maxAge: TimeInterval) -> ConnectivityVerdict? {
+        getRecentPreflightVerdictRaw(maxAge: maxAge).flatMap(ConnectivityVerdict.init(rawValue:))
+    }
+}

@@ -94,6 +94,11 @@ nonisolated final class TurnAutoPilot: Sendable {
     /// Gap between those confirmations — long enough for a transient outage to pass,
     /// short enough that a genuinely censored network is caught within a minute.
     private static let confirmationDelay: Duration = .seconds(12)
+    /// How old the app's pre-flight verdict may be and still describe this network.
+    private static let preflightMaxAge: TimeInterval = 30
+    /// Gap before the one re-check that settles a first probe contradicting the
+    /// pre-flight. Short: flows are still waiting on the decision.
+    private static let crossCheckDelay: Duration = .milliseconds(2500)
 
     private struct State {
         var probe: Task<Void, Never>?
@@ -107,6 +112,9 @@ nonisolated final class TurnAutoPilot: Sendable {
         /// Whether the probe now being scheduled follows a real network change; carried
         /// through so the decision log can say why the probe ran.
         var fingerprintChanged = false
+        /// Whether the session's first `blocked` verdict has already been re-checked
+        /// against the app's pre-flight. One re-check per session, never more.
+        var didCrossCheckPreflight = false
     }
 
     private let state = Mutex(State())
@@ -128,6 +136,7 @@ nonisolated final class TurnAutoPilot: Sendable {
                 state.lastFingerprint = nil
                 state.blockedStreak = 0
                 state.fingerprintChanged = false
+                state.didCrossCheckPreflight = false
             }
             return (state.probe, state.pending)
         }
@@ -203,6 +212,19 @@ nonisolated final class TurnAutoPilot: Sendable {
         state.withLock { $0.generation == generation }
     }
 
+    /// True when the app probed this very network a moment ago and found it open. The
+    /// two answers cannot both be right, and the cheap one to get wrong is ours: a
+    /// single lost handshake here would move the whole session onto the relay. Consumes
+    /// the allowance, so the re-check decides for itself.
+    private func shouldCrossCheckAgainstPreflight() -> Bool {
+        guard AWCore.getRecentPreflightVerdict(maxAge: Self.preflightMaxAge) == .open else { return false }
+        return state.withLock { state -> Bool in
+            guard !state.didCrossCheckPreflight else { return false }
+            state.didCrossCheckPreflight = true
+            return true
+        }
+    }
+
     private func probe() async {
         guard isEngaged else { return }
         let previous = TurnAutoState.shared.decision
@@ -220,8 +242,14 @@ nonisolated final class TurnAutoPilot: Sendable {
 
         case .blocked:
             // Only a *switch* rebuilds the outbound state; the first probe of a session
-            // has no live direct connections to tear down.
+            // has no live direct connections to tear down, so it normally decides on the
+            // spot — flows wait at most three seconds for it.
             guard previous == .direct else {
+                if shouldCrossCheckAgainstPreflight() {
+                    logger.info("[TURN auto] first probe says blocked but the app's pre-flight said open — re-checking before committing")
+                    schedule(after: Self.crossCheckDelay)
+                    return
+                }
                 TurnAutoState.shared.setDecision(.turn)
                 return
             }
