@@ -310,8 +310,9 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     override func wake() {
         statsRecorder.noteWake()
 #if canImport(Turn)
-        // The device may have woken on a different network than it slept on.
-        turnAutoPilot.noteNetworkChange()
+        // The device may have woken on a different network than it slept on. No path in
+        // hand here, so the auto pilot only re-probes if it has nothing settled.
+        turnAutoPilot.noteNetworkChange(fingerprint: nil)
 #endif
         Task { await tunnelStack.handleWake() }
     }
@@ -337,21 +338,27 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     // MARK: - Path Monitoring
 
     private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) async {
+        // Stale answers are about the previous network; flushed before anything probes.
         DNSResolver.shared.flush()
-#if canImport(Turn)
-        // Whatever the last probe concluded was about the *previous* network.
-        turnAutoPilot.noteNetworkChange()
-#endif
 
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
         let isCellular = primaryType == .cellular
 #if os(iOS)
         if isWiFi {
+            // The SSID is what tells one Wi-Fi from another, so the auto pilot is told
+            // only after it has been read — an unnamed fingerprint would compare unequal
+            // against the named one and force a needless probe.
             let ssid = await pathMonitorBridge.currentWiFiSSID()
+#if canImport(Turn)
+            turnAutoPilot.noteNetworkChange(fingerprint: NetworkFingerprint(path: path, ssid: ssid))
+#endif
             await tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: ssid)
             return
         }
+#endif
+#if canImport(Turn)
+        turnAutoPilot.noteNetworkChange(fingerprint: NetworkFingerprint(path: path, ssid: nil))
 #endif
         await tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
     }
