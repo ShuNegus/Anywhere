@@ -93,7 +93,7 @@ nonisolated final class TurnAutoPilot: Sendable {
     private func probe() async {
         guard isEngaged else { return }
         let previous = TurnAutoState.shared.decision
-        let verdict = await ConnectivityProbe.classify()
+        let verdict = await ConnectivityProbe.classify(profile: .background)
         guard isEngaged else { return }
 
         switch verdict {

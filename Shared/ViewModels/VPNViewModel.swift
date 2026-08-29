@@ -516,7 +516,7 @@ class VPNViewModel {
             // dead network beats a tunnel that silently carries nothing.
             if AWCore.getTurnFeatureEnabled(), AWCore.getTurnMode() == .auto {
                 isPreflighting = true
-                let verdict = await ConnectivityProbe.classify()
+                let verdict = await ConnectivityProbe.classify(profile: .preflight)
                 isPreflighting = false
                 if verdict == .offline {
                     startError = String(

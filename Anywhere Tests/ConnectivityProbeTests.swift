@@ -25,4 +25,20 @@ struct ConnectivityProbeTests {
     @Test func nothingReachableIsOffline() {
         #expect(ConnectivityProbe.verdict(homeReachable: false, openReachable: false) == .offline)
     }
+
+    /// One flaky handshake must not be able to call an ordinary network censored, so the
+    /// open side is probed against several independent hosts.
+    @Test func severalOpenHostsAreProbed() {
+        #expect(ConnectivityProbe.openHosts.count >= 3)
+        #expect(Set(ConnectivityProbe.openHosts).count == ConnectivityProbe.openHosts.count)
+        #expect(Set(ConnectivityProbe.openHosts).isDisjoint(with: Set(ConnectivityProbe.homeHosts)))
+    }
+
+    /// The user waits on the pre-flight, nobody waits on the background probe — so the
+    /// background one buys accuracy with patience.
+    @Test func backgroundProbeIsMorePatientThanPreflight() {
+        #expect(ProbeProfile.preflight.timeout == .seconds(2))
+        #expect(ProbeProfile.background.timeout == .seconds(5))
+        #expect(ProbeProfile.background.timeout > ProbeProfile.preflight.timeout)
+    }
 }
