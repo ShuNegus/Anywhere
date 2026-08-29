@@ -1666,6 +1666,7 @@
       }
     },
     "Add a Configuration" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -1922,6 +1923,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "添加配置"
+          }
+        }
+      }
+    },
+    "Add or refresh a subscription that advertises TURN relays." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add or refresh a subscription that advertises TURN relays."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавьте или обновите подписку, в которой есть TURN-реле."
           }
         }
       }
@@ -2295,9 +2312,6 @@
       "shouldTranslate" : false
     },
     "AES-128-GCM" : {
-      "shouldTranslate" : false
-    },
-    "AES-256-GCM" : {
       "shouldTranslate" : false
     },
     "All trademarks, service marks, and company names are the property of their respective owners." : {
@@ -3149,6 +3163,7 @@
       }
     },
     "Automatically reconnect VPN when it is disconnected." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -3409,12 +3424,6 @@
       }
     },
     "Base64" : {
-      "shouldTranslate" : false
-    },
-    "BLAKE3-AES-128-GCM" : {
-      "shouldTranslate" : false
-    },
-    "BLAKE3-AES-256-GCM" : {
       "shouldTranslate" : false
     },
     "Block ads and trackers at the network level for a cleaner browsing experience." : {
@@ -3989,6 +3998,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "取消"
+          }
+        }
+      }
+    },
+    "Captcha" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Captcha"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Капча"
           }
         }
       }
@@ -4774,6 +4799,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "国家分流"
+          }
+        }
+      }
+    },
+    "Counts appear once the VPN is connected and a relay is in use." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Counts appear once the VPN is connected and a relay is in use."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Счётчики появятся, когда VPN подключится и заработает реле."
           }
         }
       }
@@ -7758,6 +7799,7 @@
       }
     },
     "graph.a11y.stage" : {
+      "comment" : "VoiceOver-описание графа подключения",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7774,6 +7816,7 @@
       }
     },
     "graph.node.captcha" : {
+      "comment" : "Узел графа: капча VK",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7790,6 +7833,7 @@
       }
     },
     "graph.node.connect" : {
+      "comment" : "Узел графа: старт подключения",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7806,6 +7850,7 @@
       }
     },
     "graph.node.connected" : {
+      "comment" : "Узел графа: соединение установлено",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7822,6 +7867,7 @@
       }
     },
     "graph.node.tunnelSetup" : {
+      "comment" : "Узел графа: поднятие TURN-туннеля",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7838,6 +7884,7 @@
       }
     },
     "graph.node.vkAccess" : {
+      "comment" : "Узел графа: получение VK-креды для TURN",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7854,6 +7901,7 @@
       }
     },
     "graph.node.vpnSetup" : {
+      "comment" : "Узел графа: поднятие VPN-профиля",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -8459,6 +8507,22 @@
     },
     "HTTPS" : {
       "shouldTranslate" : false
+    },
+    "https://vk.com/call/join/…" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "https://vk.com/call/join/…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "https://vk.com/call/join/…"
+          }
+        }
+      }
     },
     "HTTPUpgrade" : {
       "shouldTranslate" : false
@@ -9738,6 +9802,22 @@
         }
       }
     },
+    "Live" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Live"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сейчас"
+          }
+        }
+      }
+    },
     "Loading…" : {
       "localizations" : {
         "ar" : {
@@ -10321,6 +10401,7 @@
       }
     },
     "Move Down" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -10373,6 +10454,7 @@
       }
     },
     "Move Up" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -10847,6 +10929,22 @@
         }
       }
     },
+    "No link was delivered with your subscription. Paste one here — TURN stays inactive without it." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No link was delivered with your subscription. Paste one here — TURN stays inactive without it."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подписка не принесла ссылку. Вставьте её здесь — без неё TURN не заработает."
+          }
+        }
+      }
+    },
     "No previous purchase found to restore." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -11160,6 +11258,54 @@
         }
       }
     },
+    "No TURN relay is available for %@." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No TURN relay is available for %@."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Для %@ нет доступного TURN-реле."
+          }
+        }
+      }
+    },
+    "No TURN Servers" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No TURN Servers"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет TURN-серверов"
+          }
+        }
+      }
+    },
+    "No TURN session could be established." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No TURN session could be established."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось установить TURN-сессию."
+          }
+        }
+      }
+    },
     "No valid configurations found in subscription." : {
       "localizations" : {
         "ar" : {
@@ -11208,6 +11354,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "订阅中未找到有效的配置。"
+          }
+        }
+      }
+    },
+    "No VK Calls link is configured for TURN." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No VK Calls link is configured for TURN."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Для TURN не указана ссылка VK Calls."
           }
         }
       }
@@ -11474,6 +11636,7 @@
       }
     },
     "Off" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -11578,6 +11741,7 @@
       }
     },
     "On" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -11625,6 +11789,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "开启"
+          }
+        }
+      }
+    },
+    "Only servers your subscription marks as supported are tunnelled; the rest connect directly." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Only servers your subscription marks as supported are tunnelled; the rest connect directly."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Через туннель идут только серверы, отмеченные в подписке как поддерживаемые; остальные подключаются напрямую."
           }
         }
       }
@@ -11730,6 +11910,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "开源库"
+          }
+        }
+      }
+    },
+    "Open Streams" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Streams"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Открытые потоки"
           }
         }
       }
@@ -12008,6 +12204,38 @@
     "Path Root" : {
       "comment" : "Path Root for Sudoku protocol HTTP Mask feature",
       "shouldTranslate" : false
+    },
+    "Peers" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Peers"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пиры"
+          }
+        }
+      }
+    },
+    "Per relay: sessions / open streams." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Per relay: sessions / open streams."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По каждому реле: сессии / открытые потоки."
+          }
+        }
+      }
     },
     "Permission denied" : {
       "localizations" : {
@@ -12526,6 +12754,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "隐私"
+          }
+        }
+      }
+    },
+    "Pro Mode" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pro Mode"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Режим Pro"
           }
         }
       }
@@ -13738,10 +13982,27 @@
         }
       }
     },
+    "Relay" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Relay"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Реле"
+          }
+        }
+      }
+    },
     "Remnawave HWID" : {
       "shouldTranslate" : false
     },
     "Remove" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -14675,6 +14936,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "根证书"
+          }
+        }
+      }
+    },
+    "Route" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Route"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Маршрут"
           }
         }
       }
@@ -15773,6 +16050,7 @@
       }
     },
     "server.list.header" : {
+      "comment" : "Заголовок списка серверов",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -15859,6 +16137,22 @@
     "Service Name" : {
       "comment" : "Service Name for VLESS protocol gRPC transport",
       "shouldTranslate" : false
+    },
+    "Sessions" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sessions"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сессии"
+          }
+        }
+      }
     },
     "Settings" : {
       "localizations" : {
@@ -16082,6 +16376,22 @@
     "SOCKS5" : {
       "shouldTranslate" : false
     },
+    "Solve Captcha" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Solve Captcha"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Решить капчу"
+          }
+        }
+      }
+    },
     "SSID" : {
       "shouldTranslate" : false
     },
@@ -16139,6 +16449,7 @@
       }
     },
     "stats.sheet.title" : {
+      "comment" : "Заголовок шита со статистикой подключения",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -16580,6 +16891,22 @@
         }
       }
     },
+    "Supported" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Supported"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поддерживается"
+          }
+        }
+      }
+    },
     "Supports proxy, subscription and Clash links" : {
       "localizations" : {
         "ar" : {
@@ -16737,6 +17064,7 @@
       }
     },
     "Sync your data across your devices with iCloud." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -16950,6 +17278,7 @@
       }
     },
     "Test All" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -17158,6 +17487,38 @@
         }
       }
     },
+    "The TURN stream is closed." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The TURN stream is closed."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поток TURN закрыт."
+          }
+        }
+      }
+    },
+    "The TURN transport is not available in this build." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The TURN transport is not available in this build."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Транспорт TURN недоступен в этой сборке."
+          }
+        }
+      }
+    },
     "Theme" : {
       "localizations" : {
         "ar" : {
@@ -17206,6 +17567,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "主题"
+          }
+        }
+      }
+    },
+    "This link overrides the one delivered with your subscription." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This link overrides the one delivered with your subscription."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Эта ссылка заменяет ту, что пришла с подпиской."
           }
         }
       }
@@ -18049,6 +18426,38 @@
         }
       }
     },
+    "Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пропускает трафик прокси через реле VK Calls, прежде чем он дойдёт до сервера, — со стороны соединение выглядит как обычный звонок. В режиме «Авто» сеть сначала проверяется, и туннель включается, только если прямой путь заблокирован."
+          }
+        }
+      }
+    },
+    "TURN" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TURN"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TURN"
+          }
+        }
+      }
+    },
     "turn.auto.status.direct" : {
       "localizations" : {
         "en" : {
@@ -18070,13 +18479,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Checking\u2026"
+            "value" : "Checking…"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Определяется\u2026"
+            "value" : "Определяется…"
           }
         }
       }
@@ -18437,6 +18846,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "解锁 Voyager — %@"
+          }
+        }
+      }
+    },
+    "Unsupported" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unsupported"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не поддерживается"
           }
         }
       }
@@ -19020,6 +19445,22 @@
         }
       }
     },
+    "Using the link from your subscription: %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Using the link from your subscription: %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется ссылка из подписки: %@"
+          }
+        }
+      }
+    },
     "Utilities" : {
       "localizations" : {
         "ar" : {
@@ -19130,6 +19571,38 @@
     },
     "Vision" : {
       "shouldTranslate" : false
+    },
+    "VK Calls Link" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VK Calls Link"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ссылка VK Calls"
+          }
+        }
+      }
+    },
+    "VK sometimes asks for a captcha before the relay will accept a call. The prompt opens on its own when one is waiting; use this to reopen it." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VK sometimes asks for a captcha before the relay will accept a call. The prompt opens on its own when one is waiting; use this to reopen it."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Иногда VK просит пройти капчу, прежде чем реле примет звонок. Окно открывается само, когда капча ждёт; эта кнопка открывает его заново."
+          }
+        }
+      }
     },
     "VLESS" : {
       "shouldTranslate" : false
