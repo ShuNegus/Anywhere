@@ -232,13 +232,14 @@ nonisolated final class TurnAutoPilot: Sendable {
             defer { state.fingerprintChanged = false }
             return state.fingerprintChanged
         }
-        let verdict = await ConnectivityProbe.classify(profile: .background)
+        let (verdict, results) = await ConnectivityProbe.classifyDetailed(profile: .background)
         guard isEngaged else { return }
 
         switch verdict {
         case .open:
             state.withLock { $0.blockedStreak = 0 }
             TurnAutoState.shared.setDecision(.direct)
+            log(verdict, results, changed: fingerprintChanged, streak: nil, decision: "direct")
 
         case .blocked:
             // Only a *switch* rebuilds the outbound state; the first probe of a session
@@ -246,11 +247,14 @@ nonisolated final class TurnAutoPilot: Sendable {
             // spot — flows wait at most three seconds for it.
             guard previous == .direct else {
                 if shouldCrossCheckAgainstPreflight() {
-                    logger.info("[TURN auto] first probe says blocked but the app's pre-flight said open — re-checking before committing")
+                    // The app probed this same network a moment ago and found it open.
+                    log(verdict, results, changed: fingerprintChanged, streak: nil,
+                        decision: "undecided(contradicts pre-flight, re-checking in \(Self.crossCheckDelay))")
                     schedule(after: Self.crossCheckDelay)
                     return
                 }
                 TurnAutoState.shared.setDecision(.turn)
+                log(verdict, results, changed: fingerprintChanged, streak: nil, decision: "turn(first probe)")
                 return
             }
             let streak = state.withLock { state -> Int in
@@ -258,12 +262,13 @@ nonisolated final class TurnAutoPilot: Sendable {
                 return state.blockedStreak
             }
             guard streak >= Self.blockedConfirmations else {
-                logger.info("[TURN auto] blocked verdict \(streak)/\(Self.blockedConfirmations) on a working network (changed=\(fingerprintChanged)), keeping direct and re-checking")
+                log(verdict, results, changed: fingerprintChanged, streak: streak, decision: "direct(kept)")
                 schedule(after: Self.confirmationDelay)
                 return
             }
-            logger.info("[TURN auto] network became censored, moving flows onto the relay")
             TurnAutoState.shared.setDecision(.turn)
+            log(verdict, results, changed: fingerprintChanged, streak: streak,
+                decision: "turn(switch, moving flows onto the relay)")
             onSwitchToTurn.withLock { $0 }?()
 
         case .offline:
@@ -273,9 +278,28 @@ nonisolated final class TurnAutoPilot: Sendable {
             guard previous == .direct || previous == .turn else {
                 // No route to keep: release the flows rather than hold them hostage.
                 TurnAutoState.shared.setDecision(.offline)
+                log(verdict, results, changed: fingerprintChanged, streak: nil, decision: "offline")
                 return
             }
-            logger.info("[TURN auto] probe indeterminate (nothing answered), keeping \(previous.rawValue)")
+            log(verdict, results, changed: fingerprintChanged, streak: nil,
+                decision: "\(previous.rawValue)(kept, indeterminate)")
         }
+    }
+
+    /// One line per decision, carrying the evidence behind it: without the per-host
+    /// timings a wrong switch on someone's home Wi-Fi is unexplainable after the fact.
+    /// `info` so it survives into release builds and the in-app log viewer.
+    private func log(
+        _ verdict: ConnectivityVerdict,
+        _ results: [HostResult],
+        changed: Bool,
+        streak: Int?,
+        decision: String
+    ) {
+        let hosts = results
+            .map { "\($0.host) \($0.reachable ? "✓" : "✗")\($0.elapsedMs)ms" }
+            .joined(separator: ", ")
+        let streakText = streak.map { " streak=\($0)/\(Self.blockedConfirmations)" } ?? ""
+        logger.info("[TURN auto] verdict=\(verdict.rawValue) hosts=[\(hosts)] fingerprintChanged=\(changed)\(streakText) decision=\(decision)")
     }
 }
