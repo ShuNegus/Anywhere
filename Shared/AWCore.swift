@@ -111,6 +111,8 @@ nonisolated final class AWCore {
         static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
         static let tunnelIncludedRoutes = "tunnelIncludedRoutes"
         static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
+        static let preflightVerdict = "preflightVerdict"
+        static let preflightVerdictAt = "preflightVerdictAt"
         static let turnCaptchaManual = "turnCaptchaManual"
         static let turnEnabled = "turnEnabled"
         static let turnFeatureEnabled = "turnFeatureEnabled"
@@ -767,6 +769,28 @@ nonisolated final class AWCore {
 
     static func setTurnPeers(_ value: Int) {
         userDefaults.set(TurnLimits.clampPeers(value), forKey: UserDefaultsKey.turnPeers)
+    }
+
+    /// The verdict of the last reachability probe the app ran before starting the
+    /// tunnel, handed across the app-group so the extension can cross-check its own
+    /// first probe against it.
+    ///
+    /// Stored as a raw string plus a timestamp: `AWCore` is built into targets that do
+    /// not carry the networking code, so the typed wrapper lives beside the verdict
+    /// itself in `ConnectivityProbe.swift`.
+    static func setPreflightVerdictRaw(_ raw: String) {
+        userDefaults.set(raw, forKey: UserDefaultsKey.preflightVerdict)
+        userDefaults.set(Date.now.timeIntervalSince1970, forKey: UserDefaultsKey.preflightVerdictAt)
+    }
+
+    /// The pre-flight verdict, or `nil` if there was none or it is older than `maxAge` —
+    /// a tunnel started on-demand, from the widget or by a reconnect has no fresh one.
+    static func getRecentPreflightVerdictRaw(maxAge: TimeInterval) -> String? {
+        guard let raw = userDefaults.string(forKey: UserDefaultsKey.preflightVerdict) else { return nil }
+        let recordedAt = userDefaults.double(forKey: UserDefaultsKey.preflightVerdictAt)
+        let age = Date.now.timeIntervalSince1970 - recordedAt
+        guard recordedAt > 0, age >= 0, age <= maxAge else { return nil }
+        return raw
     }
 
     /// Solve VK captchas by hand in a web view instead of using the automatic solver.

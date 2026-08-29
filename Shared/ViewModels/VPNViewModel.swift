@@ -518,6 +518,9 @@ class VPNViewModel {
                 isPreflighting = true
                 let verdict = await ConnectivityProbe.classify(profile: .preflight)
                 isPreflighting = false
+                // Handed to the extension: its own first probe, a second or two later,
+                // has this to check itself against before it commits to the relay.
+                AWCore.setPreflightVerdict(verdict)
                 if verdict == .offline {
                     startError = String(
                         localized: "vpn.error.noInternet",
