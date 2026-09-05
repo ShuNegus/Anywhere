@@ -36,28 +36,19 @@ struct HomeView: View {
 
     private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning || viewModel.isPreflighting }
 
-    /// Whether the graph should draw the TURN branch. In auto mode there is nothing to
-    /// draw until the extension actually starts building the relay, so the branch stays
-    /// grey until a phase arrives.
-    private var turnOn: Bool {
-        guard settings.turnFeatureEnabled else { return false }
-        switch settings.turnMode {
-        case .off: return false
-        case .on: return true
-        case .auto: return viewModel.turnPhase != nil
-        }
-    }
-
-    /// Stage for the connection graph, driven by the phase the vk-turn core reports.
-    /// The captcha monitor stays in as an independent signal: it fires the moment the
-    /// sheet comes up, ahead of the next phase poll.
+    /// Stage for the connection graph. The route comes from the setting (in `.auto`,
+    /// from the probe's verdict); the captcha monitor stays in as an independent signal
+    /// because it fires the moment the sheet comes up, ahead of the next phase poll.
     private var stage: ConnectionStage {
         ConnectionStage.resolve(
             status: viewModel.status,
-            turnEnabled: turnOn,
+            isPreflighting: viewModel.isPreflighting,
+            turnMode: settings.turnFeatureEnabled ? settings.turnMode : nil,
+            autoDecision: viewModel.turnAutoDecisionValue,
             turnPhase: viewModel.turnPhase,
             captchaPending: captchaMonitor.captchaWaiting,
-            vpnProfileUp: viewModel.isManagerReady && viewModel.vpnStatus == .connecting
+            captchaSeen: viewModel.captchaSeenInSession,
+            failure: viewModel.connectionFailure
         )
     }
 
