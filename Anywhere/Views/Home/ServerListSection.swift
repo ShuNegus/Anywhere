@@ -34,6 +34,15 @@ struct ServerListSection: View {
     private static let tickWidth: CGFloat = 20
     /// rowPadding + flagWidth + itemSpacing — разделитель начинается там же, где название.
     private static let separatorInset: CGFloat = 52
+    /// Насколько строка уезжает, открывая кнопку удаления.
+    private static let swipeWidth: CGFloat = 72
+    /// Протяг дальше этого — удаление без второго тапа.
+    private static let swipeCommit: CGFloat = 160
+
+    /// Открытая свайпом секция — одновременно открыта не больше одной.
+    @State private var swipedSection: UUID?
+    @State private var draggingSection: UUID?
+    @State private var dragTranslation: CGFloat = 0
 
     var body: some View {
         if sections.isEmpty {
@@ -49,7 +58,7 @@ struct ServerListSection: View {
 
             ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                 if let title = section.header {
-                    subscriptionHeader(title, id: section.id)
+                    swipeableSubscriptionHeader(title, id: section.id)
                         .padding(.top, index == 0 ? 0 : 8)
                 }
                 card(section)
@@ -139,9 +148,76 @@ struct ServerListSection: View {
         .clipShape(.rect(cornerRadius: 16, style: .continuous))
     }
 
+    /// Свайп влево по заголовку подписки. `.swipeActions` тут недоступен — список
+    /// собран из `VStack`, а не из `List`, поэтому жест свой.
+    private func swipeableSubscriptionHeader(_ title: String, id: UUID) -> some View {
+        let offset = swipeOffset(for: id)
+        return ZStack(alignment: .trailing) {
+            Button {
+                commitDelete(id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: Self.swipeWidth, height: 32)
+                    .background(Color.red, in: .rect(cornerRadius: 8, style: .continuous))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(offset < -4 ? 1 : 0)
+            .accessibilityHidden(true)
+
+            // Пока строка уехала, своя корзина прячется — иначе две корзины подряд.
+            subscriptionHeader(title, id: id, showsTrash: offset > -4)
+                .offset(x: offset)
+        }
+        .animation(.easeOut(duration: 0.2), value: swipedSection)
+        // Simultaneous so a vertical flick still scrolls the page: the gesture only
+        // acts on drags that are clearly horizontal.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onChanged { value in
+                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                    draggingSection = id
+                    dragTranslation = value.translation.width
+                }
+                .onEnded { value in
+                    defer { draggingSection = nil; dragTranslation = 0 }
+                    guard draggingSection == id else { return }
+                    let total = swipeOffset(for: id)
+                    if total <= -Self.swipeCommit {
+                        commitDelete(id)
+                    } else if total <= -Self.swipeWidth / 2 {
+                        swipedSection = id
+                    } else {
+                        swipedSection = nil
+                    }
+                }
+        )
+        // A section list that changed under the open row leaves it hanging open.
+        .onChange(of: sections.map(\.id)) { _, _ in
+            swipedSection = nil
+            draggingSection = nil
+            dragTranslation = 0
+        }
+    }
+
+    private func swipeOffset(for id: UUID) -> CGFloat {
+        let base: CGFloat = swipedSection == id ? -Self.swipeWidth : 0
+        let live: CGFloat = draggingSection == id ? dragTranslation : 0
+        return min(0, max(-Self.swipeCommit, base + live))
+    }
+
+    private func commitDelete(_ id: UUID) {
+        swipedSection = nil
+        draggingSection = nil
+        dragTranslation = 0
+        onDeleteSubscription(id)
+    }
+
     /// Заголовок секции-подписки: имя слева, удаление справа.
     /// Корзина «плоская» — второстепенное действие рядом с двумя основными сверху.
-    private func subscriptionHeader(_ title: String, id: UUID) -> some View {
+    private func subscriptionHeader(_ title: String, id: UUID, showsTrash: Bool = true) -> some View {
         HStack(spacing: 0) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
@@ -161,6 +237,7 @@ struct ServerListSection: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .opacity(showsTrash ? 1 : 0)
             .accessibilityLabel(String(localized: "server.list.deleteSubscription", defaultValue: "Delete Subscription", comment: "Кнопка удаления подписки"))
         }
         .frame(height: 32)
