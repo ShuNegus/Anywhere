@@ -27,6 +27,8 @@ struct HomeView: View {
     @State private var showingStatsSheet = false
 
     @State private var captchaMonitor = TurnCaptchaMonitor.shared
+    /// Deleting a subscription is destructive, so it goes through a confirmation.
+    @State private var subscriptionPendingDeletion: Subscription?
 
     private var isLoading: Bool { !configStore.isLoaded }
 
@@ -87,6 +89,37 @@ struct HomeView: View {
         } message: {
             Text(viewModel.startError ?? "")
         }
+        .confirmationDialog(
+            subscriptionPendingDeletion.map {
+                String(
+                    localized: "server.list.delete.confirm.title",
+                    defaultValue: "Delete \u{201C}\($0.name)\u{201D}?",
+                    comment: "Заголовок подтверждения удаления подписки"
+                )
+            } ?? "",
+            isPresented: Binding(
+                get: { subscriptionPendingDeletion != nil },
+                set: { if !$0 { subscriptionPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: subscriptionPendingDeletion
+        ) { subscription in
+            Button("Delete", role: .destructive) {
+                subscriptionStore.delete(subscription, configurationStore: configStore)
+                subscriptionPendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) { subscriptionPendingDeletion = nil }
+        } message: { _ in
+            Text(String(
+                localized: "server.list.delete.confirm.message",
+                defaultValue: "Its servers will be removed from the list.",
+                comment: "Пояснение к подтверждению удаления подписки"
+            ))
+        }
+        // The sheet fires ahead of the next phase poll, so the latch lives here.
+        .onChange(of: captchaMonitor.captchaWaiting) { _, waiting in
+            if waiting { viewModel.noteCaptchaSeen() }
+        }
         .onChange(of: viewModel.isManagerReady, initial: true) { _, ready in
             guard ready, !connectionEffectsEnabled else { return }
             Task { @MainActor in connectionEffectsEnabled = true }
@@ -124,19 +157,59 @@ struct HomeView: View {
         .presentationDragIndicator(.visible)
     }
 
+    /// Vertical rhythm per SPEC.md §2: 44 top bar, 16, button + status, 28, graph, 24, list.
     private var connectionControls: some View {
-        // 80 was the old gap; the graph does not fit the first screen with it.
-        VStack(spacing: 32) {
+        VStack(spacing: 0) {
+            topBar
+
+            Spacer().frame(height: 16)
+
             VStack(spacing: 20) {
                 powerButton
                 statusLabel
             }
-            VStack(spacing: 20) {
-                ConnectionGraphView(stage: stage)
-                serverList
+            .opacity(configStore.hasConfigurations ? 1 : 0.4)
+
+            Spacer().frame(height: 28)
+
+            // Without a subscription there is nowhere to connect, so no graph either.
+            if configStore.hasConfigurations {
+                ConnectionGraphSection(stage: stage)
+                Spacer().frame(height: 24)
             }
+
+            serverList
         }
         .frame(maxWidth: Self.maxControlPaneWidth)
+    }
+
+    /// Adding a subscription lives up here because the list it would otherwise hang off
+    /// does not exist when there is nothing yet. The right slot is reserved.
+    private var topBar: some View {
+        HStack(spacing: 0) {
+            Button {
+                showingAddSheet = true
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(.white.opacity(0.12))
+                        .frame(width: 32, height: 32)
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "server.list.addSubscription", defaultValue: "Add Subscription", comment: "Кнопка добавления подписки"))
+
+            Spacer(minLength: 0)
+
+            Color.clear.frame(width: 44, height: 44)
+        }
+        .frame(height: 44)
+        .padding(.leading, -6)   // визуальный край круга совпадает с краем карточек
     }
 
     /// Fades the rows out under the tab bar instead of letting them cut off (SPEC.md §2).
@@ -168,17 +241,13 @@ struct HomeView: View {
             isTransitioning: isTransitioning,
             isLoading: isLoading,
             isDisabled: isLoading
-                || (viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations)
-                    && configStore.hasConfigurations),
+                || !configStore.hasConfigurations
+                || viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations),
             animatesChanges: connectionEffectsEnabled
         ) {
-            guard !isLoading else { return }
-            if configStore.hasConfigurations {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                    viewModel.toggleVPN()
-                }
-            } else {
-                showingAddSheet = true
+            guard !isLoading, configStore.hasConfigurations else { return }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
+                viewModel.toggleVPN()
             }
         }
     }
@@ -236,8 +305,9 @@ struct HomeView: View {
     @ViewBuilder
     private var serverList: some View {
         if !configStore.isLoaded {
+            // Never the empty state: on launch that would flash "No subscription".
             loadingCard
-        } else if !pickerSections.isEmpty {
+        } else {
             ServerListSection(
                 sections: pickerSections,
                 selectedId: selectedRowId,
@@ -250,6 +320,10 @@ struct HomeView: View {
                         chains: chainStore.chains,
                         configurations: configStore.configurations
                     )
+                },
+                onAddSubscription: { showingAddSheet = true },
+                onDeleteSubscription: { id in
+                    subscriptionPendingDeletion = subscriptionStore.subscriptions.first { $0.id == id }
                 }
             )
         }
@@ -270,7 +344,9 @@ struct HomeView: View {
             showingStatsSheet = true
         } label: {
             HStack(spacing: 4) {
-                Text(stage.statusText)
+                // A failed stage keeps the node red; the label goes back to the raw
+                // tunnel status so it does not claim "Connecting" forever.
+                Text(stage.isFailed ? viewModel.status.localizedText : stage.statusText)
                     .font(.headline)
                 if isConnected {
                     Image(systemName: "chevron.right")
