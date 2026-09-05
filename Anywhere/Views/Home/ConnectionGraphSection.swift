@@ -2,8 +2,8 @@
 //  ConnectionGraphSection.swift
 //  Anywhere
 //
-//  Оболочка над графом: разворачивает его на время подключения,
-//  сворачивает в покое и после подключения, тап переключает вручную.
+//  Оболочка над графом: развёрнут он или свёрнут — решает только пользователь.
+//  Состояние переживает смену этапа и перезапуск приложения.
 //  Спека: design for anywhere/SPEC.md, раздел 3.5.
 //
 
@@ -13,19 +13,14 @@ struct ConnectionGraphSection: View {
 
     let stage: ConnectionStage
 
-    /// Ручное переключение живёт до следующей смены этапа, потом снова автоматика.
-    @State private var manualExpanded: Bool?
-
-    /// Развёрнут, пока идёт подключение или пока висит ошибка — ровно тогда,
-    /// когда на граф смотрят.
-    private var isExpanded: Bool {
-        manualExpanded ?? (stage.isBusy || stage.isFailed)
-    }
+    /// Граф не разворачивается и не сворачивается сам: подключение, ошибка и
+    /// возврат в покой меняют только его содержимое, но не то, раскрыт ли он.
+    @AppStorage("connectionGraphExpanded") private var isExpanded = false
 
     var body: some View {
         Button {
             withAnimation(.easeInOut(duration: 0.35)) {
-                manualExpanded = !isExpanded
+                isExpanded.toggle()
             }
         } label: {
             if isExpanded {
@@ -44,8 +39,5 @@ struct ConnectionGraphSection: View {
             }
         }
         .buttonStyle(.plain)
-        .onChange(of: stage) { _, _ in
-            manualExpanded = nil
-        }
     }
 }
