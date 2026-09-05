@@ -7782,6 +7782,40 @@
         }
       }
     },
+    "graph.a11y.collapseHint" : {
+      "comment" : "VoiceOver-подсказка развёрнутого графа",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hide connection stages"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Скрыть этапы подключения"
+          }
+        }
+      }
+    },
+    "graph.a11y.expandHint" : {
+      "comment" : "VoiceOver-подсказка свёрнутого графа",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show connection stages"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Показать этапы подключения"
+          }
+        }
+      }
+    },
     "graph.a11y.idle" : {
       "localizations" : {
         "en" : {
@@ -7815,6 +7849,142 @@
         }
       }
     },
+    "graph.collapsed.direct" : {
+      "comment" : "Свёрнутый граф, обход не понадобился",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected Directly"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено напрямую"
+          }
+        }
+      }
+    },
+    "graph.collapsed.failed" : {
+      "comment" : "Свёрнутый граф, подключение встало",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Failed: %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ошибка: %@"
+          }
+        }
+      }
+    },
+    "graph.collapsed.idle" : {
+      "comment" : "Свёрнутый граф в покое",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connection Stages"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Этапы подключения"
+          }
+        }
+      }
+    },
+    "graph.collapsed.viaTurn" : {
+      "comment" : "Свёрнутый граф, шли через обход",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected via TURN"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено через обход"
+          }
+        }
+      }
+    },
+    "graph.error.captchaTimeout" : {
+      "comment" : "Ошибка графа: капча не решена",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The captcha was not solved in time."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Капча не была решена вовремя."
+          }
+        }
+      }
+    },
+    "graph.error.networkLost" : {
+      "comment" : "Ошибка графа: сеть пропала после старта",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The network became unreachable after the VPN started."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сеть стала недоступна после запуска VPN."
+          }
+        }
+      }
+    },
+    "graph.error.turnTimeout" : {
+      "comment" : "Ошибка графа: TURN не поднялся",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The TURN tunnel could not be opened. Traffic will use the direct route."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось открыть TURN-туннель. Трафик пойдёт напрямую."
+          }
+        }
+      }
+    },
+    "graph.error.vpnStart" : {
+      "comment" : "Ошибка графа: туннель не поднялся",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The VPN could not be started."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось запустить VPN."
+          }
+        }
+      }
+    },
     "graph.node.captcha" : {
       "comment" : "Узел графа: капча VK",
       "localizations" : {
@@ -7828,23 +7998,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Решение капчи"
-          }
-        }
-      }
-    },
-    "graph.node.connect" : {
-      "comment" : "Узел графа: старт подключения",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Connecting"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Подключение"
           }
         }
       }
@@ -7866,53 +8019,70 @@
         }
       }
     },
-    "graph.node.tunnelSetup" : {
-      "comment" : "Узел графа: поднятие TURN-туннеля",
+    "graph.node.networkCheck" : {
+      "comment" : "Узел графа: есть ли сеть",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tunnel Setup"
+            "value" : "Checking Network"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Настройка туннеля"
+            "value" : "Проверка сети"
           }
         }
       }
     },
-    "graph.node.vkAccess" : {
-      "comment" : "Узел графа: получение VK-креды для TURN",
+    "graph.node.turnTunnel" : {
+      "comment" : "Узел графа: обход через TURN",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VK Access"
+            "value" : "Opening TURN Tunnel"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Доступ к VK"
+            "value" : "Открытие TURN-туннеля"
           }
         }
       }
     },
-    "graph.node.vpnSetup" : {
-      "comment" : "Узел графа: поднятие VPN-профиля",
+    "graph.node.vpnConnect" : {
+      "comment" : "Узел графа: поднятие VPN",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VPN Setup"
+            "value" : "Connecting to VPN"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Настройка VPN"
+            "value" : "Подключение к VPN"
+          }
+        }
+      }
+    },
+    "graph.node.whitelistCheck" : {
+      "comment" : "Узел графа: проба на блокировку",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking Restrictions"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Проверка белых списков"
           }
         }
       }
@@ -16049,19 +16219,121 @@
         }
       }
     },
+    "server.list.addSubscription" : {
+      "comment" : "Кнопка добавления подписки",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add Subscription"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить подписку"
+          }
+        }
+      }
+    },
+    "server.list.delete.confirm.message" : {
+      "comment" : "Пояснение к подтверждению удаления подписки",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Its servers will be removed from the list."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Её серверы исчезнут из списка."
+          }
+        }
+      }
+    },
+    "server.list.delete.confirm.title" : {
+      "comment" : "Заголовок подтверждения удаления подписки",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete “%@”?"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Удалить «%@»?"
+          }
+        }
+      }
+    },
+    "server.list.deleteSubscription" : {
+      "comment" : "Кнопка удаления подписки",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete Subscription"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Удалить подписку"
+          }
+        }
+      }
+    },
+    "server.list.empty.body" : {
+      "comment" : "Пояснение пустого состояния",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add a subscription to see the server list"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавьте подписку, чтобы появился список серверов"
+          }
+        }
+      }
+    },
+    "server.list.empty.title" : {
+      "comment" : "Пустое состояние списка серверов",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No Subscription"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет подписки"
+          }
+        }
+      }
+    },
     "server.list.header" : {
       "comment" : "Заголовок списка серверов",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "SERVER"
+            "value" : "SERVERS"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "СЕРВЕР"
+            "value" : "СЕРВЕРЫ"
           }
         }
       }
