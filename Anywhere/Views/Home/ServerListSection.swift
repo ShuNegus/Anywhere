@@ -21,6 +21,10 @@ struct ServerListSection: View {
 
     let onSelect: (UUID) -> Void
     let onMeasure: () -> Void
+    let onAddSubscription: () -> Void
+    /// Вызывается с id секции-подписки. Секции без заголовка (одиночные конфиги,
+    /// цепочки) подписками не являются — у них корзина не показывается вовсе.
+    let onDeleteSubscription: (UUID) -> Void
 
     private static let rowHeight: CGFloat = 52
     private static let rowPadding: CGFloat = 16
@@ -32,12 +36,20 @@ struct ServerListSection: View {
     private static let separatorInset: CGFloat = 52
 
     var body: some View {
+        if sections.isEmpty {
+            emptyState
+        } else {
+            list
+        }
+    }
+
+    private var list: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
 
             ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                 if let title = section.header {
-                    sectionHeader(title)
+                    subscriptionHeader(title, id: section.id)
                         .padding(.top, index == 0 ? 0 : 8)
                 }
                 card(section)
@@ -49,12 +61,11 @@ struct ServerListSection: View {
 
     private var header: some View {
         HStack(spacing: 0) {
-            sectionHeader(String(localized: "server.list.header", defaultValue: "SERVER", comment: "Заголовок списка серверов"))
+            sectionHeader(String(localized: "server.list.header", defaultValue: "SERVERS", comment: "Заголовок списка серверов"))
             Spacer(minLength: 0)
             measureButton
         }
         .frame(height: 44)
-        .padding(.leading, 12)
         .padding(.trailing, -6)   // визуальный край круга совпадает с краем карточки
     }
 
@@ -87,6 +98,73 @@ struct ServerListSection: View {
         .opacity(isMeasuring ? 0.65 : 1)
         .disabled(isMeasuring)
         .accessibilityLabel(String(localized: "server.list.measurePing", defaultValue: "Measure server ping"))
+    }
+
+    // MARK: - Пустое состояние (SPEC.md §7)
+
+    /// Подписки нет — списка тоже. Кнопка «+» при этом остаётся в верхней панели экрана,
+    /// поэтому добавить подписку можно и отсюда, и оттуда.
+    private var emptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(.white.opacity(0.35))
+                .padding(.bottom, 4)
+
+            Text(String(localized: "server.list.empty.title", defaultValue: "No Subscription", comment: "Пустое состояние списка серверов"))
+                .font(.system(size: 17, weight: .semibold))
+
+            Text(String(localized: "server.list.empty.body", defaultValue: "Add a subscription to see the server list", comment: "Пояснение пустого состояния"))
+                .font(.system(size: 13))
+                .lineSpacing(2)
+                .foregroundStyle(.white.opacity(0.55))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 240)
+
+            Spacer().frame(height: 8)
+
+            Button(action: onAddSubscription) {
+                Text(String(localized: "server.list.addSubscription", defaultValue: "Add Subscription", comment: "Кнопка добавления подписки"))
+                    .font(.system(size: 15, weight: .semibold))
+                    .padding(.horizontal, 22)
+                    .frame(height: 44)
+                    .background(.white.opacity(0.20), in: .capsule)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .padding(.horizontal, 24)
+        .background(.primary.opacity(0.1))
+        .clipShape(.rect(cornerRadius: 16, style: .continuous))
+    }
+
+    /// Заголовок секции-подписки: имя слева, удаление справа.
+    /// Корзина «плоская» — второстепенное действие рядом с двумя основными сверху.
+    private func subscriptionHeader(_ title: String, id: UUID) -> some View {
+        HStack(spacing: 0) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+                .padding(.leading, 12)
+
+            Spacer(minLength: 8)
+
+            Button {
+                onDeleteSubscription(id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "server.list.deleteSubscription", defaultValue: "Delete Subscription", comment: "Кнопка удаления подписки"))
+        }
+        .frame(height: 32)
+        .padding(.trailing, -10)
     }
 
     private var gaugeIcon: Image {
@@ -217,10 +295,21 @@ struct ServerListSection: View {
 }
 
 #if DEBUG
+#Preview("Пустое состояние") {
+    ServerListSection(
+        sections: [], selectedId: nil, latencies: [:], isMeasuring: false,
+        onSelect: { _ in }, onMeasure: {}, onAddSubscription: {}, onDeleteSubscription: { _ in }
+    )
+    .padding(.horizontal, 20)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    .background(Color(red: 0.086, green: 0.090, blue: 0.098))
+    .colorScheme(.dark)
+}
+
 #Preview("Список серверов") {
     let section = PickerSection(
         id: UUID(),
-        header: nil,
+        header: "Bublik VPN",
         items: [
             PickerItem(id: UUID(), name: "🇷🇺 Russia"),
             PickerItem(id: UUID(), name: "🇺🇸 USA 1"),
@@ -238,7 +327,9 @@ struct ServerListSection: View {
         ],
         isMeasuring: true,
         onSelect: { _ in },
-        onMeasure: {}
+        onMeasure: {},
+        onAddSubscription: {},
+        onDeleteSubscription: { _ in }
     )
     .padding(.horizontal, 20)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
