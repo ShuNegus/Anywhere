@@ -40,10 +40,28 @@ class VPNViewModel {
     /// `TurnAutoState.Decision` raw value from the extension while the mode is `.auto`.
     private(set) var turnAutoDecision: String? = nil
     @ObservationIgnored private var turnPhaseTask: Task<Void, Never>?
+    /// The captcha really came up during this session, so the graph shows the step as
+    /// taken rather than skipped.
+    private(set) var captchaSeenInSession = false
+    /// The step the connection died on. Deliberately outlives the `.disconnected` that
+    /// follows a failure — the red node has to stay on screen.
+    private(set) var connectionFailure: ConnectionFailure?
     var startError: String?
     /// A reachability probe is running ahead of the tunnel; the button stays busy so a
     /// second tap cannot start the VPN behind the check.
     private(set) var isPreflighting = false
+
+    /// Whether the tunnel ever reached `.connected` in this session: a `.disconnected`
+    /// that arrives before it did is a failed start, not a normal teardown.
+    @ObservationIgnored private var sessionReachedConnected = false
+    @ObservationIgnored private var userRequestedDisconnect = false
+    /// When the route settled on the bypass — the watchdog counts from here.
+    @ObservationIgnored private var turnRouteSince: ContinuousClock.Instant?
+    @ObservationIgnored private var didAlertOffline = false
+    /// The core's own `readyTimeout` is 30 s; these leave it room to retry once.
+    private static let turnReadyDeadline: Duration = .seconds(45)
+    /// The auto solver is slower than the pool: give it its own, longer budget.
+    private static let captchaAutoDeadline: Duration = .seconds(90)
 
     private(set) var isManagerReady = false
     @ObservationIgnored private var vpnManager: NETunnelProviderManager?
@@ -112,6 +130,14 @@ class VPNViewModel {
                 selectedConfiguration = configurations.first
             }
         }
+
+        // The selection existed and is gone now (the subscription was deleted): there is
+        // nothing left for the tunnel to carry. The restore path above returns earlier,
+        // so a fresh launch — or a tunnel started from Settings / On Demand — is untouched.
+        if selectedConfiguration == nil,
+           vpnStatus == .connected || vpnStatus == .connecting || vpnStatus == .reasserting {
+            disconnectVPN()
+        }
     }
 
     func selectIfNone(_ configuration: ProxyConfiguration) {
@@ -137,6 +163,23 @@ class VPNViewModel {
     
     var status: VPNStatus {
         VPNStatus(vpnStatus)
+    }
+
+    /// The raw value the extension reports, parsed back into the decision.
+    var turnAutoDecisionValue: TurnAutoState.Decision? {
+        turnAutoDecision.flatMap(TurnAutoState.Decision.init(rawValue:))
+    }
+
+    /// The captcha sheet came up: latch it for the rest of the session.
+    func noteCaptchaSeen() {
+        captchaSeenInSession = true
+    }
+
+    /// Records a failure once and surfaces it as an alert alongside the red node.
+    private func noteFailure(_ failure: ConnectionFailure) {
+        guard connectionFailure != failure else { return }
+        connectionFailure = failure
+        startError = failure.message
     }
 
     var statusText: String {
@@ -403,9 +446,12 @@ class VPNViewModel {
 
     /// Applies a tunnel status to `vpnStatus` and drives the stats-polling side effects.
     private func applyStatus(_ status: NEVPNStatus, on connection: NEVPNConnection) {
+        let previous = vpnStatus
         vpnStatus = status
         let stats = ConnectionStatsModel.shared
         if status == .connected {
+            sessionReachedConnected = true
+            if connectionFailure == .vpnStartFailed { connectionFailure = nil }
             if let session = connection as? NETunnelProviderSession {
                 stats.startPolling(session: session)
                 startTurnPhaseWatch(session: session)
@@ -416,6 +462,10 @@ class VPNViewModel {
                 stopTurnPhaseWatch()
             }
             if status == .disconnected || status == .invalid {
+                // Dropped out of `.connecting` on its own: the tunnel never came up.
+                if !sessionReachedConnected, !userRequestedDisconnect, previous == .connecting {
+                    noteFailure(.vpnStartFailed)
+                }
                 stats.reset()
                 if pendingReconnect {
                     pendingReconnect = false
@@ -438,10 +488,59 @@ class VPNViewModel {
         turnPhaseTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 let status = await Self.fetchTurnStatus(session: session)
-                self?.turnPhase = status.phase
-                self?.turnAutoDecision = status.autoDecision
+                guard let self else { return }
+                self.turnPhase = status.phase
+                self.turnAutoDecision = status.autoDecision
+                self.evaluateTurnProgress()
                 try? await Task.sleep(for: Self.turnPhasePollInterval)
             }
+        }
+    }
+
+    /// Latches the captcha and watches the bypass for a stall.
+    ///
+    /// The core has no failure phase of its own: a handshake that keeps failing simply
+    /// loops `vkAccess → tunnelSetup → vkAccess`, and the phase can even move backwards.
+    /// A deadline is the only way to call it.
+    private func evaluateTurnProgress() {
+        if turnPhase == .captchaAuto || turnPhase == .captchaWait {
+            captchaSeenInSession = true
+        }
+
+        if turnAutoDecisionValue == .offline {
+            if !didAlertOffline {
+                didAlertOffline = true
+                startError = ConnectionFailure.networkLost.message
+            }
+            return
+        }
+
+        let mode = AWCore.getTurnFeatureEnabled() ? AWCore.getTurnMode() : nil
+        guard ConnectionStage.route(turnMode: mode, autoDecision: turnAutoDecisionValue) == .turn else {
+            turnRouteSince = nil
+            return
+        }
+
+        if turnPhase == .ready {
+            if connectionFailure == .turnTimeout || connectionFailure == .captchaTimeout {
+                connectionFailure = nil
+            }
+            turnRouteSince = nil
+            return
+        }
+
+        let now = ContinuousClock.now
+        let since = turnRouteSince ?? now
+        turnRouteSince = since
+
+        switch turnPhase {
+        case .captchaWait:
+            // Waiting on the user, not on the tunnel — the clock does not apply.
+            return
+        case .captchaAuto:
+            if now - since > Self.captchaAutoDeadline { noteFailure(.captchaTimeout) }
+        default:
+            if now - since > Self.turnReadyDeadline { noteFailure(.turnTimeout) }
         }
     }
 
@@ -450,6 +549,11 @@ class VPNViewModel {
         turnPhaseTask = nil
         turnPhase = nil
         turnAutoDecision = nil
+        turnRouteSince = nil
+        didAlertOffline = false
+        captchaSeenInSession = false
+        // `connectionFailure` deliberately survives: the red node has to outlive the
+        // `.disconnected` that follows the failure it describes.
     }
 
     /// The least-advanced phase across the live dialers: the graph should show the step
@@ -510,6 +614,11 @@ class VPNViewModel {
         guard let manager = vpnManager,
               let configuration = selectedConfiguration else { return }
 
+        connectionFailure = nil
+        captchaSeenInSession = false
+        userRequestedDisconnect = false
+        sessionReachedConnected = false
+
         Task { [self] in
             // Auto mode is the only one that probes: it is also the only one that has to
             // tell "no network" apart from "censored network", and refusing to start on a
@@ -522,10 +631,7 @@ class VPNViewModel {
                 // has this to check itself against before it commits to the relay.
                 AWCore.setPreflightVerdict(verdict)
                 if verdict == .offline {
-                    startError = String(
-                        localized: "vpn.error.noInternet",
-                        defaultValue: "No internet connection. Check your network and try again."
-                    )
+                    noteFailure(.noNetwork)
                     return
                 }
             }
@@ -575,12 +681,14 @@ class VPNViewModel {
                 try manager.connection.startVPNTunnel(options: [TunnelMessage.optionKey: messageData as NSObject])
             } catch {
                 self.startError = error.localizedDescription
+                self.connectionFailure = .vpnStartFailed
             }
         }
     }
 
     func disconnectVPN() {
         guard let manager = vpnManager else { return }
+        userRequestedDisconnect = true
         // Clear any pending reconnect — an explicit disconnect should not auto-reconnect
         pendingReconnect = false
         if manager.isOnDemandEnabled {
@@ -597,6 +705,7 @@ class VPNViewModel {
     func reconnectVPN() {
         guard let manager = vpnManager,
               vpnStatus == .connected || vpnStatus == .connecting else { return }
+        userRequestedDisconnect = true
         pendingReconnect = true
         // Disable on-demand first to prevent system auto-restart during reconnection
         if manager.isOnDemandEnabled {
