@@ -809,6 +809,10 @@ nonisolated enum TurnLimits {
     static let defaultPeers = 10
     static let minPeers = 1
     static let maxPeers = 50
+    /// Sessions one VK credential set is allowed to carry. The relay itself stops serving
+    /// a set at 20 (observed live: 30 requested, exactly 20 ever connected); 10 keeps a
+    /// margin below that, matching the Go core's own default.
+    static let maxStreamsPerCred = 10
 
     static func clampPeers(_ value: Int) -> Int {
         value <= 0 ? defaultPeers : min(max(value, minPeers), maxPeers)

@@ -17706,6 +17706,22 @@
         }
       }
     },
+    "The relay serves up to %lld peers per VK account. Above that, every further %lld peers need one more account, and so one more captcha." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The relay serves up to %lld peers per VK account. Above that, every further %lld peers need one more account, and so one more captcha."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Реле обслуживает до %lld потоков на один аккаунт VK. Выше каждые следующие %lld потоков требуют ещё один аккаунт, а значит ещё одну капчу."
+          }
+        }
+      }
+    },
     "The road is long. Walk it with us." : {
       "extractionState" : "stale",
       "localizations" : {
