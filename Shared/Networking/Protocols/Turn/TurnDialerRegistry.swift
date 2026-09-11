@@ -144,7 +144,17 @@ nonisolated final class TurnDialerRegistry: Sendable {
     func statistics() -> [TurnHostStatistics] {
         state.withLock { $0.dialers }
             .values
-            .map { TurnHostStatistics(host: $0.host, sessions: $0.sessionCount, streams: $0.openStreamCount, phase: $0.phase) }
+            .map {
+                TurnHostStatistics(
+                    host: $0.host,
+                    sessions: $0.sessionCount,
+                    streams: $0.openStreamCount,
+                    phase: $0.phase,
+                    credentialSets: $0.credentialSets,
+                    credentialSetsPassed: $0.credentialSetsPassed,
+                    captchaHits: $0.captchaHits
+                )
+            }
             .sorted { $0.host < $1.host }
     }
 
@@ -184,6 +194,13 @@ nonisolated struct TurnHostStatistics: Codable, Hashable, Sendable, Identifiable
     /// Raw `AnywherePhase*` value. Optional so that decoding stays tolerant across
     /// an extension/app version skew in either direction.
     let phase: Int?
+    /// Independent VK credential sets this pool needs; each can raise its own captcha.
+    /// Optional for the same version-skew reason as ``phase``.
+    let credentialSets: Int?
+    /// How many of those sets already hold credentials.
+    let credentialSetsPassed: Int?
+    /// How many sets have hit a captcha at least once.
+    let captchaHits: Int?
 
     var id: String { host }
 }

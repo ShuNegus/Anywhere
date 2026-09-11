@@ -49,6 +49,22 @@ nonisolated enum ConnectionGraphNode: Int, CaseIterable, Identifiable, Sendable 
             return String(localized: "graph.node.connected", defaultValue: "Connected", comment: "Узел графа: соединение установлено")
         }
     }
+
+    /// Подпись узла с учётом прогресса по наборам кредов.
+    ///
+    /// Дробь появляется только у узла капчи и только когда наборов больше одного:
+    /// капч в этом случае будет несколько подряд, и без счётчика непонятно,
+    /// сколько ещё осталось.
+    func title(captchaProgress: TurnCaptchaProgress?) -> String {
+        guard self == .captcha, let progress = captchaProgress, progress.showsFraction else {
+            return title
+        }
+        return String(
+            localized: "graph.node.captchaProgress",
+            defaultValue: "Solving Captcha \(progress.passed)/\(progress.total)",
+            comment: "Узел графа: капча VK, когда наборов кредов несколько — пройдено/всего"
+        )
+    }
 }
 
 /// Состояние отдельного узла.
@@ -220,6 +236,30 @@ nonisolated enum TurnPhase: Int, Sendable {
     case captchaWait    // капча ждёт пользователя
     case tunnelSetup    // allocate + поднятие пула стримов
     case ready          // туннель поднят
+}
+
+/// Прогресс по наборам VK-кредов в пуле TURN.
+///
+/// Пул из `num_streams` сессий обслуживают `ceil(num_streams / streams_per_cred)`
+/// независимых наборов кредов; каждый логинится в VK сам и может словить свою
+/// капчу. Знаменатель — наборы, а не капчи: заранее неизвестно, у скольких из них
+/// VK спросит капчу.
+///
+/// Счётчики монотонны в пределах жизни пула. Креды живут ~9 минут, после чего
+/// набор перелогинивается и может снова словить капчу — узел покажет капчу при
+/// уже полном `passed`; граф при этом не флапает, потому что ядро в таком
+/// состоянии продолжает отдавать `ready`.
+nonisolated struct TurnCaptchaProgress: Hashable, Sendable {
+    /// Сколько наборов кредов нужно пулу.
+    let total: Int
+    /// Сколько уже получили креды — с капчей или без.
+    let passed: Int
+    /// Сколько наборов хоть раз ловили капчу. Точный сигнал «капча была»,
+    /// в отличие от фазы, которую опрашивают раз в секунду.
+    let captchaHits: Int
+
+    /// При одном наборе дробь не показываем — «Решение капчи 1/1» только шумит.
+    var showsFraction: Bool { total >= 2 }
 }
 
 // MARK: - Сборка этапа из сигналов приложения

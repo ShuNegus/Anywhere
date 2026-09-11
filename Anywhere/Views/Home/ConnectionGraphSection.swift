@@ -12,6 +12,8 @@ import SwiftUI
 struct ConnectionGraphSection: View {
 
     let stage: ConnectionStage
+    /// См. ``ConnectionGraphView/captchaProgress``.
+    var captchaProgress: TurnCaptchaProgress? = nil
 
     /// Граф не разворачивается и не сворачивается сам: подключение, ошибка и
     /// возврат в покой меняют только его содержимое, но не то, раскрыт ли он.
@@ -25,7 +27,7 @@ struct ConnectionGraphSection: View {
         } label: {
             if isExpanded {
                 ZStack(alignment: .topTrailing) {
-                    ConnectionGraphView(stage: stage)
+                    ConnectionGraphView(stage: stage, captchaProgress: captchaProgress)
                     Image(systemName: "chevron.up")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.40))
@@ -35,7 +37,7 @@ struct ConnectionGraphSection: View {
                 .contentShape(Rectangle())
                 .accessibilityHint(String(localized: "graph.a11y.collapseHint", defaultValue: "Hide connection stages", comment: "VoiceOver-подсказка развёрнутого графа"))
             } else {
-                ConnectionGraphCollapsedView(stage: stage)
+                ConnectionGraphCollapsedView(stage: stage, captchaProgress: captchaProgress)
             }
         }
         .buttonStyle(.plain)

@@ -174,7 +174,7 @@ struct HomeView: View {
 
             // Without a subscription there is nowhere to connect, so no graph either.
             if configStore.hasConfigurations {
-                ConnectionGraphSection(stage: stage)
+                ConnectionGraphSection(stage: stage, captchaProgress: viewModel.turnCaptchaProgress)
                 Spacer().frame(height: 24)
             }
 

@@ -162,7 +162,7 @@ struct TurnSettingsView: View {
             LabeledContent("Sessions", value: "\(stats.totalSessions)")
             LabeledContent("Open Streams", value: "\(stats.totalStreams)")
             ForEach(stats.hosts) { host in
-                LabeledContent(host.host, value: "\(host.sessions) / \(host.streams)")
+                LabeledContent(host.host, value: "\(host.sessions) / \(host.streams)\(credentialSuffix(for: host))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -171,8 +171,15 @@ struct TurnSettingsView: View {
         } footer: {
             Text(stats.hosts.isEmpty
                  ? "Counts appear once the VPN is connected and a relay is in use."
-                 : "Per relay: sessions / open streams.")
+                 : "Per relay: sessions / open streams, then credential sets logged in.")
         }
+    }
+
+    /// Credential sets already logged in, when the pool runs more than one — each set
+    /// authenticates against VK on its own and can raise its own captcha.
+    private func credentialSuffix(for host: TurnHostStatistics) -> String {
+        guard let total = host.credentialSets, total >= 2 else { return "" }
+        return " · \(host.credentialSetsPassed ?? 0)/\(total)"
     }
 
     @ViewBuilder

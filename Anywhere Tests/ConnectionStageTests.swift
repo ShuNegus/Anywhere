@@ -3,6 +3,7 @@
 //  Anywhere
 //
 
+import Foundation
 import Testing
 @testable import Anywhere
 
@@ -128,6 +129,44 @@ struct ConnectionStageTests {
         for failure in ConnectionFailure.allCases {
             #expect(!failure.message.isEmpty)
         }
+    }
+
+    // MARK: - Прогресс по наборам кредов
+
+    /// Несколько наборов кредов — несколько капч подряд; дробь нужна только тогда.
+    @Test func captchaTitleShowsProgressOnlyForSeveralSets() {
+        let several = TurnCaptchaProgress(total: 3, passed: 1, captchaHits: 1)
+        let single = TurnCaptchaProgress(total: 1, passed: 0, captchaHits: 1)
+
+        #expect(several.showsFraction)
+        #expect(!single.showsFraction)
+
+        let withFraction = ConnectionGraphNode.captcha.title(captchaProgress: several)
+        #expect(withFraction.contains("1/3"))
+        #expect(withFraction != ConnectionGraphNode.captcha.title)
+
+        #expect(ConnectionGraphNode.captcha.title(captchaProgress: single)
+                == ConnectionGraphNode.captcha.title)
+        #expect(ConnectionGraphNode.captcha.title(captchaProgress: nil)
+                == ConnectionGraphNode.captcha.title)
+
+        // Дробь принадлежит только узлу капчи.
+        for node in ConnectionGraphNode.allCases where node != .captcha {
+            #expect(node.title(captchaProgress: several) == node.title)
+        }
+    }
+
+    /// Счётчики приходят из расширения по IPC: их отсутствие (старое расширение)
+    /// должно декодироваться в `nil`, а не ронять разбор статистики.
+    @Test func statisticsDecodeWithoutCredentialCounters() throws {
+        let json = Data("""
+        {"host":"relay.example","sessions":4,"streams":2,"phase":5}
+        """.utf8)
+        let stats = try JSONDecoder().decode(TurnHostStatistics.self, from: json)
+        #expect(stats.credentialSets == nil)
+        #expect(stats.credentialSetsPassed == nil)
+        #expect(stats.captchaHits == nil)
+        #expect(stats.phase == 5)
     }
 
     // MARK: - Edges

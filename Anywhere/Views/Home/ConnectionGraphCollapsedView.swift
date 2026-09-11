@@ -11,6 +11,8 @@ import SwiftUI
 struct ConnectionGraphCollapsedView: View {
 
     let stage: ConnectionStage
+    /// См. ``ConnectionGraphView/captchaProgress``.
+    var captchaProgress: TurnCaptchaProgress? = nil
 
     // MARK: - Геометрия (SPEC.md 3.5)
 
@@ -165,7 +167,7 @@ struct ConnectionGraphCollapsedView: View {
         case .failed(let failure):
             return String(localized: "graph.collapsed.failed", defaultValue: "Failed: \(failure.node.title)", comment: "Свёрнутый граф, подключение встало")
         default:
-            return stage.currentNode?.title ?? ""
+            return stage.currentNode?.title(captchaProgress: captchaProgress) ?? ""
         }
     }
 }
