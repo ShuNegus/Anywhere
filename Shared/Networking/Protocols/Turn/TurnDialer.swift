@@ -14,7 +14,9 @@ import Foundation
 /// With the subscription's `streams_per_cred` (2) against ten sessions that is five
 /// separate captchas for one connect. Pinning `streams_per_cred` to at least the number
 /// of sessions collapses that to a single cache (`cacheID` is always 0), so one solved
-/// captcha warms the whole pool.
+/// captcha warms the whole pool. The relay caps a credential set at 20 sessions, so the
+/// pool is split every ``TurnLimits/maxStreamsPerCred`` sessions — as few caches as the
+/// margin allows.
 nonisolated enum TurnDialerConfig {
 
     /// Sessions the pool will actually run, after clamping. `peers` has usually already
@@ -25,9 +27,12 @@ nonisolated enum TurnDialerConfig {
     }
 
     /// Streams one credential set covers. Never below the session count, so the pool
-    /// keeps exactly one credential cache regardless of what the subscription suggests.
+    /// keeps exactly one credential cache regardless of what the subscription suggests —
+    /// up to ``TurnLimits/maxStreamsPerCred``, a safe share of what the VK relay will
+    /// actually serve per credential set. Past that a further set (and its captcha) is
+    /// the only way to get the sessions at all.
     static func streamsPerCred(peers: Int, defaults: TurnDefaults?) -> Int {
-        max(sessionCount(peers: peers), defaults?.streamsPerCred ?? 0)
+        min(max(sessionCount(peers: peers), defaults?.streamsPerCred ?? 0), TurnLimits.maxStreamsPerCred)
     }
 
     /// Mirrors `clientcore.Config`. VLESS mode is forced on the Go side; the peer always

@@ -41,7 +41,7 @@ struct TurnSettingsView: View {
             vkLinkSection
 
             if settings.turnMode != .off {
-                Section("Relay") {
+                Section {
                     Stepper(value: $settings.turnPeers, in: TurnLimits.minPeers...TurnLimits.maxPeers) {
                         LabeledContent("Peers", value: "\(settings.turnPeers)")
                     }
@@ -49,6 +49,10 @@ struct TurnSettingsView: View {
                         Text("Automatic").tag(false)
                         Text("Manual").tag(true)
                     }
+                } header: {
+                    Text("Relay")
+                } footer: {
+                    Text("The relay serves up to \(TurnLimits.maxStreamsPerCred) peers per VK account. Above that, every further \(TurnLimits.maxStreamsPerCred) peers need one more account, and so one more captcha.")
                 }
             }
 

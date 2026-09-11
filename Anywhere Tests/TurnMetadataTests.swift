@@ -139,7 +139,7 @@ struct TurnDialerConfigTests {
         )
     }
 
-    @Test(arguments: [1, 4, 5, 10, 50])
+    @Test(arguments: [1, 4, 5, 10])
     func streamsPerCredNeverBelowNumStreams(peers: Int) throws {
         // The subscription's own suggestion (2) must not split the pool.
         let config = Self.config(peers: peers, defaults: TurnDefaults(streamsPerCred: 2))
@@ -150,9 +150,29 @@ struct TurnDialerConfigTests {
         #expect(streamsPerCred >= numStreams, "would create \(numStreams / streamsPerCred) credential caches")
     }
 
-    @Test func honoursALargerServerSuggestion() throws {
+    /// The relay serves at most 20 sessions per credential set: 30 requested on one set
+    /// left ten sessions retrying forever. The pool splits every 10 sessions (a margin
+    /// below the relay's limit), into as few sets as that allows — every extra set is
+    /// another captcha.
+    @Test(arguments: [(11, 2), (20, 2), (21, 3), (30, 3), (50, 5)])
+    func splitsIntoAsFewCredentialSetsAsTheRelayAllows(peers: Int, expectedSets: Int) throws {
+        let config = Self.config(peers: peers, defaults: TurnDefaults(streamsPerCred: 2))
+        let numStreams = try #require(config["num_streams"] as? Int)
+        let streamsPerCred = try #require(config["streams_per_cred"] as? Int)
+
+        #expect(numStreams == peers)
+        #expect(streamsPerCred == TurnLimits.maxStreamsPerCred)
+        // Mirrors the Go core's `streamID / streams_per_cred` bucketing.
+        let sets = Set((0..<numStreams).map { $0 / streamsPerCred }).count
+        #expect(sets == expectedSets)
+    }
+
+    @Test func honoursALargerServerSuggestionUpToTheRelayCap() throws {
         let config = Self.config(peers: 10, defaults: TurnDefaults(streamsPerCred: 64))
-        #expect(config["streams_per_cred"] as? Int == 64)
+        #expect(config["streams_per_cred"] as? Int == TurnLimits.maxStreamsPerCred)
+
+        let modest = Self.config(peers: 4, defaults: TurnDefaults(streamsPerCred: 8))
+        #expect(modest["streams_per_cred"] as? Int == 8)
     }
 
     @Test func staysSingleCacheWithoutServerDefaults() throws {
