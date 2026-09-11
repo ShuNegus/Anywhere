@@ -11,6 +11,9 @@ import SwiftUI
 struct ConnectionGraphView: View {
 
     let stage: ConnectionStage
+    /// Прогресс по наборам VK-кредов: узел капчи показывает «пройдено/всего»,
+    /// когда наборов больше одного и капч поэтому будет несколько подряд.
+    var captchaProgress: TurnCaptchaProgress? = nil
 
     // MARK: - Геометрия (см. SPEC.md 3.2)
 
@@ -180,7 +183,7 @@ struct ConnectionGraphView: View {
 
     private func label(for node: ConnectionGraphNode) -> some View {
         let state = stage.state(of: node)
-        return Text(node.title)
+        return Text(node.title(captchaProgress: captchaProgress))
             .font(.system(size: 13, weight: state == .current || state == .failed ? .semibold : .regular))
             .foregroundStyle(labelColor(for: state))
             .lineLimit(1)
@@ -204,7 +207,7 @@ struct ConnectionGraphView: View {
         }
         return String(
             localized: "graph.a11y.stage",
-            defaultValue: "Connection stage: \(current.title)",
+            defaultValue: "Connection stage: \(current.title(captchaProgress: captchaProgress))",
             comment: "VoiceOver-описание графа подключения"
         )
     }
@@ -223,6 +226,11 @@ struct ConnectionGraphView: View {
             ) { stage in
                 ConnectionGraphView(stage: stage)
             }
+            // Несколько наборов кредов: у узла капчи появляется счётчик.
+            ConnectionGraphView(
+                stage: .captcha,
+                captchaProgress: TurnCaptchaProgress(total: 3, passed: 1, captchaHits: 1)
+            )
         }
         .padding(24)
     }

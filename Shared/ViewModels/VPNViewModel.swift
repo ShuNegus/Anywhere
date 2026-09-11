@@ -39,6 +39,9 @@ class VPNViewModel {
     private(set) var turnPhase: TurnPhase? = nil
     /// `TurnAutoState.Decision` raw value from the extension while the mode is `.auto`.
     private(set) var turnAutoDecision: String? = nil
+    /// How many credential sets the bypass pools need and how many are already logged in.
+    /// `nil` while no dialer reports it (bypass off, or an older extension).
+    private(set) var turnCaptchaProgress: TurnCaptchaProgress? = nil
     @ObservationIgnored private var turnPhaseTask: Task<Void, Never>?
     /// The captcha really came up during this session, so the graph shows the step as
     /// taken rather than skipped.
@@ -55,12 +58,21 @@ class VPNViewModel {
     /// that arrives before it did is a failed start, not a normal teardown.
     @ObservationIgnored private var sessionReachedConnected = false
     @ObservationIgnored private var userRequestedDisconnect = false
-    /// When the route settled on the bypass — the watchdog counts from here.
+    /// When the current step of the bypass started — the watchdog counts from here.
+    /// Restarted whenever a credential set finishes or a new captcha comes up, so the
+    /// budget below is per step, not for the whole (possibly multi-captcha) connect.
     @ObservationIgnored private var turnRouteSince: ContinuousClock.Instant?
+    /// `credentialSetsPassed` as of the previous poll; a rise means a set just finished.
+    @ObservationIgnored private var lastTurnProgressPassed = -1
+    /// Whether the previous poll was already inside a captcha — the edge into one is
+    /// what restarts the clock.
+    @ObservationIgnored private var lastTurnPhaseWasCaptcha = false
     @ObservationIgnored private var didAlertOffline = false
     /// The core's own `readyTimeout` is 30 s; these leave it room to retry once.
+    /// Budget for *one* credential set, not for the whole connect.
     private static let turnReadyDeadline: Duration = .seconds(45)
     /// The auto solver is slower than the pool: give it its own, longer budget.
+    /// Also per captcha — several sets mean several captchas in a row.
     private static let captchaAutoDeadline: Duration = .seconds(90)
 
     private(set) var isManagerReady = false
@@ -491,6 +503,7 @@ class VPNViewModel {
                 guard let self else { return }
                 self.turnPhase = status.phase
                 self.turnAutoDecision = status.autoDecision
+                self.turnCaptchaProgress = status.captchaProgress
                 self.evaluateTurnProgress()
                 try? await Task.sleep(for: Self.turnPhasePollInterval)
             }
@@ -503,9 +516,27 @@ class VPNViewModel {
     /// loops `vkAccess → tunnelSetup → vkAccess`, and the phase can even move backwards.
     /// A deadline is the only way to call it.
     private func evaluateTurnProgress() {
-        if turnPhase == .captchaAuto || turnPhase == .captchaWait {
+        let inCaptcha = turnPhase == .captchaAuto || turnPhase == .captchaWait
+        if inCaptcha {
             captchaSeenInSession = true
         }
+        // The core counts captchas per credential set, so a captcha that solved itself
+        // between two polls is still visible here — the latch above can miss it.
+        if let hits = turnCaptchaProgress?.captchaHits, hits > 0 {
+            captchaSeenInSession = true
+        }
+
+        // A connect with several credential sets is several logins (and possibly several
+        // captchas) in a row, and each deserves the full budget — otherwise three 40 s
+        // captchas would trip a 90 s deadline that was only ever meant for one. The clock
+        // restarts whenever a set finishes or a fresh captcha comes up.
+        var stepAdvanced = false
+        if let passed = turnCaptchaProgress?.passed {
+            if passed > lastTurnProgressPassed { stepAdvanced = true }
+            lastTurnProgressPassed = passed
+        }
+        if inCaptcha && !lastTurnPhaseWasCaptcha { stepAdvanced = true }
+        lastTurnPhaseWasCaptcha = inCaptcha
 
         if turnAutoDecisionValue == .offline {
             if !didAlertOffline {
@@ -530,7 +561,7 @@ class VPNViewModel {
         }
 
         let now = ContinuousClock.now
-        let since = turnRouteSince ?? now
+        let since = stepAdvanced ? now : (turnRouteSince ?? now)
         turnRouteSince = since
 
         switch turnPhase {
@@ -549,7 +580,10 @@ class VPNViewModel {
         turnPhaseTask = nil
         turnPhase = nil
         turnAutoDecision = nil
+        turnCaptchaProgress = nil
         turnRouteSince = nil
+        lastTurnProgressPassed = -1
+        lastTurnPhaseWasCaptcha = false
         didAlertOffline = false
         captchaSeenInSession = false
         // `connectionFailure` deliberately survives: the red node has to outlive the
@@ -560,12 +594,12 @@ class VPNViewModel {
     /// the connection is still working on, not the one furthest along.
     private static func fetchTurnStatus(
         session: NETunnelProviderSession
-    ) async -> (phase: TurnPhase?, autoDecision: String?) {
+    ) async -> (phase: TurnPhase?, autoDecision: String?, captchaProgress: TurnCaptchaProgress?) {
         guard session.status == .connected,
               let request = try? JSONEncoder().encode(TunnelMessage.fetchTurnStats),
               let response = await ProviderMessageConcurrencyBridge.send(request, over: session),
               let stats = try? JSONDecoder().decode(TurnStatsResponse.self, from: response) else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
         let phases = stats.hosts
             .compactMap(\.phase)
@@ -573,7 +607,20 @@ class VPNViewModel {
             .filter { $0 != .inactive }
         let phase = phases.min(by: { $0.rawValue < $1.rawValue })
             ?? (stats.totalSessions > 0 ? .ready : nil)
-        return (phase, stats.autoDecision)
+        return (phase, stats.autoDecision, captchaProgress(from: stats))
+    }
+
+    /// Credential-set progress summed across the live pools. Normally there is one pool
+    /// (the selected relay); summing keeps the fraction honest if more than one is up.
+    /// `nil` when no host reports the counters at all — an extension older than the app.
+    private static func captchaProgress(from stats: TurnStatsResponse) -> TurnCaptchaProgress? {
+        let totals = stats.hosts.compactMap(\.credentialSets)
+        guard !totals.isEmpty else { return nil }
+        return TurnCaptchaProgress(
+            total: totals.reduce(0, +),
+            passed: stats.hosts.compactMap(\.credentialSetsPassed).reduce(0, +),
+            captchaHits: stats.hosts.compactMap(\.captchaHits).reduce(0, +)
+        )
     }
 
     private static let providerBundleIdentifier = "su.smd.Anywhere.Network-Extension"

@@ -96,6 +96,23 @@ nonisolated final class TurnDialer: Sendable {
         closed.withLock { $0 } ? 0 : dialer.phase()
     }
 
+    /// Independent VK credential sets this pool needs. Each logs into VK on its own and
+    /// can raise its own captcha; 0 when the notion does not apply.
+    var credentialSets: Int {
+        closed.withLock { $0 } ? 0 : dialer.credentialSets()
+    }
+
+    /// How many of those sets already hold credentials.
+    var credentialSetsPassed: Int {
+        closed.withLock { $0 } ? 0 : dialer.credentialSetsPassed()
+    }
+
+    /// How many sets have hit a captcha at least once. A precise "there was a captcha"
+    /// signal, unlike latching on a phase that is only sampled once a second.
+    var captchaHits: Int {
+        closed.withLock { $0 } ? 0 : dialer.captchaHits()
+    }
+
     /// Streams handed out and not yet closed.
     var openStreamCount: Int {
         streamCounter.load(ordering: .relaxed)
@@ -129,8 +146,9 @@ nonisolated final class TurnDialer: Sendable {
             throw error.map { TurnError.io($0) } ?? TurnError.unsupportedServer(host: server.host)
         }
         self.dialer = dialer
-        // One line per dialer: the check that the pool runs a single credential cache
-        // (streams_per_cred >= num_streams) and therefore asks for one captcha.
+        // One line per dialer: how many credential caches the pool runs. One cache
+        // (streams_per_cred >= num_streams) means at most one captcha; past
+        // `maxStreamsPerCred` the pool splits and each further cache can ask for its own.
         logger.info("TURN dialer \(server.host): num_streams=\(sessions) streams_per_cred=\(streamsPerCred) (credential caches: \(sessions <= streamsPerCred ? 1 : (sessions + streamsPerCred - 1) / streamsPerCred))")
     }
 

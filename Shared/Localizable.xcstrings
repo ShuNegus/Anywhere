@@ -8002,6 +8002,23 @@
         }
       }
     },
+    "graph.node.captchaProgress" : {
+      "comment" : "Узел графа: капча VK, когда наборов кредов несколько — пройдено/всего",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Solving Captcha %lld/%lld"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Решение капчи %lld/%lld"
+          }
+        }
+      }
+    },
     "graph.node.connected" : {
       "comment" : "Узел графа: соединение установлено",
       "localizations" : {
