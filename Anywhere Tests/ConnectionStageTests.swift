@@ -18,6 +18,7 @@ struct ConnectionStageTests {
         turnMode: TurnMode? = .auto,
         autoDecision: TurnAutoState.Decision? = nil,
         turnPhase: TurnPhase? = nil,
+        turnUsable: Bool? = nil,
         captchaPending: Bool = false,
         captchaSeen: Bool = false,
         failure: ConnectionFailure? = nil
@@ -28,6 +29,7 @@ struct ConnectionStageTests {
             turnMode: turnMode,
             autoDecision: autoDecision,
             turnPhase: turnPhase,
+            turnUsable: turnUsable,
             captchaPending: captchaPending,
             captchaSeen: captchaSeen,
             failure: failure
@@ -131,29 +133,90 @@ struct ConnectionStageTests {
         }
     }
 
-    // MARK: - Прогресс по наборам кредов
+    // MARK: - Пул обхода, который уже работает
 
-    /// Несколько наборов кредов — несколько капч подряд; дробь нужна только тогда.
-    @Test func captchaTitleShowsProgressOnlyForSeveralSets() {
-        let several = TurnCaptchaProgress(total: 3, passed: 1, captchaHits: 1)
-        let single = TurnCaptchaProgress(total: 1, passed: 0, captchaHits: 1)
+    /// Ядро берёт следующий набор кредов (и, может быть, капчу) только когда реле
+    /// заполнило текущий, — часто уже при работающем туннеле. Такая капча не должна
+    /// откатывать граф с «Подключено».
+    @Test func aUsablePoolStaysConnectedThroughACaptcha() {
+        #expect(resolve(autoDecision: .turn, turnPhase: .captchaWait, turnUsable: true,
+                        captchaPending: true, captchaSeen: true)
+                == .connectedViaTurn(captchaSolved: true))
+        #expect(resolve(autoDecision: .turn, turnPhase: .tunnelSetup, turnUsable: true)
+                == .connectedViaTurn(captchaSolved: false))
+    }
 
-        #expect(several.showsFraction)
-        #expect(!single.showsFraction)
+    /// Пока пул ничего не возит, капча — этап, а «ready» старой фазы не в счёт.
+    @Test func anUnusablePoolWalksTheBranch() {
+        #expect(resolve(autoDecision: .turn, turnPhase: .captchaWait, turnUsable: false) == .captcha)
+        #expect(resolve(autoDecision: .turn, turnPhase: .vkAccess, turnUsable: false,
+                        captchaPending: true) == .captcha)
+        #expect(resolve(autoDecision: .turn, turnPhase: .ready, turnUsable: false) == .turnTunnel)
+    }
 
-        let withFraction = ConnectionGraphNode.captcha.title(captchaProgress: several)
-        #expect(withFraction.contains("1/3"))
-        #expect(withFraction != ConnectionGraphNode.captcha.title)
-
-        #expect(ConnectionGraphNode.captcha.title(captchaProgress: single)
-                == ConnectionGraphNode.captcha.title)
-        #expect(ConnectionGraphNode.captcha.title(captchaProgress: nil)
-                == ConnectionGraphNode.captcha.title)
-
-        // Дробь принадлежит только узлу капчи.
-        for node in ConnectionGraphNode.allCases where node != .captcha {
-            #expect(node.title(captchaProgress: several) == node.title)
+    @Test func connectedTitleTellsAboutPeersBeingAdded() {
+        func pool(sessions: Int, target: Int, fetch: TurnCoreStatus.FetchState, usable: Bool = true) -> TurnPoolSummary {
+            TurnPoolSummary(usable: usable, sessions: sessions, target: target, fetch: fetch,
+                            captchas: 1, setsObtained: 1)
         }
+        let plain = ConnectionGraphNode.connected.title
+        #expect(ConnectionGraphNode.connected.title(pool: nil) == plain)
+        #expect(ConnectionGraphNode.connected.title(pool: pool(sessions: 40, target: 40, fetch: .idle)) == plain)
+        // Сессии переподключаются, но добирать нечего — это не «добираем пиры».
+        #expect(ConnectionGraphNode.connected.title(pool: pool(sessions: 38, target: 40, fetch: .idle)) == plain)
+
+        let adding = ConnectionGraphNode.connected.title(pool: pool(sessions: 20, target: 40, fetch: .fetching))
+        #expect(adding != plain && adding.contains("20/40"))
+
+        let captcha = ConnectionGraphNode.connected.title(pool: pool(sessions: 20, target: 40, fetch: .captchaWait))
+        #expect(captcha != plain && captcha != adding)
+
+        // Подпись только у «Подключено».
+        for node in ConnectionGraphNode.allCases where node != .connected {
+            #expect(node.title(pool: pool(sessions: 20, target: 40, fetch: .captchaWait)) == node.title)
+        }
+    }
+
+    // MARK: - Статус ядра
+
+    /// Формат `clientcore.Status` из `StatusJSON()` — snake_case.
+    @Test func coreStatusDecodesTheGoSnapshot() throws {
+        let json = """
+        {"version":1,"usable":true,"sessions":20,"target":40,"phase":4,
+         "fetch":{"state":"captcha_wait","set_id":1,"waiting":20},
+         "sets_obtained":1,"sets_retired":0,"captchas":2,
+         "sets":[{"id":0,"state":"full","active":20,"pending":0,"capacity":20}]}
+        """
+        let status = try #require(TurnCoreStatus.decode(coreJSON: json))
+        #expect(status.usable && status.sessions == 20 && status.target == 40)
+        #expect(status.fetch.state == .captchaWait && status.fetch.setId == 1 && status.fetch.waiting == 20)
+        #expect(status.fetch.backoffMs == nil)
+        #expect(status.sets.first?.capacity == 20)
+
+        // Неизвестное состояние от более нового ядра не роняет разбор.
+        let newer = json.replacingOccurrences(of: "captcha_wait", with: "something_new")
+        #expect(TurnCoreStatus.decode(coreJSON: newer)?.fetch.state == .unknown)
+        // Другая версия формата — полям не доверяем.
+        #expect(TurnCoreStatus.decode(coreJSON: json.replacingOccurrences(of: "\"version\":1", with: "\"version\":2")) == nil)
+        #expect(TurnCoreStatus.decode(coreJSON: "") == nil)
+    }
+
+    @Test func poolSummaryCombinesRelays() throws {
+        func status(usable: Bool, sessions: Int, fetch: String, captchas: Int) throws -> TurnCoreStatus {
+            try #require(TurnCoreStatus.decode(coreJSON: """
+            {"version":1,"usable":\(usable),"sessions":\(sessions),"target":20,"phase":4,
+             "fetch":{"state":"\(fetch)","set_id":-1,"waiting":0},
+             "sets_obtained":1,"sets_retired":0,"captchas":\(captchas),"sets":[]}
+            """))
+        }
+        #expect(TurnPoolSummary(combining: []) == nil)
+        let pool = try #require(TurnPoolSummary(combining: [
+            try status(usable: false, sessions: 0, fetch: "fetching", captchas: 0),
+            try status(usable: true, sessions: 12, fetch: "captcha_auto", captchas: 1),
+        ]))
+        #expect(pool.usable && pool.sessions == 12 && pool.target == 40)
+        #expect(pool.fetch == .captchaAuto) // the more urgent of the two
+        #expect(pool.captchas == 1 && pool.setsObtained == 2)
     }
 
     /// Счётчики приходят из расширения по IPC: их отсутствие (старое расширение)

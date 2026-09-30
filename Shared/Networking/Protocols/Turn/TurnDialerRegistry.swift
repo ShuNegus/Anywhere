@@ -90,29 +90,30 @@ nonisolated final class TurnDialerRegistry: Sendable {
         // Trimmed to what the extension's remaining budget can carry — applied to this
         // new pool only, never to pools that are already running.
         let peers = TurnMemory.effectivePeers(requested: requestedPeers)
+        let defaults = TurnMetadataStore.shared.defaults(for: server.host)
 
-        let dialer: TurnDialer
-        do {
-            dialer = try TurnDialer(
-                server: server,
-                vkLink: vkLink,
-                defaults: TurnMetadataStore.shared.defaults(for: server.host),
-                peers: peers,
-                manualCaptcha: manualCaptcha
-            )
-        } catch {
-            logger.debug("TURN dialer unavailable for \(host): \(error.localizedDescription)")
-            return nil
-        }
-
-        // Another flow may have raced us here; keep whichever landed first.
-        let winner = state.withLock { state -> TurnDialer in
+        // Created under the lock: a Go dialer starts its VK login (and possibly a
+        // captcha) the moment it exists, so two flows racing here must never both build
+        // one. Construction itself is cheap — the core only parses the config, resolves
+        // `peer_addr` (an IP in every subscription, so no DNS lookup happens under the
+        // lock) and starts its session goroutines.
+        return state.withLock { state -> TurnDialer? in
             if let existing = state.dialers[server.host] { return existing }
-            state.dialers[server.host] = dialer
-            return dialer
+            do {
+                let dialer = try TurnDialer(
+                    server: server,
+                    vkLink: vkLink,
+                    defaults: defaults,
+                    peers: peers,
+                    manualCaptcha: manualCaptcha
+                )
+                state.dialers[server.host] = dialer
+                return dialer
+            } catch {
+                logger.debug("TURN dialer unavailable for \(host): \(error.localizedDescription)")
+                return nil
+            }
         }
-        if winner !== dialer { dialer.close() }
-        return winner
     }
 
     /// Opens a TURN-backed tunnel to `host`, or returns `nil` to fall back to a direct dial.
@@ -152,7 +153,8 @@ nonisolated final class TurnDialerRegistry: Sendable {
                     phase: $0.phase,
                     credentialSets: $0.credentialSets,
                     credentialSetsPassed: $0.credentialSetsPassed,
-                    captchaHits: $0.captchaHits
+                    captchaHits: $0.captchaHits,
+                    core: $0.coreStatus
                 )
             }
             .sorted { $0.host < $1.host }
@@ -201,6 +203,20 @@ nonisolated struct TurnHostStatistics: Codable, Hashable, Sendable, Identifiable
     let credentialSetsPassed: Int?
     /// How many sets have hit a captcha at least once.
     let captchaHits: Int?
+    /// Full snapshot from the core. Optional for the same version-skew reason.
+    let core: TurnCoreStatus?
+
+    init(host: String, sessions: Int, streams: Int, phase: Int?, credentialSets: Int?,
+         credentialSetsPassed: Int?, captchaHits: Int?, core: TurnCoreStatus? = nil) {
+        self.host = host
+        self.sessions = sessions
+        self.streams = streams
+        self.phase = phase
+        self.credentialSets = credentialSets
+        self.credentialSetsPassed = credentialSetsPassed
+        self.captchaHits = captchaHits
+        self.core = core
+    }
 
     var id: String { host }
 }

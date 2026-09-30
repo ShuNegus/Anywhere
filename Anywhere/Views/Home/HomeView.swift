@@ -48,6 +48,7 @@ struct HomeView: View {
             turnMode: settings.turnFeatureEnabled ? settings.turnMode : nil,
             autoDecision: viewModel.turnAutoDecisionValue,
             turnPhase: viewModel.turnPhase,
+            turnUsable: viewModel.turnPool?.usable,
             captchaPending: captchaMonitor.captchaWaiting,
             captchaSeen: viewModel.captchaSeenInSession,
             failure: viewModel.connectionFailure
@@ -174,7 +175,7 @@ struct HomeView: View {
 
             // Without a subscription there is nowhere to connect, so no graph either.
             if configStore.hasConfigurations {
-                ConnectionGraphSection(stage: stage, captchaProgress: viewModel.turnCaptchaProgress)
+                ConnectionGraphSection(stage: stage, pool: viewModel.turnPool)
                 Spacer().frame(height: 24)
             }
 

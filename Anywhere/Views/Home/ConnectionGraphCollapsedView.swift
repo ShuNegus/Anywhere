@@ -11,8 +11,8 @@ import SwiftUI
 struct ConnectionGraphCollapsedView: View {
 
     let stage: ConnectionStage
-    /// См. ``ConnectionGraphView/captchaProgress``.
-    var captchaProgress: TurnCaptchaProgress? = nil
+    /// См. ``ConnectionGraphView/pool``.
+    var pool: TurnPoolSummary? = nil
 
     // MARK: - Геометрия (SPEC.md 3.5)
 
@@ -161,13 +161,17 @@ struct ConnectionGraphCollapsedView: View {
         case .idle:
             return String(localized: "graph.collapsed.idle", defaultValue: "Connection Stages", comment: "Свёрнутый граф в покое")
         case .connectedViaTurn:
+            // Пул ещё добирает пиры или ждёт капчу — та же подпись, что у узла «Подключено».
+            if let pool, pool.isAddingPeers || pool.needsCaptchaForMorePeers {
+                return ConnectionGraphNode.connected.title(pool: pool)
+            }
             return String(localized: "graph.collapsed.viaTurn", defaultValue: "Connected via TURN", comment: "Свёрнутый граф, шли через обход")
         case .connectedDirect:
             return String(localized: "graph.collapsed.direct", defaultValue: "Connected Directly", comment: "Свёрнутый граф, обход не понадобился")
         case .failed(let failure):
             return String(localized: "graph.collapsed.failed", defaultValue: "Failed: \(failure.node.title)", comment: "Свёрнутый граф, подключение встало")
         default:
-            return stage.currentNode?.title(captchaProgress: captchaProgress) ?? ""
+            return stage.currentNode?.title(pool: pool) ?? ""
         }
     }
 }
