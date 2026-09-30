@@ -9,14 +9,10 @@ import Foundation
 ///
 /// Kept outside the `canImport(Turn)` guard so it can be exercised without the framework.
 ///
-/// The Go core buckets sessions into credential caches by `streamID / streams_per_cred`,
-/// and every cache authenticates against VK on its own — which means its own captcha.
-/// With the subscription's `streams_per_cred` (2) against ten sessions that is five
-/// separate captchas for one connect. Pinning `streams_per_cred` to at least the number
-/// of sessions collapses that to a single cache (`cacheID` is always 0), so one solved
-/// captcha warms the whole pool. The relay caps a credential set at 20 sessions, so the
-/// pool is split every ``TurnLimits/maxStreamsPerCred`` sessions — as few caches as the
-/// margin allows.
+/// No `streams_per_cred` is sent, whatever the subscription suggests: the core fills one
+/// VK credential set until the relay refuses it (20 sessions per set) and only then
+/// fetches another — and with it, possibly, another captcha. A fixed split would only
+/// ask for captchas the relay never needed.
 nonisolated enum TurnDialerConfig {
 
     /// Sessions the pool will actually run, after clamping. `peers` has usually already
@@ -24,15 +20,6 @@ nonisolated enum TurnDialerConfig {
     /// the Go side is handed, so the credential math has to be based on this value.
     static func sessionCount(peers: Int) -> Int {
         TurnLimits.clampPeers(peers)
-    }
-
-    /// Streams one credential set covers. Never below the session count, so the pool
-    /// keeps exactly one credential cache regardless of what the subscription suggests —
-    /// up to ``TurnLimits/maxStreamsPerCred``, a safe share of what the VK relay will
-    /// actually serve per credential set. Past that a further set (and its captcha) is
-    /// the only way to get the sessions at all.
-    static func streamsPerCred(peers: Int, defaults: TurnDefaults?) -> Int {
-        min(max(sessionCount(peers: peers), defaults?.streamsPerCred ?? 0), TurnLimits.maxStreamsPerCred)
     }
 
     /// Mirrors `clientcore.Config`. VLESS mode is forced on the Go side; the peer always
@@ -51,7 +38,6 @@ nonisolated enum TurnDialerConfig {
             "vk_link": vkLink,
             "vless_mode": true,
             "num_streams": sessionCount(peers: peers),
-            "streams_per_cred": streamsPerCred(peers: peers, defaults: defaults),
             "manual_captcha": manualCaptcha,
         ]
         let wrapMode = defaults?.wrapMode ?? !server.wrapKeyHex.isEmpty
@@ -96,21 +82,28 @@ nonisolated final class TurnDialer: Sendable {
         closed.withLock { $0 } ? 0 : dialer.phase()
     }
 
-    /// Independent VK credential sets this pool needs. Each logs into VK on its own and
-    /// can raise its own captcha; 0 when the notion does not apply.
+    /// VK credential sets asked for so far (in hand plus one being fetched). Sets are
+    /// fetched on demand, so this grows while the pool fills. Superseded by
+    /// ``coreStatus``; kept for the extension/app version skew.
     var credentialSets: Int {
         closed.withLock { $0 } ? 0 : dialer.credentialSets()
     }
 
-    /// How many of those sets already hold credentials.
+    /// How many sets are in hand.
     var credentialSetsPassed: Int {
         closed.withLock { $0 } ? 0 : dialer.credentialSetsPassed()
     }
 
-    /// How many sets have hit a captcha at least once. A precise "there was a captcha"
-    /// signal, unlike latching on a phase that is only sampled once a second.
+    /// How many fetches have hit a captcha. A precise "there was a captcha" signal,
+    /// unlike latching on a phase that is only sampled once a second.
     var captchaHits: Int {
         closed.withLock { $0 } ? 0 : dialer.captchaHits()
+    }
+
+    /// Full snapshot of the pool: usable or not, sessions of target, what the credential
+    /// fetch is doing. `nil` once closed or if the core's format is unknown.
+    var coreStatus: TurnCoreStatus? {
+        closed.withLock { $0 } ? nil : TurnCoreStatus.decode(coreJSON: dialer.statusJSON())
     }
 
     /// Streams handed out and not yet closed.
@@ -134,7 +127,6 @@ nonisolated final class TurnDialer: Sendable {
             manualCaptcha: manualCaptcha
         )
         let sessions = TurnDialerConfig.sessionCount(peers: peers)
-        let streamsPerCred = TurnDialerConfig.streamsPerCred(peers: peers, defaults: defaults)
 
         let json = try JSONSerialization.data(withJSONObject: config)
         guard let configJSON = String(data: json, encoding: .utf8) else {
@@ -146,10 +138,9 @@ nonisolated final class TurnDialer: Sendable {
             throw error.map { TurnError.io($0) } ?? TurnError.unsupportedServer(host: server.host)
         }
         self.dialer = dialer
-        // One line per dialer: how many credential caches the pool runs. One cache
-        // (streams_per_cred >= num_streams) means at most one captcha; past
-        // `maxStreamsPerCred` the pool splits and each further cache can ask for its own.
-        logger.info("TURN dialer \(server.host): num_streams=\(sessions) streams_per_cred=\(streamsPerCred) (credential caches: \(sessions <= streamsPerCred ? 1 : (sessions + streamsPerCred - 1) / streamsPerCred))")
+        // One line per dialer. Credential sets (and their captchas) are fetched by the core
+        // as the relay fills up; the `[Creds]` lines in the core's log show each one.
+        logger.info("TURN dialer \(server.host): num_streams=\(sessions), credential sets on demand")
     }
 
     /// Blocks until at least one session is up. Cheap to call repeatedly — it returns

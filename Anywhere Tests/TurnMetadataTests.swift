@@ -117,9 +117,10 @@ struct TurnMetadataTests {
     }
 }
 
-/// The credential-cache invariant: the Go core buckets sessions by
-/// `streamID / streams_per_cred` and authenticates each bucket separately, so anything
-/// below the session count means one VK captcha per extra bucket.
+/// The config handed to the Go core. Credential sets are the core's business: it fills
+/// one VK set until the relay refuses it and only then fetches another (and its
+/// captcha), so no `streams_per_cred` goes out — a fixed split would only ask for
+/// captchas the relay never needed.
 struct TurnDialerConfigTests {
 
     private static let server = TurnServerInfo(
@@ -139,54 +140,20 @@ struct TurnDialerConfigTests {
         )
     }
 
-    @Test(arguments: [1, 4, 5, 10])
-    func streamsPerCredNeverBelowNumStreams(peers: Int) throws {
-        // The subscription's own suggestion (2) must not split the pool.
-        let config = Self.config(peers: peers, defaults: TurnDefaults(streamsPerCred: 2))
-        let numStreams = try #require(config["num_streams"] as? Int)
-        let streamsPerCred = try #require(config["streams_per_cred"] as? Int)
-
-        #expect(numStreams == peers)
-        #expect(streamsPerCred >= numStreams, "would create \(numStreams / streamsPerCred) credential caches")
+    @Test(arguments: [1, 4, 10, 30, 50])
+    func leavesCredentialSetsToTheCore(peers: Int) throws {
+        // Whatever the subscription suggests (2 in real ones, 64 in odd ones).
+        for suggestion in [nil, 2, 64] {
+            let config = Self.config(peers: peers, defaults: TurnDefaults(streamsPerCred: suggestion))
+            #expect(config["num_streams"] as? Int == peers)
+            #expect(config["streams_per_cred"] == nil)
+        }
     }
 
-    /// The relay serves at most 20 sessions per credential set: 30 requested on one set
-    /// left ten sessions retrying forever. The pool splits every 10 sessions (a margin
-    /// below the relay's limit), into as few sets as that allows — every extra set is
-    /// another captcha.
-    @Test(arguments: [(11, 2), (20, 2), (21, 3), (30, 3), (50, 5)])
-    func splitsIntoAsFewCredentialSetsAsTheRelayAllows(peers: Int, expectedSets: Int) throws {
-        let config = Self.config(peers: peers, defaults: TurnDefaults(streamsPerCred: 2))
-        let numStreams = try #require(config["num_streams"] as? Int)
-        let streamsPerCred = try #require(config["streams_per_cred"] as? Int)
-
-        #expect(numStreams == peers)
-        #expect(streamsPerCred == TurnLimits.maxStreamsPerCred)
-        // Mirrors the Go core's `streamID / streams_per_cred` bucketing.
-        let sets = Set((0..<numStreams).map { $0 / streamsPerCred }).count
-        #expect(sets == expectedSets)
-    }
-
-    @Test func honoursALargerServerSuggestionUpToTheRelayCap() throws {
-        let config = Self.config(peers: 10, defaults: TurnDefaults(streamsPerCred: 64))
-        #expect(config["streams_per_cred"] as? Int == TurnLimits.maxStreamsPerCred)
-
-        let modest = Self.config(peers: 4, defaults: TurnDefaults(streamsPerCred: 8))
-        #expect(modest["streams_per_cred"] as? Int == 8)
-    }
-
-    @Test func staysSingleCacheWithoutServerDefaults() throws {
-        let config = Self.config(peers: 10, defaults: nil)
-        #expect(config["num_streams"] as? Int == 10)
-        #expect(config["streams_per_cred"] as? Int == 10)
-    }
-
-    /// Memory pressure trims the session count before it reaches the dialer; the
-    /// credential math has to follow it down, not stay at the requested value.
-    @Test func followsAMemoryTrimmedSessionCount() throws {
-        let config = Self.config(peers: 4, defaults: TurnDefaults(streamsPerCred: 2))
+    /// Memory pressure trims the session count before it reaches the dialer.
+    @Test func carriesAMemoryTrimmedSessionCount() throws {
+        let config = Self.config(peers: 4, defaults: nil)
         #expect(config["num_streams"] as? Int == 4)
-        #expect(config["streams_per_cred"] as? Int == 4)
     }
 
     @Test func carriesWrapAndSolverSettings() throws {

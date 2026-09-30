@@ -52,7 +52,7 @@ struct TurnSettingsView: View {
                 } header: {
                     Text("Relay")
                 } footer: {
-                    Text("The relay serves up to \(TurnLimits.maxStreamsPerCred) peers per VK account. Above that, every further \(TurnLimits.maxStreamsPerCred) peers need one more account, and so one more captcha.")
+                    Text("The relay serves up to \(TurnLimits.relayPeersPerAccount) peers per VK account. Only when it is full does the app sign in with one more account — which may ask for one more captcha.")
                 }
             }
 
@@ -171,15 +171,18 @@ struct TurnSettingsView: View {
         } footer: {
             Text(stats.hosts.isEmpty
                  ? "Counts appear once the VPN is connected and a relay is in use."
-                 : "Per relay: sessions / open streams, then credential sets logged in.")
+                 : "Per relay: sessions / open streams, then VK accounts in use.")
         }
     }
 
-    /// Credential sets already logged in, when the pool runs more than one — each set
-    /// authenticates against VK on its own and can raise its own captcha.
+    /// VK accounts (credential sets) carrying this relay's sessions, and a marker while
+    /// one more is being signed in. Each further account can raise its own captcha.
     private func credentialSuffix(for host: TurnHostStatistics) -> String {
-        guard let total = host.credentialSets, total >= 2 else { return "" }
-        return " · \(host.credentialSetsPassed ?? 0)/\(total)"
+        guard let core = host.core else { return "" }
+        let inUse = core.sets.filter { $0.state != "retired" }.count
+        var suffix = inUse > 0 ? " · \(inUse)" : ""
+        if core.fetch.state != .idle { suffix += "+" }
+        return suffix
     }
 
     @ViewBuilder

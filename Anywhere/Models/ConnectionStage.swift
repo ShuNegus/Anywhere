@@ -50,20 +50,29 @@ nonisolated enum ConnectionGraphNode: Int, CaseIterable, Identifiable, Sendable 
         }
     }
 
-    /// Подпись узла с учётом прогресса по наборам кредов.
+    /// Подпись узла с учётом состояния пула обхода.
     ///
-    /// Дробь появляется только у узла капчи и только когда наборов больше одного:
-    /// капч в этом случае будет несколько подряд, и без счётчика непонятно,
-    /// сколько ещё осталось.
-    func title(captchaProgress: TurnCaptchaProgress?) -> String {
-        guard self == .captcha, let progress = captchaProgress, progress.showsFraction else {
-            return title
+    /// Туннель уже работает, а ядро ещё добирает пиры: следующий набор VK-кредов
+    /// берётся, только когда реле заполнило текущий (20 пиров на набор), и может
+    /// попросить капчу. Это фон, а не этап — поэтому подпись у «Подключено», а не
+    /// откат графа на узел капчи.
+    func title(pool: TurnPoolSummary?) -> String {
+        guard self == .connected, let pool else { return title }
+        if pool.needsCaptchaForMorePeers {
+            return String(
+                localized: "graph.node.connectedCaptchaForPeers",
+                defaultValue: "Connected · Captcha for More Peers",
+                comment: "Узел графа: туннель работает, но для новых пиров нужна капча"
+            )
         }
-        return String(
-            localized: "graph.node.captchaProgress",
-            defaultValue: "Solving Captcha \(progress.passed)/\(progress.total)",
-            comment: "Узел графа: капча VK, когда наборов кредов несколько — пройдено/всего"
-        )
+        if pool.isAddingPeers {
+            return String(
+                localized: "graph.node.connectedAddingPeers",
+                defaultValue: "Connected · Peers \(pool.sessions)/\(pool.target)",
+                comment: "Узел графа: туннель работает, пул ещё добирает пиры — поднято/всего"
+            )
+        }
+        return title
     }
 }
 
@@ -238,33 +247,9 @@ nonisolated enum TurnPhase: Int, Sendable {
     case ready          // туннель поднят
 }
 
-/// Прогресс по наборам VK-кредов в пуле TURN.
-///
-/// Пул из `num_streams` сессий обслуживают `ceil(num_streams / streams_per_cred)`
-/// независимых наборов кредов; каждый логинится в VK сам и может словить свою
-/// капчу. Знаменатель — наборы, а не капчи: заранее неизвестно, у скольких из них
-/// VK спросит капчу.
-///
-/// Счётчики монотонны в пределах жизни пула. Креды живут ~9 минут, после чего
-/// набор перелогинивается и может снова словить капчу — узел покажет капчу при
-/// уже полном `passed`; граф при этом не флапает, потому что ядро в таком
-/// состоянии продолжает отдавать `ready`.
-nonisolated struct TurnCaptchaProgress: Hashable, Sendable {
-    /// Сколько наборов кредов нужно пулу.
-    let total: Int
-    /// Сколько уже получили креды — с капчей или без.
-    let passed: Int
-    /// Сколько наборов хоть раз ловили капчу. Точный сигнал «капча была»,
-    /// в отличие от фазы, которую опрашивают раз в секунду.
-    let captchaHits: Int
-
-    /// При одном наборе дробь не показываем — «Решение капчи 1/1» только шумит.
-    var showsFraction: Bool { total >= 2 }
-}
-
 // MARK: - Сборка этапа из сигналов приложения
 
-extension ConnectionStage {
+nonisolated extension ConnectionStage {
 
     /// Маршрут, по которому идёт (или пойдёт) трафик.
     nonisolated enum Route: Sendable {
@@ -301,6 +286,8 @@ extension ConnectionStage {
     ///   - turnMode: режим обхода; `nil`, когда фича выключена.
     ///   - autoDecision: решение пробы в режиме `.auto`; `nil` в `.on`/`.off`.
     ///   - turnPhase: фаза от Go-ядра; `nil`, пока пула нет.
+    ///   - turnUsable: пул обхода уже возит трафик (хоть одна сессия). `nil` —
+    ///     расширение не сообщает (старая сборка), тогда решает фаза.
     ///   - captchaPending: `TurnCaptchaMonitor.captchaWaiting`.
     ///   - captchaSeen: за эту сессию капчу действительно показывали.
     ///     `false` на маршруте обхода означает «капча не потребовалась».
@@ -311,6 +298,7 @@ extension ConnectionStage {
         turnMode: TurnMode?,
         autoDecision: TurnAutoState.Decision?,
         turnPhase: TurnPhase?,
+        turnUsable: Bool? = nil,
         captchaPending: Bool,
         captchaSeen: Bool,
         failure: ConnectionFailure?
@@ -344,11 +332,16 @@ extension ConnectionStage {
         case .undecided:
             return .whitelistCheck
         case .turn:
+            // Туннель уже возит трафик: капча, которую ядро просит ради новых пиров,
+            // этап не отменяет — она видна подписью у «Подключено».
+            if turnUsable == true {
+                return .connectedViaTurn(captchaSolved: captchaSeen)
+            }
             if captchaPending { return .captcha }
             switch turnPhase {
             case .captchaAuto, .captchaWait:
                 return .captcha
-            case .ready:
+            case .ready where turnUsable == nil:
                 return .connectedViaTurn(captchaSolved: captchaSeen)
             default:
                 return .turnTunnel
