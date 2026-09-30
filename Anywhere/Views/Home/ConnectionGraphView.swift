@@ -91,7 +91,7 @@ struct ConnectionGraphView: View {
     }
 
     /// Вертикаль, если точки в одной колонке; иначе S-образная кривая между колонками.
-    private struct EdgePath: Shape {
+    private nonisolated struct EdgePath: Shape {
         let from: CGPoint
         let to: CGPoint
 
