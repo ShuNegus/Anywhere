@@ -165,3 +165,33 @@ struct TurnDialerConfigTests {
         #expect(config["peer_addr"] as? String == "203.0.113.10:56000")
     }
 }
+
+/// Holding the power button forces one session through TURN: every routing decision
+/// reads the effective mode, while the stored setting stays what the user chose.
+@Suite(.serialized)
+struct TurnForceTests {
+
+    @Test func forcedSessionIsOnWhateverTheModeSays() {
+        let savedMode = AWCore.getTurnMode()
+        let savedFeature = AWCore.getTurnFeatureEnabled()
+        let savedForced = AWCore.getTurnForced()
+        defer {
+            AWCore.setTurnMode(savedMode)
+            AWCore.setTurnFeatureEnabled(savedFeature)
+            AWCore.setTurnForced(savedForced)
+        }
+
+        AWCore.setTurnFeatureEnabled(false)
+        for mode in [TurnMode.off, .auto, .on] {
+            AWCore.setTurnMode(mode)
+            AWCore.setTurnForced(true)
+            #expect(AWCore.getEffectiveTurnMode() == .on)
+            #expect(AWCore.getTurnActiveForSession())
+            #expect(AWCore.getTurnMode() == mode, "the stored setting must not change")
+
+            AWCore.setTurnForced(false)
+            #expect(AWCore.getEffectiveTurnMode() == mode)
+            #expect(!AWCore.getTurnActiveForSession())
+        }
+    }
+}

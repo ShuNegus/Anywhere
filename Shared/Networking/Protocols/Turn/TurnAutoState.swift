@@ -59,7 +59,7 @@ nonisolated final class TurnAutoState: Sendable {
     /// is not `.auto` or a decision is already in hand; the timeout is the safety net for
     /// a probe that never lands.
     func waitForDecision(timeout: Duration = .seconds(3)) async {
-        guard AWCore.getTurnMode() == .auto else { return }
+        guard AWCore.getEffectiveTurnMode() == .auto else { return }
         guard state.withLock({ $0.decision }) == .undecided else { return }
 
         let id = UUID()

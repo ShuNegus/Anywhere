@@ -472,7 +472,7 @@ actor TCPConnection: MITMSessionHost {
         #if canImport(Turn)
         // In auto mode the first flows of a session can outrun the reachability probe;
         // waiting here is what keeps them from dialing direct out of a censored network.
-        if AWCore.getTurnMode() == .auto { await TurnAutoState.shared.waitForDecision() }
+        if AWCore.getEffectiveTurnMode() == .auto { await TurnAutoState.shared.waitForDecision() }
         guard TurnDialerRegistry.isActive else { return nil }
         guard Self.turnEligibleProtocols.contains(configuration.outboundProtocol) else { return nil }
         // A chained proxy already builds its own tunnel stack; do not fight it for the slot.

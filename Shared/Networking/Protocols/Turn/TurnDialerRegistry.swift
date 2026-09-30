@@ -33,8 +33,8 @@ nonisolated final class TurnDialerRegistry: Sendable {
     /// Whether TURN should be used at all right now. In `.auto` this follows the
     /// autopilot's verdict, so flows go direct until a probe says the network is censored.
     static var isActive: Bool {
-        guard AWCore.getTurnFeatureEnabled(), !effectiveVKLink().isEmpty else { return false }
-        switch AWCore.getTurnMode() {
+        guard AWCore.getTurnActiveForSession(), !effectiveVKLink().isEmpty else { return false }
+        switch AWCore.getEffectiveTurnMode() {
         case .off: return false
         case .on: return true
         case .auto: return TurnAutoState.shared.decision == .turn

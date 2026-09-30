@@ -53,7 +53,7 @@ extension TunnelStack {
         Task.detached {
             // In auto mode there is nothing to warm until the probe has spoken; the
             // registry would hand back nil and the pool would never be built.
-            if AWCore.getTurnMode() == .auto { await TurnAutoState.shared.waitForDecision() }
+            if AWCore.getEffectiveTurnMode() == .auto { await TurnAutoState.shared.waitForDecision() }
             _ = TurnDialerRegistry.shared.dialer(for: configuration.serverAddress)
         }
         #endif

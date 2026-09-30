@@ -4,6 +4,73 @@
     "" : {
       "shouldTranslate" : false
     },
+    "home.power.forceTurnAction" : {
+      "comment" : "VoiceOver-действие кнопки питания: подключиться через TURN",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connect through TURN"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключиться через TURN"
+          }
+        }
+      }
+    },
+    "home.power.forceTurnHint" : {
+      "comment" : "VoiceOver-подсказка кнопки питания про долгое нажатие",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hold for two seconds to connect through TURN."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Удерживайте две секунды, чтобы подключиться через TURN."
+          }
+        }
+      }
+    },
+    "Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked. Holding the power button for two seconds connects through TURN once, whatever the mode." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked. Holding the power button for two seconds connects through TURN once, whatever the mode."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пропускает трафик прокси через реле VK Calls, прежде чем он дойдёт до сервера, — со стороны соединение выглядит как обычный звонок. В режиме «Авто» сеть сначала проверяется, и туннель включается, только если прямой путь заблокирован. Если удерживать кнопку питания две секунды, подключение один раз пойдёт через TURN — при любом режиме."
+          }
+        }
+      }
+    },
+    "vpn.error.turnUnavailable" : {
+      "comment" : "Долгое нажатие на кнопку: TURN для выбранного сервера недоступен",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TURN is not available for this server: the subscription lists no relay for it, or no VK Calls link is set."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TURN для этого сервера недоступен: в подписке нет реле для него или не задана ссылка VK Calls."
+          }
+        }
+      }
+    },
     "·" : {
       "shouldTranslate" : false
     },
@@ -18761,22 +18828,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "隧道"
-          }
-        }
-      }
-    },
-    "Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Пропускает трафик прокси через реле VK Calls, прежде чем он дойдёт до сервера, — со стороны соединение выглядит как обычный звонок. В режиме «Авто» сеть сначала проверяется, и туннель включается, только если прямой путь заблокирован."
           }
         }
       }

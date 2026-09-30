@@ -45,7 +45,9 @@ struct HomeView: View {
         ConnectionStage.resolve(
             status: viewModel.status,
             isPreflighting: viewModel.isPreflighting,
-            turnMode: settings.turnFeatureEnabled ? settings.turnMode : nil,
+            // A session forced through TURN (power button held) walks the bypass branch
+            // whatever the setting says.
+            turnMode: viewModel.turnForcedInSession ? .on : (settings.turnFeatureEnabled ? settings.turnMode : nil),
             autoDecision: viewModel.turnAutoDecisionValue,
             turnPhase: viewModel.turnPhase,
             turnUsable: viewModel.turnPool?.usable,
@@ -244,11 +246,17 @@ struct HomeView: View {
             isDisabled: isLoading
                 || !configStore.hasConfigurations
                 || viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations),
-            animatesChanges: connectionEffectsEnabled
+            animatesChanges: connectionEffectsEnabled,
+            isTurnForced: viewModel.turnForcedInSession
         ) {
             guard !isLoading, configStore.hasConfigurations else { return }
             withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
                 viewModel.toggleVPN()
+            }
+        } longPressAction: {
+            guard !isLoading, configStore.hasConfigurations else { return }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
+                viewModel.connectForcingTurn()
             }
         }
     }
@@ -401,16 +409,34 @@ private struct BackgroundGradient: View {
 
 private struct PowerButton: View {
     private static let circleDiameter: CGFloat = 140
+    /// Holding the button this long connects through TURN whatever the TURN mode says.
+    static let forceTurnHold: Double = 2
 
     let isConnected: Bool
     let isTransitioning: Bool
     let isLoading: Bool
     let isDisabled: Bool
     let animatesChanges: Bool
+    /// The session was forced through TURN; the ring stays drawn as a reminder.
+    let isTurnForced: Bool
     let action: () -> Void
+    let longPressAction: () -> Void
+
+    /// The finger is down on the button (drives the hold ring).
+    @GestureState private var isHolding = false
+    /// The hold completed; swallows the tap the button fires on release.
+    @State private var didLongPress = false
+    /// Bumped on each completed hold, for the haptic.
+    @State private var holdCount = 0
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            if didLongPress {
+                didLongPress = false
+                return
+            }
+            action()
+        } label: {
             ZStack {
                 if #available(iOS 27.0, *) {
                     Circle()
@@ -428,6 +454,7 @@ private struct PowerButton: View {
                         .frame(width: Self.circleDiameter)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 }
+                holdRing
                 if isTransitioning || isLoading {
                     ProgressView()
                         .controlSize(.large)
@@ -440,7 +467,43 @@ private struct PowerButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: Self.forceTurnHold)
+                .updating($isHolding) { pressing, state, _ in state = pressing }
+                .onEnded { _ in
+                    guard !isDisabled else { return }
+                    didLongPress = true
+                    holdCount += 1
+                    longPressAction()
+                }
+        )
+        .sensoryFeedback(.impact(weight: .heavy), trigger: holdCount)
         .animation(animatesChanges ? Animation.easeInOut(duration: 0.6) : nil, value: isConnected)
+        .accessibilityHint(String(
+            localized: "home.power.forceTurnHint",
+            defaultValue: "Hold for two seconds to connect through TURN.",
+            comment: "VoiceOver-подсказка кнопки питания про долгое нажатие"
+        ))
+        .accessibilityAction(named: String(
+            localized: "home.power.forceTurnAction",
+            defaultValue: "Connect through TURN",
+            comment: "VoiceOver-действие кнопки питания: подключиться через TURN"
+        )) {
+            guard !isDisabled else { return }
+            longPressAction()
+        }
+    }
+
+    /// Fills over the hold; drawn full while the session is forced through TURN.
+    private var holdRing: some View {
+        Circle()
+            .trim(from: 0, to: isHolding || isTurnForced ? 1 : 0)
+            .stroke(Color.cyan.opacity(isTurnForced && !isHolding ? 0.55 : 0.9),
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round))
+            .rotationEffect(.degrees(-90))
+            .frame(width: Self.circleDiameter + 10)
+            .animation(isHolding ? .linear(duration: Self.forceTurnHold) : .easeOut(duration: 0.2), value: isHolding)
+            .allowsHitTesting(false)
     }
 }
 

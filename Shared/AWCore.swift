@@ -117,6 +117,7 @@ nonisolated final class AWCore {
         static let turnEnabled = "turnEnabled"
         static let turnFeatureEnabled = "turnFeatureEnabled"
         static let turnMode = "turnMode"
+        static let turnForced = "turnForced"
         static let turnPeers = "turnPeers"
         static let turnVKLink = "turnVKLink"
         static let voyagerMembership = "voyagerMembership"
@@ -750,6 +751,30 @@ nonisolated final class AWCore {
 
     static func setTurnMode(_ mode: TurnMode) {
         userDefaults.set(mode.rawValue, forKey: UserDefaultsKey.turnMode)
+    }
+
+    /// Set by holding the power button: this tunnel session goes through TURN whatever
+    /// the mode (or the master switch) says. Lives in the app group so the extension
+    /// sees it; cleared by the next ordinary connect and by an explicit disconnect.
+    static func getTurnForced() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.turnForced)
+    }
+
+    static func setTurnForced(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.turnForced)
+    }
+
+    /// Whether any TURN behaviour applies at all: the feature is on, or this session
+    /// was forced through TURN.
+    static func getTurnActiveForSession() -> Bool {
+        getTurnFeatureEnabled() || getTurnForced()
+    }
+
+    /// The mode actually in force for this session: `.on` while forced, otherwise the
+    /// user's setting. Everything that decides routing reads this, not `getTurnMode()`;
+    /// the settings screen keeps showing the stored choice.
+    static func getEffectiveTurnMode() -> TurnMode {
+        getTurnForced() ? .on : getTurnMode()
     }
 
     /// The VK Calls join link the TURN relay authenticates against. Ephemeral, so it is
