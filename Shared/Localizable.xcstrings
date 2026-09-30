@@ -4,72 +4,6 @@
     "" : {
       "shouldTranslate" : false
     },
-    "graph.node.connectedAddingPeers" : {
-      "comment" : "Узел графа: туннель работает, пул ещё добирает пиры — поднято/всего",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Connected · Peers %lld/%lld"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Подключено · пиры %lld/%lld"
-          }
-        }
-      }
-    },
-    "graph.node.connectedCaptchaForPeers" : {
-      "comment" : "Узел графа: туннель работает, но для новых пиров нужна капча",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Connected · Captcha for More Peers"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Подключено · капча для новых пиров"
-          }
-        }
-      }
-    },
-    "Per relay: sessions / open streams, then VK accounts in use." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Per relay: sessions / open streams, then VK accounts in use."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "По каждому реле: сессии / открытые потоки, затем задействованные аккаунты VK."
-          }
-        }
-      }
-    },
-    "The relay serves up to %lld peers per VK account. Only when it is full does the app sign in with one more account — which may ask for one more captcha." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The relay serves up to %lld peers per VK account. Only when it is full does the app sign in with one more account — which may ask for one more captcha."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Реле обслуживает до %lld пиров на один аккаунт VK. Ещё один аккаунт приложение подключает, только когда реле заполнено, — и для него может понадобиться ещё одна капча."
-          }
-        }
-      }
-    },
     "·" : {
       "shouldTranslate" : false
     },
@@ -8085,6 +8019,40 @@
         }
       }
     },
+    "graph.node.connectedAddingPeers" : {
+      "comment" : "Узел графа: туннель работает, пул ещё добирает пиры — поднято/всего",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected · Peers %lld/%lld"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено · пиры %lld/%lld"
+          }
+        }
+      }
+    },
+    "graph.node.connectedCaptchaForPeers" : {
+      "comment" : "Узел графа: туннель работает, но для новых пиров нужна капча",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected · Captcha for More Peers"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено · капча для новых пиров"
+          }
+        }
+      }
+    },
     "graph.node.networkCheck" : {
       "comment" : "Узел графа: есть ли сеть",
       "localizations" : {
@@ -12457,7 +12425,24 @@
         }
       }
     },
+    "Per relay: sessions / open streams, then VK accounts in use." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Per relay: sessions / open streams, then VK accounts in use."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По каждому реле: сессии / открытые потоки, затем задействованные аккаунты VK."
+          }
+        }
+      }
+    },
     "Per relay: sessions / open streams." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -17768,6 +17753,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "以下路由规则使用的代理已被删除，它们已重置为默认: %@"
+          }
+        }
+      }
+    },
+    "The relay serves up to %lld peers per VK account. Only when it is full does the app sign in with one more account — which may ask for one more captcha." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The relay serves up to %lld peers per VK account. Only when it is full does the app sign in with one more account — which may ask for one more captcha."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Реле обслуживает до %lld пиров на один аккаунт VK. Ещё один аккаунт приложение подключает, только когда реле заполнено, — и для него может понадобиться ещё одна капча."
           }
         }
       }
