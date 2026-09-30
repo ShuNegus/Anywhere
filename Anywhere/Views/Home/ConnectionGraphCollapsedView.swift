@@ -89,7 +89,7 @@ struct ConnectionGraphCollapsedView: View {
             )
     }
 
-    private struct MiniEdgePath: Shape {
+    private nonisolated struct MiniEdgePath: Shape {
         let from: CGPoint
         let to: CGPoint
 
