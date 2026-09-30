@@ -210,6 +210,66 @@ nonisolated private final class TurnLogRelay: NSObject, AnywhereLogSinkProtocol 
     func onLog(_ msg: String?) {
         guard let msg, !msg.isEmpty else { return }
         logger.debug("[turn \(host)] \(msg)")
+        TurnCoreLogFile.shared.append("[\(host)] \(msg)")
+    }
+}
+
+// MARK: - Log file
+
+/// Keeps the Go core's log in the app group, so it can be pulled off a device after the
+/// fact (`devicectl device copy from --domain-type appGroupDataContainer
+/// --domain-identifier group.su.smd.Anywhere --source Library/Caches/turn-core.log`).
+/// The core logs at os.log debug level, which iOS does not keep, and the in-app viewer
+/// only takes info and above — without this a captcha or pool problem on a device leaves
+/// no trace. Lines are cheap and few (one per credential fetch, Allocate and session
+/// change); the file rotates at 1 MB, keeping one previous generation.
+nonisolated final class TurnCoreLogFile: @unchecked Sendable {
+
+    static let shared = TurnCoreLogFile()
+
+    private static let maxBytes = 1 << 20
+
+    /// Everything below is touched on `queue` only.
+    private let queue = DispatchQueue(label: "su.smd.Anywhere.turn-core-log", qos: .utility)
+    private let url: URL?
+    private var handle: FileHandle?
+    private var size = 0
+    private let stamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private init() {
+        url = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite)?
+            .appending(path: "Library/Caches/turn-core.log")
+    }
+
+    func append(_ line: String) {
+        let now = Date()
+        queue.async { self.write(line, at: now) }
+    }
+
+    private func write(_ line: String, at date: Date) {
+        guard let url else { return }
+        if size >= Self.maxBytes {
+            try? handle?.close()
+            handle = nil
+            let previous = url.appendingPathExtension("1")
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: url, to: previous)
+        }
+        if handle == nil {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            handle = try? FileHandle(forWritingTo: url)
+            size = Int((try? handle?.seekToEnd()) ?? 0)
+        }
+        let data = Data("\(stamp.string(from: date)) \(line)\n".utf8)
+        try? handle?.write(contentsOf: data)
+        size += data.count
     }
 }
 #endif

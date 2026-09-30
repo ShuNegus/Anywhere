@@ -81,6 +81,7 @@ nonisolated final class TurnDialerRegistry: Sendable {
         }
         if !stale.isEmpty {
             logger.info("TURN settings changed: closing \(stale.count) live dialer(s), pools will be rebuilt")
+            TurnCoreLogFile.shared.append("[registry] settings changed, closing \(stale.count) dialer(s)")
             stale.forEach { $0.close() }
         }
 
@@ -108,6 +109,7 @@ nonisolated final class TurnDialerRegistry: Sendable {
                     manualCaptcha: manualCaptcha
                 )
                 state.dialers[server.host] = dialer
+                TurnCoreLogFile.shared.append("[registry] new dialer for \(server.host): peers=\(peers) (requested \(requestedPeers)), manualCaptcha=\(manualCaptcha)")
                 return dialer
             } catch {
                 logger.debug("TURN dialer unavailable for \(host): \(error.localizedDescription)")
@@ -170,6 +172,7 @@ nonisolated final class TurnDialerRegistry: Sendable {
         }
         guard !dialers.isEmpty else { return }
         logger.info("TURN reset: closing \(dialers.count) dialer(s) (tunnel stop or reconfiguration)")
+        TurnCoreLogFile.shared.append("[registry] reset, closing \(dialers.count) dialer(s)")
         dialers.forEach { $0.close() }
     }
 }
