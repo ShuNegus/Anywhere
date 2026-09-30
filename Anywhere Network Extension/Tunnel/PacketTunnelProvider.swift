@@ -268,7 +268,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         case .fetchTurnStats:
             // Only meaningful in auto mode; the other two need no explanation in the UI.
-            let autoDecision = AWCore.getTurnMode() == .auto
+            let autoDecision = AWCore.getEffectiveTurnMode() == .auto
                 ? TurnAutoState.shared.decision.rawValue
                 : nil
             #if canImport(Turn)

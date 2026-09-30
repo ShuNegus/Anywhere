@@ -35,7 +35,7 @@ struct TurnSettingsView: View {
                     LabeledContent("Route", value: autoStatus)
                 }
             } footer: {
-                Text("Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked.")
+                Text("Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked. Holding the power button for two seconds connects through TURN once, whatever the mode.")
             }
 
             vkLinkSection

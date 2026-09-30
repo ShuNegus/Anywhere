@@ -187,7 +187,7 @@ nonisolated final class TurnAutoPilot: Sendable {
     // MARK: - Private
 
     private var isEngaged: Bool {
-        AWCore.getTurnFeatureEnabled() && AWCore.getTurnMode() == .auto
+        AWCore.getTurnActiveForSession() && AWCore.getEffectiveTurnMode() == .auto
     }
 
     private func schedule(after delay: Duration?) {

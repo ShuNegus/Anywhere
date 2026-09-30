@@ -83,6 +83,11 @@ class VPNViewModel {
     @ObservationIgnored private var vpnManager: NETunnelProviderManager?
     @ObservationIgnored private var statusObserver: Task<Void, Never>?
     private(set) var pendingReconnect = false
+    /// The reconnect in flight was asked to go through TURN (a long press while connected).
+    @ObservationIgnored private var pendingReconnectForcesTurn = false
+    /// This session was forced through TURN by holding the power button, whatever the
+    /// TURN mode says. Mirrors `AWCore.getTurnForced()`, which the extension reads.
+    private(set) var turnForcedInSession = AWCore.getTurnForced()
     /// Debounces a transient `.reasserting` (network blip) while connected so the UI keeps
     /// showing "Connected" unless the reconnect persists past ``reassertingDebounceInterval``.
     @ObservationIgnored private var reassertingDebounceTask: Task<Void, Never>?
@@ -485,7 +490,10 @@ class VPNViewModel {
                 stats.reset()
                 if pendingReconnect {
                     pendingReconnect = false
-                    connectVPN()
+                    // A reconnect keeps a forced TURN session forced.
+                    let force = pendingReconnectForcesTurn || AWCore.getTurnForced()
+                    pendingReconnectForcesTurn = false
+                    connectVPN(forceTurn: force)
                 }
             }
         }
@@ -499,7 +507,7 @@ class VPNViewModel {
     /// `fetchTurnStats` IPC. Keeps polling past `.ready`: the phase has to be able to
     /// fall back when a pool reconnects, so it is deliberately never latched.
     private func startTurnPhaseWatch(session: NETunnelProviderSession) {
-        guard AWCore.getTurnFeatureEnabled(), AWCore.getTurnMode() != .off else { return }
+        guard AWCore.getTurnActiveForSession(), AWCore.getEffectiveTurnMode() != .off else { return }
         guard turnPhaseTask == nil else { return }
         turnPhaseTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -559,7 +567,7 @@ class VPNViewModel {
             return
         }
 
-        let mode = AWCore.getTurnFeatureEnabled() ? AWCore.getTurnMode() : nil
+        let mode = AWCore.getTurnActiveForSession() ? AWCore.getEffectiveTurnMode() : nil
         guard ConnectionStage.route(turnMode: mode, autoDecision: turnAutoDecisionValue) == .turn else {
             turnRouteSince = nil
             return
@@ -660,9 +668,52 @@ class VPNViewModel {
         }
     }
 
-    func connectVPN() {
+    /// Connects through TURN whatever the TURN mode or the master switch says — the
+    /// power button held for two seconds. Reconnects when the tunnel is already up.
+    /// Refuses with an error when the selected server has no TURN relay or no VK link
+    /// is known, rather than silently connecting directly.
+    func connectForcingTurn() {
+        guard let configuration = selectedConfiguration else { return }
+        guard Self.isTurnAvailable(for: configuration) else {
+            startError = String(
+                localized: "vpn.error.turnUnavailable",
+                defaultValue: "TURN is not available for this server: the subscription lists no relay for it, or no VK Calls link is set.",
+                comment: "Долгое нажатие на кнопку: TURN для выбранного сервера недоступен"
+            )
+            return
+        }
+        switch vpnStatus {
+        case .connected, .connecting, .reasserting:
+            if AWCore.getTurnForced() { return } // already going through TURN
+            pendingReconnectForcesTurn = true
+            reconnectVPN()
+        case .disconnected, .invalid:
+            connectVPN(forceTurn: true)
+        default:
+            break
+        }
+    }
+
+    /// The selected server has a usable TURN relay in a subscription and there is a VK
+    /// link to dial with — what the extension will need to open the tunnel.
+    static func isTurnAvailable(for configuration: ProxyConfiguration) -> Bool {
+        guard let server = TurnMetadataStore.shared.server(for: configuration.serverAddress),
+              server.isUsable else { return false }
+        let manual = AWCore.getTurnVKLink().trimmingCharacters(in: .whitespacesAndNewlines)
+        let shipped = TurnMetadataStore.shared.subscriptionVKLink()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !manual.isEmpty || !shipped.isEmpty
+    }
+
+    /// - Parameter forceTurn: route this session through TURN whatever the mode says.
+    ///   An ordinary connect clears a previous session's force.
+    func connectVPN(forceTurn: Bool = false) {
         guard let manager = vpnManager,
               let configuration = selectedConfiguration else { return }
+
+        // Before anything reads the mode below (the preflight) or in the extension.
+        AWCore.setTurnForced(forceTurn)
+        turnForcedInSession = forceTurn
 
         connectionFailure = nil
         captchaSeenInSession = false
@@ -673,7 +724,7 @@ class VPNViewModel {
             // Auto mode is the only one that probes: it is also the only one that has to
             // tell "no network" apart from "censored network", and refusing to start on a
             // dead network beats a tunnel that silently carries nothing.
-            if AWCore.getTurnFeatureEnabled(), AWCore.getTurnMode() == .auto {
+            if AWCore.getTurnActiveForSession(), AWCore.getEffectiveTurnMode() == .auto {
                 isPreflighting = true
                 let verdict = await ConnectivityProbe.classify(profile: .preflight)
                 isPreflighting = false
@@ -739,6 +790,9 @@ class VPNViewModel {
     func disconnectVPN() {
         guard let manager = vpnManager else { return }
         userRequestedDisconnect = true
+        // A forced TURN session ends with it; Always On restarts go by the mode again.
+        AWCore.setTurnForced(false)
+        turnForcedInSession = false
         // Clear any pending reconnect — an explicit disconnect should not auto-reconnect
         pendingReconnect = false
         if manager.isOnDemandEnabled {
