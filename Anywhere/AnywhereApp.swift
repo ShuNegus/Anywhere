@@ -52,6 +52,7 @@ struct AnywhereApp: App {
                 .environment(operations)
                 .environment(container.appState)
                 .environment(container.tunnel)
+                .environment(container.turnSession)
                 .environment(container.selection)
                 .environment(container.latency)
                 .environment(container.stats)

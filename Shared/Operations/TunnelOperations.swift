@@ -12,11 +12,14 @@ import NetworkExtension
 struct TunnelOperations {
     let tunnel: TunnelController
     let selection: ProxySelection
+    /// Our backup route (TURN) layer: preflight, forced flag and watchdog wrap the
+    /// tunnel's own connect/disconnect.
+    let turnSession: TurnSessionModel
 
     func toggle() {
         switch tunnel.rawStatus {
         case .connected, .connecting:
-            tunnel.disconnect()
+            disconnect()
         case .disconnected, .invalid:
             connect()
         default:
@@ -25,15 +28,22 @@ struct TunnelOperations {
     }
 
     func connect() {
-        guard let configuration = selection.selectedConfiguration else { return }
-        tunnel.connect(using: configuration)
+        guard selection.selectedConfiguration != nil else { return }
+        turnSession.connect()
+    }
+
+    /// The power button held for two seconds: connect (or reconnect) through TURN.
+    func connectForcingTurn() {
+        turnSession.connectForcingTurn()
     }
 
     func disconnect() {
+        turnSession.noteUserDisconnect()
         tunnel.disconnect()
     }
 
     func reconnect() {
+        turnSession.noteUserReconnect()
         tunnel.reconnect()
     }
 }

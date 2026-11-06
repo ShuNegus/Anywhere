@@ -20,6 +20,8 @@ final class AppContainer {
     let latency = LatencyCenter()
     let stats = ConnectionStats()
     let appState = AppState()
+    /// Backup route (TURN) side of the session: forced flag, preflight, watchdog.
+    let turnSession: TurnSessionModel
 
     let configurationStore: ConfigurationStore
     let chainStore: ChainStore
@@ -46,6 +48,7 @@ final class AppContainer {
         mitmRuleSetStore = MITMRuleSetStore(syncStore: syncStore)
         moduleStore = ModuleStore(syncStore: syncStore)
         certificateStore = CertificateStore()
+        turnSession = TurnSessionModel(tunnel: tunnel, selection: selection, subscriptionStore: subscriptionStore)
     }
 
     // MARK: - Operation Factories
@@ -94,6 +97,7 @@ final class AppContainer {
         routingExportScheduler.schedule()
         mitmExportScheduler.schedule()
         tunnel.start()
+        turnSession.start()
     }
     
     private func observeTunnelStatus() {

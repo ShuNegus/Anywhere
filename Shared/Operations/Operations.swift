@@ -68,7 +68,7 @@ final class Operations {
     }
 
     var tunnel: TunnelOperations {
-        TunnelOperations(tunnel: container.tunnel, selection: container.selection)
+        TunnelOperations(tunnel: container.tunnel, selection: container.selection, turnSession: container.turnSession)
     }
 
     var latency: LatencyRunner {
