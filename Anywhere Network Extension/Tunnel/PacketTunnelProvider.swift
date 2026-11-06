@@ -24,14 +24,67 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
 
-    private let rootTask = Mutex<Task<Void, Never>?>(nil)
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case starting
+        case running
+        case stopping
+        case stopped
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .starting),
+                 (.stopped, .starting),
+                 (.starting, .running),
+                 (.starting, .stopped),
+                 (.idle, .stopping),
+                 (.starting, .stopping),
+                 (.running, .stopping),
+                 (.stopped, .stopping),
+                 (.stopping, .stopped):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+    private struct ProviderState: PhaseHolding {
+        var phase: Phase = .idle
+        var rootTask: Task<Void, Never>?
+        var claimGeneration: UInt64 = 0
+    }
+    private let providerState = Mutex(ProviderState())
 
     // MARK: - Tunnel Lifecycle
-    
+
     override func startTunnel(options: [String : NSObject]? = nil) async throws {
-        guard let configuration = resolveStartConfiguration(options: options) else {
+        enum Claim { case proceed(UInt64), alreadyUp, superseded }
+        let claim: Claim = providerState.withLock { state in
+            switch state.phase {
+            case .idle, .stopped:
+                state.transition(to: .starting)
+                state.claimGeneration += 1
+                return .proceed(state.claimGeneration)
+            case .starting, .running:
+                return .alreadyUp
+            case .stopping:
+                return .superseded
+            }
+        }
+        let myClaim: UInt64
+        switch claim {
+        case .proceed(let generation):
+            myClaim = generation
+        case .alreadyUp:
+            return
+        case .superseded:
+            throw AnywhereError.tunnel(.sessionUnavailable)
+        }
+
+        guard let configuration = resolveStartConfiguration() else {
             let error = AnywhereError.tunnel(.invalidConfiguration)
             logger.report("[VPN] Start failed", error: error)
+            releaseStartClaim(myClaim)
             throw error
         }
 
@@ -43,54 +96,93 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
 #endif
 
-        let settings = buildTunnelSettings()
-        
         do {
-            try await setTunnelNetworkSettings(settings)
+            try await applyTunnelSettings()
         } catch {
             let wrapped = AnywhereError.tunnel(.settingsApplyFailed(underlying: error))
-            logger.report("[VPN]", error: wrapped)
+            logger.report("[VPN] Start failed", error: wrapped)
+            releaseStartClaim(myClaim)
             throw wrapped
+        }
+
+        guard providerState.withLock({ $0.phase == .starting && $0.claimGeneration == myClaim }) else {
+            throw AnywhereError.tunnel(.sessionUnavailable)
         }
 
 #if os(iOS)
         ControlCenter.shared.reloadControls(ofKind: "su.smd.Anywhere.Widget.VPNToggle")
 #endif
 
-        await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
-        
-        rootTask.withLock { task in
-            guard task == nil else { return }
-            task = Task { await self.run() }
+        let stackStarted = await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
+
+        var installed: Bool = providerState.withLock { state in
+            guard state.claimGeneration == myClaim, stackStarted,
+                  state.transition(to: .running) else { return false }
+            return true
         }
-        
-        statsRecorder.start { [tunnelStack] in
-            return StatsRecorder.RawValues(
-                byteCounts: tunnelStack.byteCounts.withLock { $0 },
-                tcpConnectionCount: FlowGauge.tcpTable,
-                udpConnectionCount: FlowGauge.udpTable,
-                memoryBytes: Self.memoryFootprint()
-            )
+        if installed {
+            enum Install { case adopted, taskAlreadyPresent, superseded }
+            let rootTask = Task { await self.run() }
+            let outcome: Install = providerState.withLock { state in
+                guard state.phase == .running, state.claimGeneration == myClaim else { return .superseded }
+                guard state.rootTask == nil else { return .taskAlreadyPresent }
+                state.rootTask = rootTask
+                return .adopted
+            }
+            switch outcome {
+            case .adopted:
+                startStatsRecorder(claim: myClaim)
+            case .taskAlreadyPresent:
+                rootTask.cancel()
+                startStatsRecorder(claim: myClaim)
+            case .superseded:
+                rootTask.cancel()
+                installed = false
+            }
+        }
+        guard installed else {
+            releaseStartClaim(myClaim)
+            if stackStarted {
+                await tunnelStack.stop()
+            }
+#if canImport(Turn)
+            turnAutoPilot.stop()
+#endif
+            throw AnywhereError.tunnel(.sessionUnavailable)
         }
 
 #if canImport(Turn)
         captchaNotifier.start()
 #endif
     }
-    
-    private func resolveStartConfiguration(options: [String: NSObject]?) -> ProxyConfiguration? {
-        if let messageData = options?[TunnelMessage.optionKey] as? Data {
-            do {
-                if case .setConfiguration(let config) = try JSONDecoder().decode(TunnelMessage.self, from: messageData) {
-                    return config
-                }
-            } catch {
-                logger.report("[VPN] Start options decode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
-            }
+
+    private func startStatsRecorder(claim: UInt64) {
+        statsRecorder.start { [tunnelStack] in
+            return StatsRecorder.RawValues(
+                byteCounts: tunnelStack.byteCountsSnapshot(),
+                tcpConnectionCount: FlowGauge.tcpTable,
+                udpConnectionCount: FlowGauge.udpTable,
+                memoryBytes: Self.memoryFootprint()
+            )
         }
-        guard let savedData = AWCore.getLastConfigurationData() else { return nil }
+        let stillRunning = providerState.withLock { $0.phase == .running && $0.claimGeneration == claim }
+        if !stillRunning {
+            statsRecorder.stop()
+        }
+    }
+
+    @discardableResult
+    private func releaseStartClaim(_ claim: UInt64) -> Bool {
+        providerState.withLock { state in
+            guard state.claimGeneration == claim else { return false }
+            if state.phase == .starting { state.transition(to: .stopped) }
+            return true
+        }
+    }
+
+    private func resolveStartConfiguration() -> ProxyConfiguration? {
         do {
-            return try JSONDecoder().decode(ProxyConfiguration.self, from: savedData)
+            return try ActiveConfiguration.load()
         } catch {
             logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
             return nil
@@ -99,118 +191,103 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     // MARK: - Tunnel Settings
 
-    private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
-        let tunnelAddressIPv4 = TunnelConstants.tunnelAddressIPv4
+    private let discoveredMTU = Mutex<Int?>(nil)
+
+    private func applyTunnelSettings() async throws {
+        if let mtu = discoveredMTU.withLock({ $0 }) {
+            try await setTunnelNetworkSettings(buildTunnelSettings(mtu: mtu))
+            return
+        }
+        var mtu = TunnelConstants.fallbackMTU
+        for candidate in TunnelConstants.tunnelMTUCandidates {
+            guard (try? await setTunnelNetworkSettings(buildTunnelSettings(mtu: candidate))) != nil,
+                  Self.interfaceMTU(forAddress: TunnelAddress.ipv4) == candidate else { continue }
+            mtu = candidate
+            break
+        }
+        if mtu == TunnelConstants.fallbackMTU {
+            try await setTunnelNetworkSettings(buildTunnelSettings(mtu: mtu))
+        }
+        discoveredMTU.withLock { $0 = mtu }
+    }
+
+    private static func interfaceMTU(forAddress address: String) -> Int? {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let first else { return nil }
+        defer { freeifaddrs(first) }
+        var mtus: [String: Int] = [:]
+        var owner: String?
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            cursor = entry.pointee.ifa_next
+            let name = String(cString: entry.pointee.ifa_name)
+            guard let socketAddress = entry.pointee.ifa_addr else { continue }
+            switch Int32(socketAddress.pointee.sa_family) {
+            case AF_LINK:
+                if let data = entry.pointee.ifa_data?.assumingMemoryBound(to: if_data.self) {
+                    mtus[name] = Int(data.pointee.ifi_mtu)
+                }
+            case AF_INET:
+                var ipv4 = socketAddress.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+                var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &ipv4, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                    if String(decoding: bytes, as: UTF8.self) == address {
+                        owner = name
+                    }
+                }
+            default:
+                break
+            }
+        }
+        guard let owner else { return nil }
+        return mtus[owner]
+    }
+
+    private func buildTunnelSettings(mtu: Int) -> NEPacketTunnelNetworkSettings {
+        let tunnelAddressIPv4 = TunnelAddress.ipv4
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: tunnelAddressIPv4)
 
         let hideVPNIcon = AWCore.getHideVPNIcon()
+        let reflectionEnabled = AWCore.getReflectionEnabled()
         let includedRoutes = Self.parseRoutes(AWCore.getTunnelIncludedRoutes())
         let excludedRoutes = Self.parseRoutes(AWCore.getTunnelExcludedRoutes())
 
         let ipv4Settings = NEIPv4Settings(addresses: [tunnelAddressIPv4], subnetMasks: ["255.255.255.0"])
-        ipv4Settings.includedRoutes = [NEIPv4Route.default()] + includedRoutes.ipv4
-        var excludedIPv4Routes = excludedRoutes.ipv4
+        var includedIPv4Routes = [NEIPv4Route.default()] + includedRoutes
+        if reflectionEnabled {
+            includedIPv4Routes.append(NEIPv4Route(destinationAddress: TunnelAddress.reflection, subnetMask: "255.255.255.255"))
+        }
+        ipv4Settings.includedRoutes = includedIPv4Routes
+        var excludedIPv4Routes = excludedRoutes
         if hideVPNIcon {
             excludedIPv4Routes.append(NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254"))
         }
         ipv4Settings.excludedRoutes = excludedIPv4Routes
         settings.ipv4Settings = ipv4Settings
-        
-        let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps() && !hideVPNIcon
-        if advertiseIPv6ToApps {
-            let ipv6Settings = NEIPv6Settings(addresses: [TunnelConstants.tunnelAddressIPv6], networkPrefixLengths: [64])
-            ipv6Settings.includedRoutes = [NEIPv6Route.default()] + includedRoutes.ipv6
-            ipv6Settings.excludedRoutes = excludedRoutes.ipv6
-            settings.ipv6Settings = ipv6Settings
-        }
-        
-        let plainDNSServers: [String]
-        if advertiseIPv6ToApps {
-            plainDNSServers = [tunnelAddressIPv4, TunnelConstants.tunnelAddressIPv6]
-        } else {
-            plainDNSServers = [tunnelAddressIPv4]
-        }
 
-        settings.dnsSettings = NEDNSSettings(servers: plainDNSServers)
-        settings.mtu = 1500
+        settings.dnsSettings = NEDNSSettings(servers: [tunnelAddressIPv4])
+        settings.mtu = NSNumber(value: mtu)
 
         return settings
     }
-    
-    private static func parseRoutes(_ strings: [String]) -> (ipv4: [NEIPv4Route], ipv6: [NEIPv6Route]) {
-        var ipv4Routes: [NEIPv4Route] = []
-        var ipv6Routes: [NEIPv6Route] = []
 
-        for string in strings {
-            if string.contains(":") {
-                if let route = parseIPv6Route(string) {
-                    ipv6Routes.append(route)
-                }
-            } else if let route = parseIPv4Route(string) {
-                ipv4Routes.append(route)
-            }
+    private static func parseRoutes(_ strings: [String]) -> [NEIPv4Route] {
+        strings.compactMap(IPRoute.init).map { route in
+            NEIPv4Route(destinationAddress: dottedQuad(route.network), subnetMask: dottedQuad(route.mask))
         }
-
-        return (ipv4: ipv4Routes, ipv6: ipv6Routes)
-    }
-    
-    private static func parseIPv4Route(_ string: String) -> NEIPv4Route? {
-        let parts = string.split(separator: "/", maxSplits: 1)
-        guard let addressPart = parts.first else { return nil }
-        var address = in_addr()
-        guard inet_pton(AF_INET, String(addressPart), &address) == 1 else { return nil }
-
-        var prefixLength = 32
-        if parts.count == 2 {
-            guard let parsed = Int(parts[1]), (0...32).contains(parsed) else { return nil }
-            prefixLength = parsed
-        }
-
-        let mask: UInt32 = prefixLength == 0 ? 0 : ~UInt32(0) << (32 - prefixLength)
-        let network = UInt32(bigEndian: address.s_addr) & mask
-        return NEIPv4Route(destinationAddress: dottedQuad(network), subnetMask: dottedQuad(mask))
-    }
-    
-    private static func parseIPv6Route(_ string: String) -> NEIPv6Route? {
-        let parts = string.split(separator: "/", maxSplits: 1)
-        guard let addressPart = parts.first else { return nil }
-        var address = in6_addr()
-        guard inet_pton(AF_INET6, String(addressPart), &address) == 1 else { return nil }
-
-        var prefixLength = 128
-        if parts.count == 2 {
-            guard let parsed = Int(parts[1]), (0...128).contains(parsed) else { return nil }
-            prefixLength = parsed
-        }
-
-        withUnsafeMutableBytes(of: &address) { bytes in
-            for byteIndex in bytes.indices {
-                let bitPosition = byteIndex * 8
-                if bitPosition >= prefixLength {
-                    bytes[byteIndex] = 0
-                } else if bitPosition + 8 > prefixLength {
-                    bytes[byteIndex] &= ~UInt8(0) << (8 - (prefixLength - bitPosition))
-                }
-            }
-        }
-
-        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-        guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
-        return NEIPv6Route(destinationAddress: String(nulTerminated: buffer), networkPrefixLength: NSNumber(value: prefixLength))
     }
 
     private static func dottedQuad(_ value: UInt32) -> String {
         "\((value >> 24) & 0xFF).\((value >> 16) & 0xFF).\((value >> 8) & 0xFF).\(value & 0xFF)"
     }
-    
+
     private func reapplyTunnelSettings() async {
-        let settings = buildTunnelSettings()
         do {
-            try await setTunnelNetworkSettings(settings)
-            logger.info("[VPN] Tunnel settings reapplied")
+            try await applyTunnelSettings()
         } catch {
             guard !Task.isCancelled else { return }
-            logger.report("[VPN] Failed to reapply tunnel settings", error: error)
+            logger.report("[VPN] Tunnel settings apply failed", error: error)
         }
     }
 
@@ -218,23 +295,28 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 #if os(iOS)
         ControlCenter.shared.reloadControls(ofKind: "su.smd.Anywhere.Widget.VPNToggle")
 #endif
-        
-        statsRecorder.stop()
 
+        let task: Task<Void, Never>? = providerState.withLock { state in
+            state.transition(to: .stopping)
+            defer { state.rootTask = nil }
+            return state.rootTask
+        }
+
+        statsRecorder.stop()
 #if canImport(Turn)
         captchaNotifier.stop()
         turnAutoPilot.stop()
 #endif
-        
-        let task = rootTask.withLock { task -> Task<Void, Never>? in
-            defer { task = nil }
-            return task
-        }
+        MITMScriptDiskStore.shared.flush()
         task?.cancel()
-        
+
         logTunnelStop(reason: reason)
-        
+
         await tunnelStack.stop()
+
+        providerState.withLock { state in
+            if state.phase == .stopping { state.transition(to: .stopped) }
+        }
     }
 
     // MARK: - App Messages
@@ -244,15 +326,11 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         do {
             message = try JSONDecoder().decode(TunnelMessage.self, from: messageData)
         } catch {
-            logger.report("[IPC] App message decode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
+            logger.report("[IPC] Message decode failed", error: error)
             return nil
         }
 
         switch message {
-        case .setConfiguration(let configuration):
-            await tunnelStack.switchConfiguration(configuration)
-            return nil
-
         case .testLatency(let configuration):
             let response = LatencyTestResponse(await LatencyTester.test(configuration))
             return encodeReply(response)
@@ -260,11 +338,23 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         case .fetchStats:
             return encodeReply(statsRecorder.snapshot())
 
+        case .resetStats:
+            tunnelStack.resetByteCounts()
+            statsRecorder.reset()
+            return encodeReply(statsRecorder.snapshot())
+
         case .fetchLogs:
             return encodeReply(LogsResponse(logs: tunnelStack.fetchLogs()))
 
         case .fetchRequests:
             return encodeReply(RequestsResponse(requests: tunnelStack.requestLog.snapshot()))
+
+        case .fetchActivity(let proto):
+            let pool = switch proto {
+            case .tcp: tunnelStack.tcpActivity
+            case .udp: tunnelStack.udpActivity
+            }
+            return encodeReply(ActivityResponse(entries: pool.snapshot()))
 
         case .fetchTurnStats:
             // Only meaningful in auto mode; the other two need no explanation in the UI.
@@ -279,16 +369,16 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             #endif
         }
     }
-    
+
     private func encodeReply(_ reply: some Encodable) -> Data? {
         do {
             return try JSONEncoder().encode(reply)
         } catch {
-            logger.report("[IPC] Reply encode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
+            logger.report("[IPC] Reply encode failed", error: error)
             return nil
         }
     }
-    
+
     private static func memoryFootprint() -> UInt64 {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
@@ -304,7 +394,9 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     override func sleep() async {
         statsRecorder.noteSleep()
-        await tunnelStack.suspendOutbound()
+        MITMScriptDiskStore.shared.flush()
+        await tunnelStack.sleep()
+        TickScheduler.shared.suspend()
     }
 
     override func wake() {
@@ -314,7 +406,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         // hand here, so the auto pilot only re-probes if it has nothing settled.
         turnAutoPilot.noteNetworkChange(fingerprint: nil)
 #endif
-        Task { await tunnelStack.handleWake() }
+        TickScheduler.shared.resume()
     }
 
     // MARK: - Provider task tree
@@ -339,7 +431,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) async {
         // Stale answers are about the previous network; flushed before anything probes.
-        DNSResolver.shared.flush()
+        DNSResolver.proxies.flush()
+        ECHResolver.shared.flush()
 
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
@@ -353,87 +446,33 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 #if canImport(Turn)
             turnAutoPilot.noteNetworkChange(fingerprint: NetworkFingerprint(path: path, ssid: ssid))
 #endif
-            await tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: ssid)
+            await tunnelStack.updateNetworkContext(
+                NetworkContext(
+                    isWiFi: true, isCellular: false, ssid: ssid
+                )
+            )
             return
         }
 #endif
 #if canImport(Turn)
         turnAutoPilot.noteNetworkChange(fingerprint: NetworkFingerprint(path: path, ssid: nil))
 #endif
-        await tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
+        await tunnelStack.updateNetworkContext(
+            NetworkContext(
+                isWiFi: isWiFi, isCellular: isCellular, ssid: nil
+            )
+        )
     }
 
     private func logTunnelStop(reason: NEProviderStopReason) {
-        let message: String
-        let level: TunnelLogLevel
-
+        let failure: String
         switch reason {
-        case .userInitiated:
-            message = "[VPN] Tunnel stopped by user"
-            level = .info
-        case .providerFailed:
-            message = "[VPN] Tunnel stopped because the provider failed"
-            level = .error
-        case .noNetworkAvailable:
-            message = "[VPN] Tunnel stopped because the network became unavailable"
-            level = .warning
-        case .unrecoverableNetworkChange:
-            message = "[VPN] Tunnel stopped because the network path changed"
-            level = .warning
-        case .providerDisabled:
-            message = "[VPN] Tunnel stopped because the provider was disabled"
-            level = .warning
-        case .authenticationCanceled:
-            message = "[VPN] Tunnel stopped because authentication was canceled"
-            level = .warning
-        case .configurationFailed:
-            message = "[VPN] Tunnel stopped because configuration failed"
-            level = .error
-        case .idleTimeout:
-            message = "[VPN] Tunnel stopped after being idle"
-            level = .warning
-        case .configurationDisabled:
-            message = "[VPN] Tunnel stopped because the configuration was disabled"
-            level = .warning
-        case .configurationRemoved:
-            message = "[VPN] Tunnel stopped because the configuration was removed"
-            level = .warning
-        case .superceded:
-            message = "[VPN] Tunnel stopped because another VPN took over"
-            level = .warning
-        case .userLogout:
-            message = "[VPN] Tunnel stopped because the user logged out"
-            level = .warning
-        case .userSwitch:
-            message = "[VPN] Tunnel stopped because the active user changed"
-            level = .warning
-        case .connectionFailed:
-            message = "[VPN] Tunnel stopped because the VPN connection failed"
-            level = .warning
-        case .sleep:
-            message = "[VPN] Tunnel stopped for device sleep"
-            level = .warning
-        case .appUpdate:
-            message = "[VPN] Tunnel stopped for app update"
-            level = .info
-        case .internalError:
-            message = "[VPN] Tunnel stopped because Network Extension hit an internal error"
-            level = .error
-        case .none:
-            message = "[VPN] Tunnel stopped"
-            level = .info
-        @unknown default:
-            message = "[VPN] Tunnel stopped for an unknown reason"
-            level = .warning
+        case .providerFailed: failure = "provider failed"
+        case .configurationFailed: failure = "configuration failed"
+        case .connectionFailed: failure = "connection failed"
+        case .internalError: failure = "internal error"
+        default: return
         }
-
-        switch level {
-        case .info:
-            logger.info(message)
-        case .warning:
-            logger.warning(message)
-        case .error:
-            logger.error(message)
-        }
+        logger.error("[VPN] Tunnel stopped: \(failure)")
     }
 }

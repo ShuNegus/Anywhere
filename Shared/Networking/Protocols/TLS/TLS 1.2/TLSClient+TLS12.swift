@@ -26,8 +26,7 @@ extension TLSClient {
 
         return try await receiveTLS12HandshakeMessages(buffer: buffer)
     }
-
-    /// Loops until ServerHelloDone (0x0E) is seen.
+    
     private func receiveTLS12HandshakeMessages(buffer initialBuffer: Data) async throws -> TLSRecordConnection {
         var buffer = initialBuffer
         while true {
@@ -41,6 +40,9 @@ extension TLSClient {
             switch try await connection.receive() {
             case .bytes(let moreData):
                 buffer.append(moreData)
+                guard buffer.count <= Self.maxHandshakeBufferSize else {
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Handshake flight exceeds \(Self.maxHandshakeBufferSize) bytes"))
+                }
             case .end:
                 throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before TLS 1.2 handshake completed"))
             }
@@ -52,11 +54,10 @@ extension TLSClient {
         var certificateDERs: [Data] = []
         var serverKeyExchange: Data?
         var serverHelloDoneOffset: Int = 0
-        /// Raw handshake message bytes fed into the transcript hash.
+        var certificateRequested: Bool = false
         var handshakeBytes: Data = Data()
     }
-
-    /// Returns nil if ServerHelloDone not yet seen.
+    
     private func parseTLS12HandshakeMessages(buffer: Data) -> TLS12HandshakeMessages? {
         var result = TLS12HandshakeMessages()
         var offset = 0
@@ -95,6 +96,10 @@ extension TLSClient {
                     case TLSHandshakeType.serverKeyExchange:
                         result.handshakeBytes.append(hsMessage)
                         result.serverKeyExchange = hsBody
+
+                    case TLSHandshakeType.certificateRequest:
+                        result.handshakeBytes.append(hsMessage)
+                        result.certificateRequested = true
 
                     case TLSHandshakeType.serverHelloDone:
                         result.handshakeBytes.append(hsMessage)
@@ -151,7 +156,7 @@ extension TLSClient {
 
         tls12Transcript?.append(messages.handshakeBytes)
 
-        try validateCertificate()
+        try await validateCertificate()
 
         let preMasterSecret: Data
         let clientKeyExchangeBody: Data
@@ -169,6 +174,7 @@ extension TLSClient {
         return try await self.completeTLS12Handshake(
             preMasterSecret: preMasterSecret,
             clientKeyExchangeBody: clientKeyExchangeBody,
+            certificateRequested: messages.certificateRequested,
             remainingBuffer: buffer.count > messages.serverHelloDoneOffset ? Data(buffer[messages.serverHelloDoneOffset...]) : nil
         )
     }
@@ -283,10 +289,10 @@ extension TLSClient {
         )
 
         if !isValid {
+            let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
             if CertificatePolicy.allowInsecure {
                 return
             }
-            let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
             throw AnywhereError.tls(.certificateValidationFailed(detail: "ServerKeyExchange signature failed: \(message)"))
         }
     }
@@ -332,6 +338,7 @@ extension TLSClient {
     private func completeTLS12Handshake(
         preMasterSecret: Data,
         clientKeyExchangeBody: Data,
+        certificateRequested: Bool,
         remainingBuffer: Data?
     ) async throws -> TLSRecordConnection {
         guard let cRandom = clientRandom, let sRandom = serverRandom else {
@@ -347,6 +354,13 @@ extension TLSClient {
         ckeMessage.append(UInt8((ckeLen >> 8) & 0xFF))
         ckeMessage.append(UInt8(ckeLen & 0xFF))
         ckeMessage.append(clientKeyExchangeBody)
+        
+        var clientCertMessage: Data? = nil
+        if certificateRequested {
+            let certMsg = Data([TLSHandshakeType.certificate, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00])
+            tls12Transcript?.append(certMsg)
+            clientCertMessage = certMsg
+        }
 
         tls12Transcript?.append(ckeMessage)
 
@@ -401,13 +415,17 @@ extension TLSClient {
 
         let version = negotiatedVersion
         var wireData = Data()
+        
+        var flightBody = Data()
+        if let clientCertMessage { flightBody.append(clientCertMessage) }
+        flightBody.append(ckeMessage)
 
         wireData.append(TLSContentType.handshake)
         wireData.append(UInt8(version >> 8))
         wireData.append(UInt8(version & 0xFF))
-        wireData.append(UInt8((ckeMessage.count >> 8) & 0xFF))
-        wireData.append(UInt8(ckeMessage.count & 0xFF))
-        wireData.append(ckeMessage)
+        wireData.append(UInt8((flightBody.count >> 8) & 0xFF))
+        wireData.append(UInt8(flightBody.count & 0xFF))
+        wireData.append(flightBody)
 
         wireData.append(contentsOf: [TLSContentType.changeCipherSpec, UInt8(version >> 8), UInt8(version & 0xFF), 0x00, 0x01, 0x01])
 
@@ -590,7 +608,7 @@ extension TLSClient {
             if let finishedResult = parseTLS12ServerCCSAndFinished(buffer: buffer, keys: keys) {
                 switch finishedResult {
                 case .success(let remainingData):
-                    return buildTLS12Connection(keys: keys, remainingBuffer: remainingData)
+                    return try buildTLS12Connection(keys: keys, remainingBuffer: remainingData)
                 case .failure(let error):
                     throw error
                 }
@@ -602,13 +620,15 @@ extension TLSClient {
             switch try await connection.receive() {
             case .bytes(let moreData):
                 buffer.append(moreData)
+                guard buffer.count <= Self.maxHandshakeBufferSize else {
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Handshake flight exceeds \(Self.maxHandshakeBufferSize) bytes"))
+                }
             case .end:
                 throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before server Finished"))
             }
         }
     }
-
-    /// Returns remaining post-handshake bytes on success, or nil if the record is incomplete.
+    
     private func parseTLS12ServerCCSAndFinished(
         buffer: Data,
         keys: TLS12HandshakeKeys
@@ -616,6 +636,7 @@ extension TLSClient {
         var offset = 0
         var foundCCS = false
         var serverSeqNum: UInt64 = 0
+        var transcriptThroughCCS = tls12Transcript
 
         while offset + 5 <= buffer.count {
             let contentType = buffer[offset]
@@ -626,9 +647,8 @@ extension TLSClient {
             if contentType == TLSContentType.changeCipherSpec {
                 foundCCS = true
             } else if contentType == TLSContentType.handshake && !foundCCS {
-                // Plaintext handshake before CCS (e.g. NewSessionTicket) must enter the transcript — the server's Finished hash includes it.
                 let recordBody = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
-                tls12Transcript?.append(recordBody)
+                transcriptThroughCCS?.append(recordBody)
             } else if contentType == TLSContentType.handshake && foundCCS {
                 let recordBody = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
 
@@ -650,7 +670,7 @@ extension TLSClient {
 
                     let verifyData = decrypted.subdata(in: 4..<16)
 
-                    guard let ms = masterSecret, let transcript = tls12Transcript else {
+                    guard let ms = masterSecret, let transcript = transcriptThroughCCS else {
                         return .failure(AnywhereError.tls(.handshakeFailed(detail: "Missing state for Finished verification")))
                     }
 
@@ -786,11 +806,10 @@ extension TLSClient {
                     paddingGood |= decrypted[i] ^ UInt8(paddingByte)
                 }
             }
-
-            guard paddingGood == 0 else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "Invalid CBC padding"))
+            
+            if paddingGood == 0 {
+                decrypted = decrypted.prefix(decrypted.count - paddingLen)
             }
-            decrypted = decrypted.prefix(decrypted.count - paddingLen)
 
             let macSize = TLSCipherSuite.macLength(tls12CipherSuite)
             guard decrypted.count >= macSize else {
@@ -818,8 +837,7 @@ extension TLSClient {
                 payload: payload, useSHA384: useSHA384, useSHA256: useSHA256
             )
 
-            guard receivedMAC.count == expectedMAC.count,
-                  constantTimeEqual(receivedMAC, expectedMAC) else {
+            guard constantTimeEqual(receivedMAC, expectedMAC), paddingGood == 0 else {
                 throw AnywhereError.tls(.handshakeFailed(detail: "MAC verification failed"))
             }
 
@@ -830,7 +848,7 @@ extension TLSClient {
     private func buildTLS12Connection(
         keys: TLS12HandshakeKeys,
         remainingBuffer: Data?
-    ) -> TLSRecordConnection {
+    ) throws -> TLSRecordConnection {
         let tlsConnection = TLSRecordConnection(
             tls12ClientKey: keys.clientKey,
             clientIV: keys.clientIV,
@@ -843,7 +861,7 @@ extension TLSClient {
             initialClientSeqNum: 1,
             initialServerSeqNum: 1
         )
-        tlsConnection.adoptTransport(self.takeConnection())
+        try commitHandshake(tlsConnection)
         tlsConnection.publishNegotiatedALPN(self.negotiatedALPN)
 
         if let remaining = remainingBuffer, !remaining.isEmpty {

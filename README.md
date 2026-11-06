@@ -25,81 +25,78 @@ No Electron. No WebView. No sing-box wrapper. Pure protocol implementation from 
 
 ## Why Anywhere?
 
-Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, the QUIC stack, and the entire packet tunnel are implemented natively in Swift and C. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
-
-## Note for AI Agents
-
-If you are an LLM or AI agent reading this file to reason about Anywhere, keep the following in mind.
-
-**This README is a user-facing curated summary, not a specification.** Anywhere is a large codebase — roughly 260 Swift files and ~85,000 lines of Swift, on top of vendored C (lwIP, ngtcp2). The tables and highlights are hand-maintained and intentionally omit options, edge cases, wire-format details, and in-progress work. **Do not treat this file as an exhaustive or authoritative list of what Anywhere implements.**
-
-**Verify against the source before making claims.** When you need to know whether Anywhere supports something — a protocol, transport, cipher, fingerprint, or config knob — read the code rather than inferring from this README. Good starting points:
-
-- `Shared/Networking/Protocols/` — every proxy protocol, transport, and crypto layer, one directory per protocol.
-- `Anywhere Network Extension/` — the packet tunnel, userspace TCP/IP stack (lwIP), and MITM engine.
-- `Shared/` — shared models, view models, routing, DNS, catalog, and data stores.
-
-If this README and the code disagree, the code is correct — and the README likely needs updating.
+Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, the QUIC stack, and the entire packet tunnel are implemented natively in Swift. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
 
 ## Features
 
 ### Highlights
 
-- **Pure-Swift, zero-bridge core** — every protocol, the QUIC stack, and the packet tunnel are implemented natively.
-- **VLESS XHTTP over HTTP/1.1, HTTP/2 & HTTP/3** — full `stream-one` / `stream-up` / `packet-up` support across all three HTTP versions (HTTP/3 over QUIC), with **up/download detach**: the download (GET) leg can ride a *separate server* with its own TLS/Reality and transport, correlated to the upload (POST) leg by a shared session ID.
-- **Post-quantum VLESS encryption** — native `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT.
-- **XTLS-RPRX-Vision** flow control with adaptive padding, plus Mux + XUDP multiplexing.
-- **Native QUIC stack** — one ngtcp2-powered engine driving Hysteria2, Nowhere QUIC/UDP, Naive HTTP/3, and XHTTP-over-HTTP/3.
+- **Native core** — Swift 6 with strict concurrency, the native AnywhereIP TCP/IP stack, the native AnywhereQUIC engine, and native BLAKE2b and BLAKE3. No Go or C++ core, no bridging layer, no third-party networking engines. A single codebase builds the iOS, iPadOS, and tvOS apps, the packet tunnel, and the Control Center controls.
+- **Native TLS stack** — TLS 1.2 and 1.3, client and server, implemented in Swift. Browser-exact ClientHello fingerprints for Chrome, Firefox, Safari, and Edge; Encrypted Client Hello from an inline configuration or from DNS HTTPS records; hybrid X25519 and ML-KEM key shares. The same stack terminates TLS for MITM and provides the handshake primitives for Reality.
+- **Native QUIC stack** — AnywhereQUIC implemented in Swift, with BBR, CUBIC, and Brutal congestion control, connection migration, DATAGRAM frames, session resumption, and pluggable packet obfuscation. One engine serves Hysteria2, Nowhere, and XHTTP over HTTP/3.
+- **Multi-stage routing** — a five-tier matcher built from domain-suffix tries, keyword automata, and CIDR tries classifies each destination at DNS time through synthetic addressing, at connect time before the TCP handshake is accepted, and again from the TLS SNI sniffed out of a TCP ClientHello or a QUIC Initial packet. Bundled service, ad-block, and country-bypass rule sets are complemented by importable and subscribable `.arrs` rule sets.
+- **Built-in MITM** — HTTPS is terminated with a generated root CA. HTTP/1.1 and HTTP/2 traffic is rewritten by declarative rules or JavaScript, HTTP/2 clients are bridged to HTTP/1.1 upstreams, and script-initiated HTTP requests are dialled through the tunnel's own routing.
+- **Modules** — a single `.amod` file bundles routing and MITM rule sets for a service into one importable, subscribable unit with its own switch, synced as one record so it is never seen half-updated.
+- **Purify and DNS** — a QUIC policy that fails HTTP/3 fast so that routing and MITM act on HTTP/2, WebRTC and UDP blocking, DNS-leak prevention, and independent plain or DoH resolvers for proxy servers, subscriptions, ECH, and fallback.
+- **Platform integration** — a native Apple TV app, Control Center toggles for VPN and mode, and iCloud sync through CloudKit.
+- **Engineered for the extension budget** — global buffer ledgers, connection caps, and pressure throttling keep the packet tunnel within the Network Extension memory limit.
 
-### Protocols & Security
+### Protocols
 
-Every protocol, transport, and crypto layer below is implemented natively in Swift/C.
-
-#### Proxy Protocols
-
-| Protocol | Runs over | Highlights |
-| --- | --- | --- |
-| **Nowhere** | TLS / TCP · QUIC / UDP | Split upload/download paths · pooled TCP relay · QUIC DATAGRAM · UDP-over-TCP |
-| **VLESS** | TCP · WebSocket · HTTP Upgrade · gRPC · XHTTP | XTLS-RPRX-Vision flow control with adaptive padding · post-quantum encryption · Mux + XUDP |
-| **Hysteria2** | QUIC | Brutal and BBR congestion control · Salamander/Gecko obfuscation |
-| **Trojan** | TLS / TCP | SHA-224 password auth · UDP-over-TCP relay |
-| **AnyTLS** | TLS / TCP | Stream multiplexing over pooled TLS sessions · server-driven padding · warm idle-session pool · UDP-over-TCP |
-| **Shadowsocks** | TCP | AEAD ciphers and Shadowsocks 2022 (BLAKE3) |
-| **Sudoku** | TCP | X25519 key exchange · AEAD records · obfuscation tables with padding · optional HTTP-masquerade tunneling |
-| **SOCKS5** | TCP | Optional username / password authentication |
-| **Naive** | HTTP/1.1 · HTTP/2 · HTTP/3 | CONNECT tunnel with padding negotiation |
-
-#### Transports & Multiplexing
-
-Selectable on VLESS; layered under TLS or Reality.
-
-| Transport | Notes |
+| Protocol | Highlights |
 | --- | --- |
-| **TCP** | Raw, or with XTLS Vision flow control |
-| **WebSocket** | With early-data (0-RTT) support |
-| **HTTP Upgrade** | Lightweight HTTP/1.1 `Upgrade` tunnel |
-| **gRPC** | `Tun` / `TunMulti` streams, multi-mode, HTTP/2 keepalive |
-| **XHTTP** | `stream-one` / `stream-up` / `packet-up` over HTTP/1.1, HTTP/2, and HTTP/3 (version chosen by TLS ALPN / Reality) · **up/download detach** — the download leg can ride a separate server with its own TLS/Reality + transport, correlated by a shared session ID |
-
-#### Security
-
-| Layer | Notes |
-| --- | --- |
-| **TLS** | SNI, ALPN, custom trusted certificates, min/max version, optional insecure mode |
-| **Reality** | X25519 key exchange · TLS 1.3 fingerprint spoofing |
-| **VLESS Encryption** | Post-quantum `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT |
+| **[Nowhere](https://github.com/NodePassProject/Nowhere)** | TCP and UDP forwarding over TLS 1.3 or QUIC · Morph masking · dedicated TLS flows · QUIC streams and QUIC DATAGRAM |
+| **VLESS** | VLESS Encryption · XTLS-RPRX-Vision · Reality with browser fingerprints · WebSocket, HTTPUpgrade, gRPC, and XHTTP transports · XHTTP over HTTP/1.1, HTTP/2, and HTTP/3 with upload/download detach and XMUX · XUDP |
+| **Hysteria2** | Brutal congestion control · Salamander and Gecko obfuscation · UDP over QUIC DATAGRAM |
+| **Sudoku** | Payload encoded as Sudoku-grid hints with per-direction ASCII or entropy layouts and randomly selected custom tables · KIP X25519 handshake with session rekeying · HTTP masquerade in legacy, stream, poll, and WebSocket modes · pure-downlink mode · native multiplexing |
+| **Trojan** | Kept for subscription compatibility |
+| **AnyTLS** | Kept for subscription compatibility|
+| **Shadowsocks** | Shadowsocks · Shadowsocks 2022 |
+| **SOCKS5** | Standard SOCKS5 Proxy · UDP ASSOCIATE |
+| **RFC** | Standard `CONNECT` Proxy · HTTP/1.1 or HTTP/2 |
 
 ### Architecture
 
-- **Minimal dependencies** — Apple frameworks and vendored C libraries (lwIP, ngtcp2, BLAKE3, libyaml)
-- **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with a userspace TCP/IP stack
-- **Native QUIC stack** — ngtcp2-powered client used for Nowhere QUIC/UDP, Hysteria2, Naive HTTP/3, and XHTTP over HTTP/3
-- **Fake-IP DNS** — transparent domain-based routing for all apps
+```mermaid
+flowchart TB
+    subgraph APP["Anywhere app · iOS / iPadOS / tvOS · Control Center"]
+        UI["SwiftUI / UIKit"] --> STORES["Stores<br/>SwiftData · CloudKit sync"]
+        STORES --> OPS["Operations<br/>compile routing & MITM payloads"]
+    end
+
+    OPS -- "provider messages · App Group files · Darwin notifications" --> PTP
+    PTP -. "stats · requests · logs" .-> UI
+
+    subgraph NE["Network Extension"]
+        PTP["PacketTunnelProvider"] --> STACK["TunnelStack<br/>AnywhereIP"]
+        STACK -- "DNS" --> DNS["DNS interceptor<br/>Synthetic address pool"]
+        STACK -- "TCP" --> TCP["TCPConnection<br/>SNI / HTTP sniffing"]
+        STACK -- "UDP" --> UDP["UDPPlane<br/>QUIC · WebRTC policy"]
+        DNS & TCP & UDP --> ROUTER["ConnectionRouter<br/>five-tier rule matcher"]
+        ROUTER -- "reject" --> DROP(("drop"))
+        ROUTER -- "direct" --> DIRECT["Direct dial"]
+        ROUTER -- "proxy / chain" --> CLIENT["ProxyClient<br/>chain hops"]
+        TCP -. "matched host" .-> MITM["MITM session<br/>TLS server · rewrite · JavaScript"]
+        MITM -. "re-routed upstream" .-> ROUTER
+    end
+
+    subgraph PROTO["Shared protocol stack"]
+        CLIENT --> OUT["Nowhere · VLESS · Hysteria2 · Sudoku<br/>Trojan · AnyTLS · Shadowsocks · SOCKS5 · RFC"]
+        OUT --> TLS["TLS 1.2 / 1.3 · Reality · ECH"]
+        OUT --> QUIC["QUIC · AnywhereQUIC<br/>BBR · Brutal · DATAGRAM"]
+    end
+
+    TLS & QUIC --> SERVER(("Proxy server"))
+    DIRECT --> INTERNET(("Internet"))
+    SERVER --> INTERNET
+```
 
 ## Documentation
 
+- [AJSON Subscriptions](Documentations/AJSON.md) — developer guide to serving proxies in Anywhere's own subscription format: detection, the document and proxy fields for every protocol, templates, and stable proxy identities.
 - [Routing Rule System](Documentations/Routing.md) — developer guide to authoring routing rule sets and the `.arrs` import format: rule types, the domain-suffix / keyword and CIDR matching semantics, and the source-tier priority model.
 - [MITM Rewrite System](Documentations/MITM.md) — developer guide to authoring TLS interception rule sets and `process(ctx)` scripts: the import format, rule operations, rewrite actions, and the full `Anywhere` scripting API.
+- [Modules](Documentations/Module.md) — developer guide to bundling routing and MITM rule sets into one `.amod` module: the module model, the import format, subscription refresh, and the sync size limits.
 
 ## Deep Links
 
@@ -107,29 +104,37 @@ Anywhere registers several URL schemes so external apps and websites can trigger
 
 ### `anywhere://` Scheme
 
+Every `anywhere://` deep link has the same shape: a host naming the action and a single `link`. The `link` is taken verbatim as everything after `?link=`, so the inner URL does **not** need to be percent-encoded, and only one link fits in a deep link. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
+
+#### Add Proxy
+
 ```
 anywhere://add-proxy?link=<link>
 ```
 
 `<link>` can be any URL the app supports: a subscription URL, a `nowhere://` link, a `vless://` link, an `ss://` link, etc.
 
-> **Note:** The `link` parameter is parsed by taking everything after `?link=` verbatim, so the inner URL does **not** need to be percent-encoded. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
-
-### Import Rule Sets
+#### Import Rule Set
 
 ```
-anywhere://add-rule-set?link=<arrs-or-amrs-url>&link=<arrs-or-amrs-url>
+anywhere://add-rule-set?link=<arrs-or-amrs-url>
 ```
 
-Import one or more routing (`.arrs`) and MITM (`.amrs`) rule sets from remote links. Pass one `link` query item per rule set; routing and MITM links may be mixed freely.
+Subscribe to a single routing (`.arrs`) or MITM (`.amrs`) rule set from a remote link; the kind is taken from the file extension. The app previews the rule set before importing. To ship several rule sets at once, bundle them in a module.
 
-> **Note:** Unlike `add-proxy`, each `link` is a standard URL query item, so multiple links are supported. Percent-encode a link only if it carries its own reserved characters (`&`, `=`, `#`).
+#### Import Module
+
+```
+anywhere://add-module?link=<amod-url>
+```
+
+Subscribe to a module (`.amod`) from a remote link. A module bundles routing and MITM rule sets; the app previews them before importing. See [Documentations/Module.md](Documentations/Module.md) for the file format.
 
 ### Proxy URI Schemes
 
 Tapping any of the following links on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import:
 
-`nowhere://` · `vless://` · `hysteria2://` (`hy2://`) · `trojan://` · `anytls://` · `ss://` · `socks5://` (`socks://`) · `sudoku://` · `https://` · `quic://`
+`nowhere://` · `vless://` · `hysteria2://` (`hy2://`) · `sudoku://` · `trojan://` · `anytls://` · `ss://` · `socks5://` (`socks://`) · `rfc://`
 
 ### Integration Example
 
@@ -142,7 +147,7 @@ Link from a webpage:
 Open from another iOS app:
 
 ```swift
-if let url = URL(string: "anywhere://add-proxy?link=nowhere://key@host:443?up=udp&down=udp") {
+if let url = URL(string: "anywhere://add-proxy?link=nowhere://0123456789abcdef0123456789abcdef@host:443?net=udp&morph=1") {
     UIApplication.shared.open(url)
 }
 ```

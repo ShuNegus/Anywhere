@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Self-contained HTTP/2 frame primitives (RFC 9113), not a full HTTP/2 stack.
 nonisolated enum MITMHTTP2FrameCodec {
 
     // MARK: Frame type codes
@@ -25,7 +24,7 @@ nonisolated enum MITMHTTP2FrameCodec {
         static let continuation: UInt8 = 0x9
     }
 
-    // MARK: Error codes (RFC 9113 §7)
+    // MARK: Error codes
 
     enum ErrorCode {
         static let noError: UInt32        = 0x0
@@ -40,16 +39,8 @@ nonisolated enum MITMHTTP2FrameCodec {
 
     // MARK: Sizes
 
-    /// RFC 9113 §6.5.2 mandated minimum SETTINGS_MAX_FRAME_SIZE; the bridge advertises
-    /// no larger value, so the client must not exceed it.
     static let maxFramePayloadSize = 16_384
-
-    /// Hard cap on an accepted frame payload, above the advertised 16 KiB so a peer can't force an
-    /// unbounded allocation. Frames up to this cap are accepted (flow control accounts the true
-    /// on-wire length); past it, the buffer is dropped.
     static let maxReceivedFramePayloadSize = 1 * 1024 * 1024
-
-    /// The h2 connection preface octets a client sends first (RFC 9113 §3.4).
     static let clientPrefaceLength = 24
 
     // MARK: Raw frame
@@ -64,11 +55,9 @@ nonisolated enum MITMHTTP2FrameCodec {
     enum ParseResult {
         case frame(RawFrame)
         case needMore
-        /// Length exceeded the receive cap; the buffer is unrecoverable.
         case error
     }
 
-    /// Reads one complete frame, consuming its bytes. `.needMore` when incomplete.
     static func parseFrame(from buffer: inout MITMByteBuffer) -> ParseResult {
         guard buffer.count >= 9 else { return .needMore }
         let length = (Int(buffer[0]) << 16) | (Int(buffer[1]) << 8) | Int(buffer[2])
@@ -89,6 +78,46 @@ nonisolated enum MITMHTTP2FrameCodec {
         return .frame(RawFrame(typeCode: type, flags: flags, streamID: streamID, payload: payload))
     }
 
+    static func parseFrame(from buffer: inout MITMByteBuffer, then input: inout Data) -> ParseResult {
+        if !buffer.isEmpty {
+            if buffer.count < 9 {
+                moveBytes(9 - buffer.count, from: &input, to: &buffer)
+                guard buffer.count >= 9 else { return .needMore }
+            }
+            let length = (Int(buffer[0]) << 16) | (Int(buffer[1]) << 8) | Int(buffer[2])
+            if length <= maxReceivedFramePayloadSize, buffer.count < 9 + length {
+                moveBytes(9 + length - buffer.count, from: &input, to: &buffer)
+            }
+            return parseFrame(from: &buffer)
+        }
+        guard input.count >= 9 else { return .needMore }
+        let base = input.startIndex
+        let length = (Int(input[base]) << 16) | (Int(input[base + 1]) << 8) | Int(input[base + 2])
+        if length > maxReceivedFramePayloadSize {
+            input = Data()
+            return .error
+        }
+        let total = 9 + length
+        guard input.count >= total else { return .needMore }
+        let type = input[base + 3]
+        let flags = input[base + 4]
+        let streamID = (UInt32(input[base + 5]) << 24
+                      | UInt32(input[base + 6]) << 16
+                      | UInt32(input[base + 7]) << 8
+                      | UInt32(input[base + 8])) & 0x7FFFFFFF
+        let payload = input.subdata(in: (base + 9)..<(base + total))
+        input = input.count == total ? Data() : input[(base + total)...]
+        return .frame(RawFrame(typeCode: type, flags: flags, streamID: streamID, payload: payload))
+    }
+
+    private static func moveBytes(_ count: Int, from input: inout Data, to buffer: inout MITMByteBuffer) {
+        let take = min(count, input.count)
+        guard take > 0 else { return }
+        let split = input.startIndex + take
+        buffer.append(input[..<split])
+        input = take == input.count ? Data() : input[split...]
+    }
+
     // MARK: Header writing
 
     static func appendFrameHeader(
@@ -98,22 +127,25 @@ nonisolated enum MITMHTTP2FrameCodec {
         payloadLength: Int,
         into out: inout Data
     ) {
-        HTTP2FrameWire.appendHeader(type: typeCode, flags: flags, streamID: streamID,
-                                    payloadLength: payloadLength, into: &out)
+        HTTP2FrameWire.appendHeader(
+            type: typeCode,
+            flags: flags,
+            streamID: streamID,
+            payloadLength: payloadLength,
+            into: &out
+        )
     }
 
     // MARK: HEADERS / DATA emit
 
-    /// Emits a HEADERS frame plus CONTINUATIONs as needed (RFC 9113 §6.2/§6.10);
-    /// END_HEADERS on the final frame, END_STREAM on the first.
     static func emitHeaders(streamID: UInt32, block: Data, endStream: Bool) -> Data {
         let firstChunkSize = min(block.count, maxFramePayloadSize)
         let firstChunkEnd = block.startIndex + firstChunkSize
         let needsContinuation = firstChunkEnd < block.endIndex
 
         var firstFlags: UInt8 = 0
-        if !needsContinuation { firstFlags |= 0x4 } // END_HEADERS
-        if endStream { firstFlags |= 0x1 }          // END_STREAM
+        if !needsContinuation { firstFlags |= 0x4 }
+        if endStream { firstFlags |= 0x1 }
 
         var out = Data(capacity: 9 + block.count + 16)
         appendFrameHeader(
@@ -142,8 +174,6 @@ nonisolated enum MITMHTTP2FrameCodec {
         return out
     }
 
-    /// Pure DATA framing (no flow-control accounting); an empty payload still yields
-    /// one zero-length DATA so END_STREAM survives.
     static func frameData(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
         if payload.isEmpty {
             var out = Data(capacity: 9)
@@ -175,50 +205,77 @@ nonisolated enum MITMHTTP2FrameCodec {
         return out
     }
 
-    // MARK: Control frames
-
-    /// A SETTINGS ACK (RFC 9113 §6.5.3) for the client's SETTINGS.
-    static func settingsAck() -> Data {
-        var d = Data()
-        appendFrameHeader(typeCode: FrameType.settings, flags: 0x1, streamID: 0, payloadLength: 0, into: &d)
-        return d
+    static func dataFrames(streamID: UInt32, payload parts: [Data], endStream: Bool) -> [Data] {
+        var remaining = parts.reduce(0) { $0 + $1.count }
+        var frames: [Data] = []
+        var partIndex = 0
+        var offset = parts.first?.startIndex ?? 0
+        repeat {
+            let length = min(remaining, maxFramePayloadSize)
+            remaining -= length
+            var header = Data(capacity: 9)
+            appendFrameHeader(
+                typeCode: FrameType.data,
+                flags: (remaining == 0 && endStream) ? 0x1 : 0,
+                streamID: streamID,
+                payloadLength: length,
+                into: &header
+            )
+            frames.append(header)
+            var needed = length
+            while needed > 0 {
+                if offset >= parts[partIndex].endIndex {
+                    partIndex += 1
+                    offset = parts[partIndex].startIndex
+                    continue
+                }
+                let take = min(needed, parts[partIndex].endIndex - offset)
+                frames.append(parts[partIndex][offset..<(offset + take)])
+                offset += take
+                needed -= take
+            }
+        } while remaining > 0
+        return frames
     }
 
-    /// A PING ACK echoing the 8 opaque octets (RFC 9113 §6.7).
+    // MARK: Control frames
+
+    static func settingsAck() -> Data {
+        var frame = Data()
+        appendFrameHeader(typeCode: FrameType.settings, flags: 0x1, streamID: 0, payloadLength: 0, into: &frame)
+        return frame
+    }
+
     static func pingAck(opaque: Data) -> Data {
-        var d = Data()
+        var frame = Data()
         let body = opaque.count == 8 ? opaque : Data(count: 8)
-        appendFrameHeader(typeCode: FrameType.ping, flags: 0x1, streamID: 0, payloadLength: 8, into: &d)
-        d.append(body)
-        return d
+        appendFrameHeader(typeCode: FrameType.ping, flags: 0x1, streamID: 0, payloadLength: 8, into: &frame)
+        frame.append(body)
+        return frame
     }
 
     static func windowUpdate(streamID: UInt32, increment: Int) -> Data {
-        var d = Data()
-        appendFrameHeader(typeCode: FrameType.windowUpdate, flags: 0, streamID: streamID, payloadLength: 4, into: &d)
-        HTTP2FrameWire.appendUInt32(UInt32(truncatingIfNeeded: increment) & 0x7FFF_FFFF, into: &d)
-        return d
+        var frame = Data()
+        appendFrameHeader(typeCode: FrameType.windowUpdate, flags: 0, streamID: streamID, payloadLength: 4, into: &frame)
+        HTTP2FrameWire.appendUInt32(UInt32(truncatingIfNeeded: increment) & 0x7FFF_FFFF, into: &frame)
+        return frame
     }
 
     static func rstStream(streamID: UInt32, errorCode: UInt32) -> Data {
-        var d = Data()
-        appendFrameHeader(typeCode: FrameType.rstStream, flags: 0, streamID: streamID, payloadLength: 4, into: &d)
-        HTTP2FrameWire.appendUInt32(errorCode, into: &d)
-        return d
+        var frame = Data()
+        appendFrameHeader(typeCode: FrameType.rstStream, flags: 0, streamID: streamID, payloadLength: 4, into: &frame)
+        HTTP2FrameWire.appendUInt32(errorCode, into: &frame)
+        return frame
     }
 
-    /// A GOAWAY (RFC 9113 §6.8): names the last stream the sender processed so the peer can
-    /// safely retry anything above it. Empty debug data.
     static func goAway(lastStreamID: UInt32, errorCode: UInt32) -> Data {
-        var d = Data()
-        appendFrameHeader(typeCode: FrameType.goaway, flags: 0, streamID: 0, payloadLength: 8, into: &d)
-        HTTP2FrameWire.appendUInt32(lastStreamID & 0x7FFF_FFFF, into: &d)
-        HTTP2FrameWire.appendUInt32(errorCode, into: &d)
-        return d
+        var frame = Data()
+        appendFrameHeader(typeCode: FrameType.goaway, flags: 0, streamID: 0, payloadLength: 8, into: &frame)
+        HTTP2FrameWire.appendUInt32(lastStreamID & 0x7FFF_FFFF, into: &frame)
+        HTTP2FrameWire.appendUInt32(errorCode, into: &frame)
+        return frame
     }
 
-    /// Decodes a WINDOW_UPDATE's 31-bit increment (RFC 9113 §6.9.1); nil for a
-    /// non-4-byte payload.
     static func windowUpdateIncrement(_ payload: Data) -> Int? {
         guard payload.count == 4, let value = HTTP2FrameWire.readUInt32(payload) else { return nil }
         return Int(value & 0x7FFF_FFFF)
@@ -226,34 +283,32 @@ nonisolated enum MITMHTTP2FrameCodec {
 
     // MARK: Padding strippers
 
-    /// Strips PADDED + PRIORITY prefixes from a HEADERS payload; nil for invalid padding.
     static func stripHeadersPadding(payload: Data, flags: UInt8) -> Data? {
-        var p = payload
+        var remaining = payload
         if flags & 0x8 != 0 { // PADDED
-            guard let stripped = stripPadding(&p) else { return nil }
-            p = stripped
+            guard let stripped = stripPadding(&remaining) else { return nil }
+            remaining = stripped
         }
         if flags & 0x20 != 0 { // PRIORITY
-            guard p.count >= 5 else { return nil }
-            p = p.subdata(in: (p.startIndex + 5)..<p.endIndex)
+            guard remaining.count >= 5 else { return nil }
+            remaining = remaining.subdata(in: (remaining.startIndex + 5)..<remaining.endIndex)
         }
-        return p
+        return remaining
     }
 
-    /// Strips PADDED from a DATA payload; nil for invalid padding.
     static func stripDataPadding(payload: Data, flags: UInt8) -> Data? {
-        var p = payload
+        var remaining = payload
         if flags & 0x8 != 0 {
-            guard let stripped = stripPadding(&p) else { return nil }
-            p = stripped
+            guard let stripped = stripPadding(&remaining) else { return nil }
+            remaining = stripped
         }
-        return p
+        return remaining
     }
 
     private static func stripPadding(_ payload: inout Data) -> Data? {
         guard !payload.isEmpty else { return nil }
-        let padLen = Int(payload[payload.startIndex])
-        guard payload.count >= 1 + padLen else { return nil }
-        return payload.subdata(in: (payload.startIndex + 1)..<(payload.endIndex - padLen))
+        let padLength = Int(payload[payload.startIndex])
+        guard payload.count >= 1 + padLength else { return nil }
+        return payload.subdata(in: (payload.startIndex + 1)..<(payload.endIndex - padLength))
     }
 }

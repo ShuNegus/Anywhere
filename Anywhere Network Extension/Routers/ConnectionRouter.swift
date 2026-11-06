@@ -8,34 +8,26 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "ConnectionRouter")
-
 nonisolated struct RouteDecision {
     enum Action {
         case route(target: RouteTarget, configuration: ProxyConfiguration?, ruleSetName: String?)
-        case routeViaDefault
         case reject(ruleSetName: String?)
         case unreachable
     }
-    
+
     let host: String
     let hostIsResolvedDomain: Bool
     let action: Action
-    
-    var ipRuleLookupPending = false
 
-    var viaDefault: Bool {
-        if case .routeViaDefault = action { return true }
-        return false
-    }
+    var ipRuleLookupPending = false
 }
 
 nonisolated final class ConnectionRouter: Sendable {
-    let fakeIPPool: FakeIPPool
+    let syntheticAddressPool: SyntheticAddressPool
     let domainRouter: DomainRouter
 
     let preventDNSLeak = Atomic(false)
-    
+
     private struct RejectedIPs {
         var v4: Set<UInt32> = []
         var v6: Set<SIMD16<UInt8>> = []
@@ -43,109 +35,81 @@ nonisolated final class ConnectionRouter: Sendable {
     }
     private let rejectedIPs = Mutex(RejectedIPs())
     private static let rejectedIPCap = 4096
-    
+
     private let dnsRejectLogged = Mutex(Set<String>())
     private static let dnsRejectLoggedCap = 4096
 
-    init(fakeIPPool: FakeIPPool, domainRouter: DomainRouter) {
-        self.fakeIPPool = fakeIPPool
+    init(syntheticAddressPool: SyntheticAddressPool, domainRouter: DomainRouter) {
+        self.syntheticAddressPool = syntheticAddressPool
         self.domainRouter = domainRouter
     }
-    
-    func decision(forIP ip: String, port: UInt16, proto: String) -> RouteDecision {
-        guard FakeIPPool.isFakeIP(ip) else {
+
+    func decision(forIP ip: String) -> RouteDecision {
+        guard SyntheticAddressPool.isSyntheticAddress(ip) else {
             guard let match = domainRouter.matchIP(ip) else {
-                return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .routeViaDefault)
+                return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .route(target: .default, configuration: nil, ruleSetName: nil))
             }
             return RouteDecision(
                 host: ip,
                 hostIsResolvedDomain: false,
-                action: markingIfRejectedIP(
-                    action(
-                        for: match,
-                        host: ip,
-                        port: port,
-                        ruleKind: "IP",
-                        proto: proto
-                    ),
-                    ip: ip
-                )
+                action: markingIfRejectedIP(action(for: match), ip: ip)
             )
         }
 
-        guard let entry = fakeIPPool.lookup(ip: ip) else {
-            logger.debug("[\(proto)] Fake IP not in pool (stale): \(ip):\(port)")
+        guard let entry = syntheticAddressPool.lookup(ip: ip) else {
             return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .unreachable)
         }
         let domain = entry.domain
-        
-        let rulesVersion = domainRouter.currentRulesVersion
+
         let match: DomainRouter.Match?
-        if entry.verdictVersion == rulesVersion {
+        if entry.verdictVersion == domainRouter.currentRulesVersion {
             match = entry.verdict
         } else {
-            match = domainRouter.matchDomain(domain)
-            fakeIPPool.cacheVerdict(domain: domain, match: match, version: rulesVersion)
+            let versioned = domainRouter.matchDomainVersioned(domain)
+            match = versioned.match
+            syntheticAddressPool.cacheVerdict(domain: domain, match: match, version: versioned.version)
         }
 
         if let match {
             return RouteDecision(
                 host: domain,
                 hostIsResolvedDomain: true,
-                action: markingIfRejected(
-                    action(
-                        for: match,
-                        host: domain,
-                        port: port,
-                        ruleKind: "domain",
-                        proto: proto
-                    ),
-                    domain: domain
-                )
+                action: markingIfRejected(action(for: match), domain: domain)
             )
         }
 
         if !preventDNSLeak.load(ordering: .relaxed) {
-            if let resolvedIP = RuleResolver.shared.cachedIPv4(for: domain) {
+            if let resolvedIP = DNSResolver.localRequests.cachedIPs(for: domain)?.first {
                 if let match = domainRouter.matchIP(resolvedIP) {
                     return RouteDecision(
                         host: domain,
                         hostIsResolvedDomain: true,
-                        action: markingIfRejected(
-                            action(
-                                for: match,
-                                host: "\(domain) → \(resolvedIP)",
-                                port: port,
-                                ruleKind: "IP",
-                                proto: proto
-                            ),
-                            domain: domain
-                        )
+                        action: action(for: match)
                     )
                 }
             } else {
-                RuleResolver.shared.warm(domain)
+                DNSResolver.localRequests.prewarm(domain)
                 return RouteDecision(
                     host: domain,
                     hostIsResolvedDomain: true,
-                    action: .routeViaDefault,
+                    action: .route(target: .default, configuration: nil, ruleSetName: nil),
                     ipRuleLookupPending: true
                 )
             }
         }
 
-        return RouteDecision(host: domain, hostIsResolvedDomain: true, action: .routeViaDefault)
+        return RouteDecision(host: domain, hostIsResolvedDomain: true, action: .route(target: .default, configuration: nil, ruleSetName: nil))
     }
-    
+
     private func markingIfRejected(
         _ action: RouteDecision.Action, domain: String
     ) -> RouteDecision.Action {
         if case .reject = action {
-            fakeIPPool.markRejected(domain: domain)
+            syntheticAddressPool.markRejected(domain: domain)
         }
         return action
     }
-    
+
     private func markingIfRejectedIP(
         _ action: RouteDecision.Action, ip: String
     ) -> RouteDecision.Action {
@@ -158,34 +122,32 @@ nonisolated final class ConnectionRouter: Sendable {
     private func markIPRejected(_ ip: String) {
         var v4 = in_addr()
         var v6 = in6_addr()
-        let inserted: Bool
         if inet_pton(AF_INET, ip, &v4) == 1 {
             let key = UInt32(bigEndian: v4.s_addr)
-            inserted = rejectedIPs.withLock { set in
+            rejectedIPs.withLock { set in
                 if set.count >= Self.rejectedIPCap { set = RejectedIPs() }
-                return set.v4.insert(key).inserted
+                set.v4.insert(key)
             }
         } else if inet_pton(AF_INET6, ip, &v6) == 1 {
             let key = withUnsafeBytes(of: v6) { $0.loadUnaligned(as: SIMD16<UInt8>.self) }
-            inserted = rejectedIPs.withLock { set in
+            rejectedIPs.withLock { set in
                 if set.count >= Self.rejectedIPCap { set = RejectedIPs() }
-                return set.v6.insert(key).inserted
+                set.v6.insert(key)
             }
-        } else {
-            inserted = false
-        }
-        if inserted {
-            logger.debug("[ConnectionRouter] Reject-marked IP \(ip)")
         }
     }
 
     // MARK: - DNS-time verdict
-    
+
     func dnsVerdict(forDomain domain: String) -> (match: DomainRouter.Match?, rulesVersion: UInt64) {
-        let version = domainRouter.currentRulesVersion
-        return (domainRouter.matchDomain(domain), version)
+        if let cached = syntheticAddressPool.cachedVerdict(domain: domain),
+           cached.version == domainRouter.currentRulesVersion {
+            return (cached.match, cached.version)
+        }
+        let versioned = domainRouter.matchDomainVersioned(domain)
+        return (versioned.match, versioned.version)
     }
-    
+
     func shouldLogDNSReject(domain: String) -> Bool {
         dnsRejectLogged.withLock { set in
             if set.count >= Self.dnsRejectLoggedCap { set.removeAll(keepingCapacity: true) }
@@ -196,7 +158,6 @@ nonisolated final class ConnectionRouter: Sendable {
     // MARK: - Reject-mark intake checks
 
     func isRejectMarkedDestination(rawIP: UnsafeRawPointer, isIPv6: Bool) -> Bool {
-        if fakeIPPool.isRejectMarked(rawIP: rawIP, isIPv6: isIPv6) { return true }
         if isIPv6 {
             let key = rawIP.loadUnaligned(as: SIMD16<UInt8>.self)
             return rejectedIPs.withLock { $0.v6.contains(key) }
@@ -205,38 +166,36 @@ nonisolated final class ConnectionRouter: Sendable {
                 | (UInt32(rawIP.load(fromByteOffset: 1, as: UInt8.self)) << 16)
                 | (UInt32(rawIP.load(fromByteOffset: 2, as: UInt8.self)) << 8)
                 |  UInt32(rawIP.load(fromByteOffset: 3, as: UInt8.self))
-        return rejectedIPs.withLock { $0.v4.contains(key) }
+        return isRejectMarkedIPv4(key)
     }
-    
-    func isRejectMarkedDestination(ipBytes: SIMD16<UInt8>, isIPv6: Bool) -> Bool {
-        if fakeIPPool.isRejectMarked(ipBytes: ipBytes, isIPv6: isIPv6) { return true }
-        if isIPv6 {
-            return rejectedIPs.withLock { $0.v6.contains(ipBytes) }
-        }
-        let key = (UInt32(ipBytes[0]) << 24) | (UInt32(ipBytes[1]) << 16)
-                | (UInt32(ipBytes[2]) << 8) | UInt32(ipBytes[3])
-        return rejectedIPs.withLock { $0.v4.contains(key) }
+
+    private func isRejectMarkedIPv4(_ key: UInt32) -> Bool {
+        syntheticAddressPool.isRejectMarked(ipv4: key) || rejectedIPs.withLock { $0.v4.contains(key) }
     }
-    
+
     func clearRejectMarks() {
-        fakeIPPool.clearRejectMarks()
+        syntheticAddressPool.clearRejectMarks()
         rejectedIPs.withLock { $0 = RejectedIPs() }
         dnsRejectLogged.withLock { $0.removeAll(keepingCapacity: true) }
     }
 
-    private func action(for match: DomainRouter.Match, host: String, port: UInt16,
-                        ruleKind: String, proto: String) -> RouteDecision.Action {
+    // MARK: - Sniffed host
+
+    func action(forSniffedHost host: String) -> RouteDecision.Action? {
+        guard let match = domainRouter.matchDomain(host) else { return nil }
+        return action(for: match)
+    }
+
+    private func action(for match: DomainRouter.Match) -> RouteDecision.Action {
         switch match.action {
+        case .default, .defaultProxy:
+            return .route(target: match.action, configuration: nil, ruleSetName: match.ruleSetName)
         case .direct:
             return .route(target: .direct, configuration: nil, ruleSetName: match.ruleSetName)
         case .reject:
-            logger.debug("[\(proto)] Rejected by \(ruleKind) rule: \(host):\(port)")
             return .reject(ruleSetName: match.ruleSetName)
         case .proxy(let id):
             let configuration = domainRouter.resolveConfiguration(action: match.action)
-            if configuration == nil {
-                logger.report("[\(proto)]", error: AnywhereError.routing(.configurationMissing(host: host)))
-            }
             return .route(target: .proxy(id), configuration: configuration, ruleSetName: match.ruleSetName)
         }
     }

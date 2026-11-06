@@ -8,15 +8,9 @@
 import Foundation
 
 extension ProxyClient {
-    /// Trojan requires TLS; on password (SHA224) mismatch the server silently serves its decoy site.
-    func connectWithTrojan(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?
-    ) async throws -> ProxyConnection {
-        guard case .trojan(let password, let securityLayer) = configuration.outbound, !password.isEmpty,
-              let tlsConfig = securityLayer.tlsConfiguration else {
+    func connectWithTrojan(_ request: ProxyRequest) async throws -> ProxyConnection {
+        guard case .trojan(let trojan) = configuration.outbound, !trojan.password.isEmpty,
+              let tlsConfig = trojan.tlsConfiguration else {
             throw AnywhereError.proxy(.trojan, .protocolViolation(detail: "Trojan password not set"))
         }
 
@@ -30,49 +24,36 @@ extension ProxyClient {
         }
 
         let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
-        return try await wrapTrojan(
-            over: tlsProxyConnection,
-            password: password,
-            command: command,
-            destinationHost: destinationHost,
-            destinationPort: destinationPort,
-            initialData: initialData
-        )
+        return try await wrapTrojan(over: tlsProxyConnection, password: trojan.password, request: request)
     }
-
-    /// Wraps a TLS connection with Trojan framing; `initialData` is sent through
-    /// the wrapper so the Trojan header and first payload coalesce into one TLS record.
-    /// The intro send is awaited before the connection is returned, so it is ordered
-    /// ahead of the caller's first send.
+    
     private func wrapTrojan(
         over tlsConnection: ProxyConnection,
         password: String,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?
+        request: ProxyRequest
     ) async throws -> ProxyConnection {
-        switch command {
+        switch request.network {
         case .tcp:
             let trojan = TrojanConnection(
                 inner: tlsConnection,
                 password: password,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort
+                destinationHost: request.host,
+                destinationPort: request.port
             )
-            if let initialData, !initialData.isEmpty {
-                try await trojan.send(initialData)
+            do {
+                try await trojan.send(request.initialData ?? Data())
+            } catch {
+                trojan.cancel()
+                throw error
             }
             return trojan
         case .udp:
             return TrojanUDPConnection(
                 inner: tlsConnection,
                 password: password,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort
+                destinationHost: request.host,
+                destinationPort: request.port
             )
-        case .mux:
-            throw AnywhereError.proxy(.trojan, .protocolViolation(detail: "Mux is not supported with Trojan"))
         }
     }
 }

@@ -7,36 +7,39 @@
 
 import Foundation
 import Observation
-
-nonisolated private let logger = AnywhereLogger(category: "RoutingRuleSetStore")
+import SwiftUI
 
 nonisolated struct RoutingRuleSet: Identifiable, Equatable {
     let id: String   // built-in: name, custom: UUID string
     let name: String
-    var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
+    var assignedConfigurationId: String?  // nil = default, "PROXY" = default proxy, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
     var isCustom: Bool = false
 }
 
 nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftDeletable {
-    static let maxRuleCount = 100000
+    static let maxRuleCount = 200000
 
     let id: UUID
     var name: String
     var rules: [RoutingRule]
     var subscriptionURL: URL?
+    var iconLight: Data?
+    var iconDark: Data?
     var updatedAt: Date
     var deletedAt: Date? = nil
 
-    init(name: String, rules: [RoutingRule] = [], subscriptionURL: URL? = nil) {
+    init(name: String, rules: [RoutingRule] = [], subscriptionURL: URL? = nil, iconLight: Data? = nil, iconDark: Data? = nil) {
         self.id = UUID()
         self.name = name
         self.rules = rules
         self.subscriptionURL = subscriptionURL
+        self.iconLight = iconLight
+        self.iconDark = iconDark
         self.updatedAt = .now
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, rules, subscriptionURL, deletedAt, updatedAt
+        case id, name, rules, subscriptionURL, iconLight, iconDark, deletedAt, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -45,8 +48,10 @@ nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftD
         self.name = try container.decode(String.self, forKey: .name)
         self.rules = try container.decodeSkippingInvalid([RoutingRule].self, forKey: .rules)
         self.subscriptionURL = try container.decodeIfPresent(URL.self, forKey: .subscriptionURL)
-        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
+        self.iconLight = try container.decodeIfPresent(Data.self, forKey: .iconLight)
+        self.iconDark = try container.decodeIfPresent(Data.self, forKey: .iconDark)
         self.deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
     }
 
     func encode(to encoder: Encoder) throws {
@@ -55,6 +60,8 @@ nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftD
         try container.encode(name, forKey: .name)
         try container.encode(rules, forKey: .rules)
         try container.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try container.encodeIfPresent(iconLight, forKey: .iconLight)
+        try container.encodeIfPresent(iconDark, forKey: .iconDark)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
@@ -72,24 +79,16 @@ nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftD
 @MainActor
 @Observable
 class RoutingRuleSetStore {
-    static let shared = RoutingRuleSetStore()
-
     private(set) var ruleSets: [RoutingRuleSet] = []
     private(set) var customRuleSets: [CustomRoutingRuleSet] = []
     private var customTombstones: [CustomRoutingRuleSet] = []
-    private(set) var orphanedRuleSetNames: [String] = []
-    
+
     var bypassCountryCode: String {
         didSet {
             guard bypassCountryCode != oldValue else { return }
             AWCore.setBypassCountryCode(bypassCountryCode)
-            scheduleSyncToAppGroup()
         }
     }
-    
-    @ObservationIgnored private var syncTask: Task<Void, Never>?
-
-    private static let syncDebounceInterval: Duration = .seconds(2)
 
     var adBlockRuleSet: RoutingRuleSet? {
         ruleSets.first(where: { $0.id == "ADBlock" })
@@ -98,53 +97,53 @@ class RoutingRuleSetStore {
         ruleSets.filter { $0.id != "ADBlock" }
     }
 
-    private static let builtIn: [String] = {
+    nonisolated private static let builtIn: [String] = {
         serviceCatalog.supportedServices + ["ADBlock"]
     }()
 
-    private static let serviceCatalog = ServiceCatalog.load()
-    
-    @ObservationIgnored private var loadedBlob: Data?
+    nonisolated private static let serviceCatalog = ServiceCatalog.load()
+
+    @ObservationIgnored private let syncStore: SyncStore
+    @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
-    private init() {
+    init(syncStore: SyncStore) {
+        self.syncStore = syncStore
         bypassCountryCode = AWCore.getBypassCountryCode()
-        let assignments = AWCore.getRuleSetAssignments()
+        let assignments = AWCore.getRoutingRuleSetAssignments()
 
-        let data = JSONBlobStore.shared.load(.customRuleSets)
-        loadedBlob = data
-        let split = Self.decodeCustomSplit(from: data)
+        let items = syncStore.loadItems(.customRuleSets)
+        loadedItems = items
+        let split = Self.decodeCustomSplit(from: items)
         customRuleSets = split.live
         customTombstones = split.tombstones
 
         rebuildRuleSets(assignments: assignments)
-        scheduleSyncToAppGroup()
     }
     
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
             let outcome = await Task.detached(priority: .utility) {
-                () -> (data: Data?, live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet])? in
-                let data = JSONBlobStore.shared.load(.customRuleSets)
-                guard data != previous else { return nil }
-                let split = Self.decodeCustomSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet])? in
+                let items = syncStore.loadItems(.customRuleSets)
+                guard items != previous else { return nil }
+                let split = Self.decodeCustomSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             customRuleSets = outcome.live
             customTombstones = outcome.tombstones
             rebuildRuleSets()
-            scheduleSyncToAppGroup()
             return
         }
     }
 
     private func rebuildRuleSets(assignments: [String: String]? = nil) {
-        let assignmentsDict = assignments ?? AWCore.getRuleSetAssignments()
+        let assignmentsDict = assignments ?? AWCore.getRoutingRuleSetAssignments()
 
         var sets = Self.builtIn.map { name in
             RoutingRuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name])
@@ -168,9 +167,9 @@ class RoutingRuleSetStore {
 
     func updateAssignment(_ ruleSet: RoutingRuleSet, configurationId: String?) {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
+        guard ruleSets[index].assignedConfigurationId != configurationId else { return }
         ruleSets[index].assignedConfigurationId = configurationId
         saveAssignments()
-        scheduleSyncToAppGroup()
     }
 
     func resetAssignments() {
@@ -183,13 +182,13 @@ class RoutingRuleSetStore {
             ruleSets[index].assignedConfigurationId = nil
         }
         saveAssignments()
-        scheduleSyncToAppGroup()
     }
     
     func clearOrphanedAssignments(availableIds: Set<String>) -> [String] {
         var affected: [String] = []
         for (index, ruleSet) in ruleSets.enumerated() {
             guard let assignedId = ruleSet.assignedConfigurationId,
+                  assignedId != "PROXY",
                   assignedId != "DIRECT",
                   assignedId != "REJECT",
                   !availableIds.contains(assignedId) else { continue }
@@ -206,9 +205,7 @@ class RoutingRuleSetStore {
 
     func addCustomRuleSet(name: String) -> CustomRoutingRuleSet {
         let ruleSet = CustomRoutingRuleSet(name: name)
-        customRuleSets.append(ruleSet)
-        saveCustomRuleSets()
-        rebuildRuleSets()
+        addCustomRuleSet(ruleSet)
         return ruleSet
     }
     
@@ -220,9 +217,9 @@ class RoutingRuleSetStore {
         customRuleSets.append(stamped)
         saveCustomRuleSets()
         if let initialAssignment {
-            var assignments = AWCore.getRuleSetAssignments()
+            var assignments = AWCore.getRoutingRuleSetAssignments()
             assignments[ruleSet.id.uuidString] = initialAssignment
-            AWCore.setRuleSetAssignments(assignments)
+            AWCore.setRoutingRuleSetAssignments(assignments)
         }
         rebuildRuleSets()
     }
@@ -234,17 +231,21 @@ class RoutingRuleSetStore {
         customRuleSets.removeAll { $0.id == id }
         saveCustomRuleSets()
 
-        var assignments = AWCore.getRuleSetAssignments()
+        var assignments = AWCore.getRoutingRuleSetAssignments()
         assignments.removeValue(forKey: id.uuidString)
-        AWCore.setRuleSetAssignments(assignments)
+        AWCore.setRoutingRuleSetAssignments(assignments)
 
         rebuildRuleSets()
     }
 
-    func updateCustomRuleSet(_ id: UUID, name: String? = nil, rules: [RoutingRule]? = nil) {
+    func updateCustomRuleSet(_ id: UUID, name: String? = nil, rules: [RoutingRule]? = nil, icons: (light: Data?, dark: Data?)? = nil) {
         guard let index = customRuleSets.firstIndex(where: { $0.id == id }) else { return }
         if let name { customRuleSets[index].name = name }
         if let rules { customRuleSets[index].rules = rules }
+        if let icons {
+            customRuleSets[index].iconLight = icons.light
+            customRuleSets[index].iconDark = icons.dark
+        }
         customRuleSets[index].updatedAt = SyncStamp.after(customRuleSets[index])
         saveCustomRuleSets()
         rebuildRuleSets()
@@ -256,135 +257,31 @@ class RoutingRuleSetStore {
         saveCustomRuleSets()
         rebuildRuleSets()
     }
-    
-    func refreshCustomRuleSet(_ id: UUID) async throws {
-        guard let index = customRuleSets.firstIndex(where: { $0.id == id }),
-              let url = customRuleSets[index].subscriptionURL else {
-            throw CustomRoutingRuleSetRefreshError.missingSubscriptionURL
-        }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw CustomRoutingRuleSetRefreshError.invalidStatusCode(http.statusCode)
+    func removeCustomRuleSets(atOffsets offsets: IndexSet) {
+        let ids = offsets.map { customRuleSets[$0].id }
+        for id in ids {
+            removeCustomRuleSet(id)
         }
-        guard let body = String(data: data, encoding: .utf8) else {
-            throw CustomRoutingRuleSetRefreshError.undecodableBody
-        }
+    }
 
-        let parsed = RoutingRuleSetParser.parse(body)
-        guard parsed.rules.count <= CustomRoutingRuleSet.maxRuleCount else {
-            throw CustomRoutingRuleSetRefreshError.tooManyRules
-        }
-        guard customRuleSets[index].rules != parsed.rules else { return }
-        customRuleSets[index].rules = parsed.rules
-        customRuleSets[index].updatedAt = SyncStamp.after(customRuleSets[index])
+    func moveCustomRuleSets(fromOffsets source: IndexSet, toOffset destination: Int) {
+        customRuleSets.move(fromOffsets: source, toOffset: destination)
         saveCustomRuleSets()
         rebuildRuleSets()
     }
-
+    
     func customRuleSet(for id: UUID) -> CustomRoutingRuleSet? {
         customRuleSets.first { $0.id == id }
     }
 
     // MARK: - Rules
-
-    /// Loads rules for a built-in rule set name. Thread-safe — no instance state accessed.
-    static func loadRules(for name: String) -> [RoutingRule] {
+    
+    nonisolated static func loadRules(for name: String) -> [RoutingRule] {
         if name != "ADBlock" {
             return serviceCatalog.rules(for: name)
         }
         return RoutingRulesDatabase.shared.loadRules(for: name)
-    }
-
-    // MARK: - App Group Sync
-
-    private func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain]) async {
-        let snapshot = ruleSets
-        let customSnapshot = customRuleSets
-        
-        let defaultTargetId = (AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId())?.uuidString
-
-        var idsToResolve = snapshot.compactMap(\.assignedConfigurationId)
-        if let defaultTargetId { idsToResolve.append(defaultTargetId) }
-        var resolvedTargets: [String: ProxyConfiguration] = [:]
-        for assignedId in idsToResolve {
-            guard resolvedTargets[assignedId] == nil,
-                  let id = UUID(uuidString: assignedId) else { continue }
-            if let direct = configurations.first(where: { $0.id == id }) {
-                resolvedTargets[assignedId] = direct
-            } else if let chain = chains.first(where: { $0.id == id }),
-                      let composite = chain.resolveComposite(from: configurations) {
-                resolvedTargets[assignedId] = composite
-            }
-        }
-        
-        var resolvedIPsByAddress: [String: String] = [:]
-        for configuration in resolvedTargets.values {
-            let address = configuration.serverAddress
-            guard resolvedIPsByAddress[address] == nil else { continue }
-            if let ip = await VPNViewModel.resolveServerAddress(address) {
-                resolvedIPsByAddress[address] = ip
-            }
-        }
-
-        await Task.detached {
-            var entries: [RoutingBinaryWriter.Entry] = []
-            var configurationsById: [String: ProxyConfiguration] = [:]
-
-            for ruleSet in snapshot {
-                let fallbackId = ruleSet.id == "ADBlock" ? nil : defaultTargetId
-                guard let assignedId = ruleSet.assignedConfigurationId ?? fallbackId else { continue }
-
-                let rules: [RoutingRule]
-                if ruleSet.isCustom,
-                   let customId = UUID(uuidString: ruleSet.id),
-                   let custom = customSnapshot.first(where: { $0.id == customId }) {
-                    rules = custom.rules
-                } else {
-                    rules = await Self.loadRules(for: ruleSet.name)
-                }
-                guard !rules.isEmpty else { continue }
-                
-                let action: RoutingBinaryFormat.Action
-                var configId: UUID?
-                if assignedId == "DIRECT" {
-                    action = .direct
-                } else if assignedId == "REJECT" {
-                    action = .reject
-                } else if let configuration = resolvedTargets[assignedId], let id = UUID(uuidString: assignedId) {
-                    action = .proxy
-                    configId = id
-                    configurationsById[assignedId] = configuration.withResolvedIP(
-                        resolvedIPsByAddress[configuration.serverAddress]
-                    )
-                } else {
-                    continue
-                }
-
-                let tier: RoutingBinaryFormat.Tier = ruleSet.isCustom ? .user
-                    : (ruleSet.name == "ADBlock" ? .adBlock : .builtIn)
-                entries.append(.init(tier: tier, action: action, configId: configId, name: ruleSet.name, rules: rules))
-            }
-
-            let countryCode = AWCore.getBypassCountryCode()
-            if !countryCode.isEmpty {
-                let bypass = CountryBypassCatalog.shared.rules(for: countryCode)
-                if !bypass.isEmpty {
-                    entries.append(.init(tier: .bypass, action: .direct, configId: nil,
-                                         name: String(localized: "Country Bypass"), rules: bypass))
-                }
-            }
-            
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = .sortedKeys
-            let configurationData = (try? encoder.encode(configurationsById)) ?? Data([0x7B, 0x7D])  // "{}"
-            let data = RoutingBinaryWriter.encode(configurationData: configurationData, entries: entries)
-
-            if data != AWCore.getRoutingData() {
-                AWCore.setRoutingData(data)
-                AWNotificationCenter.notifyRoutingChanged()
-            }
-        }.value
     }
 
     // MARK: - Persistence
@@ -393,172 +290,29 @@ class RoutingRuleSetStore {
         let dictionary = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { ruleSet in
             ruleSet.assignedConfigurationId.map { (ruleSet.id, $0) }
         })
-        AWCore.setRuleSetAssignments(dictionary)
+        AWCore.setRoutingRuleSetAssignments(dictionary)
     }
     
-    nonisolated private static func decodeCustomSplit(from data: Data?) -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {
-        guard let data else { return ([], []) }
-        guard let all = JSONDecoder().decodeSkippingInvalid([CustomRoutingRuleSet].self, from: data) else {
-            JSONBlobStore.quarantine(.customRuleSets, data)
-            return ([], [])
-        }
-        return Tombstone.split(all)
+    nonisolated private static func decodeCustomSplit(from items: [Data]) -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {
+        Tombstone.split(SyncCodec.decodeItems(CustomRoutingRuleSet.self, key: .customRuleSets, payloads: items))
     }
 
     private func recordTombstone(_ ruleSet: CustomRoutingRuleSet) {
         var tomb = ruleSet
         tomb.deletedAt = .now
         tomb.rules = []
+        tomb.iconLight = nil
+        tomb.iconDark = nil
         customTombstones.removeAll { $0.id == ruleSet.id }
         customTombstones.append(tomb)
     }
 
     private func saveCustomRuleSets() {
         mutationEpoch += 1
-        do {
-            let data = try JSONEncoder().encode(customRuleSets + customTombstones)
-            JSONBlobStore.shared.save(.customRuleSets, data: data)
-        } catch {
-            logger.report(AnywhereError.store(.saveFailed(.routingRuleSets, underlying: error)))
-        }
-        scheduleSyncToAppGroup()
-    }
-    
-    func scheduleSyncToAppGroup() {
-        let previous = syncTask
-        previous?.cancel()
-        syncTask = Task {
-            try? await Task.sleep(for: Self.syncDebounceInterval)
-            guard !Task.isCancelled else { return }
-            await previous?.value
-            guard !Task.isCancelled else { return }
-            await syncToAppGroup()
-        }
-    }
-}
-
-// MARK: - App Group Sync & Orphan Cleanup (convenience)
-
-extension RoutingRuleSetStore {
-    private func syncToAppGroup() async {
-        await syncToAppGroup(configurations: ConfigurationStore.shared.configurations,
-                             chains: ChainStore.shared.chains)
-    }
-
-    /// Clears assignments whose target proxy/chain no longer exists and records the affected names for the UI.
-    func clearOrphans(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
-        let availableIds = Set(configurations.map { $0.id.uuidString })
-            .union(chains.map { $0.id.uuidString })
-        let affected = clearOrphanedAssignments(availableIds: availableIds)
-        if !affected.isEmpty { orphanedRuleSetNames = affected }
-    }
-
-    func acknowledgeOrphans() {
-        orphanedRuleSetNames = []
-    }
-}
-
-nonisolated private struct RoutingBinaryWriter {
-    struct Entry {
-        let tier: RoutingBinaryFormat.Tier
-        let action: RoutingBinaryFormat.Action
-        let configId: UUID?
-        let name: String
-        let rules: [RoutingRule]
-    }
-
-    private var bytes: [UInt8] = []
-
-    static func encode(configurationData: Data, entries: [Entry]) -> Data {
-        var writer = RoutingBinaryWriter()
-        writer.bytes.reserveCapacity(configurationData.count + entries.reduce(0) { $0 + $1.rules.count * 24 } + 16)
-
-        writer.append(RoutingBinaryFormat.magic)
-        writer.u32(UInt32(configurationData.count))
-        writer.append(configurationData)
-        writer.u32(UInt32(entries.count))
-
-        for entry in entries {
-            writer.bytes.append(entry.tier.rawValue)
-            writer.bytes.append(entry.action.rawValue)
-            if entry.action == .proxy, let id = entry.configId {
-                writer.append(withUnsafeBytes(of: id.uuid) { Array($0) })
-            }
-            let ruleCountOffset = writer.bytes.count
-            writer.u32(0)  // back-patched once the kept rules are counted
-            var kept: UInt32 = 0
-            for rule in entry.rules {
-                // Case-fold domain values here, on the host: the extension stores
-                // suffix rules straight from these bytes (no per-rule folding),
-                // and folding once on the memory-rich host matches the lookup
-                // path, which lowercases the queried host. CIDR values are
-                // case-insensitive already and pass through untouched.
-                let value: String
-                switch rule.type {
-                case .domainSuffix, .domainKeyword: value = rule.value.lowercased()
-                case .ipCIDR, .ipCIDR6: value = rule.value
-                }
-                let utf8 = Array(value.utf8)
-                guard utf8.count <= Int(UInt16.max) else { continue }
-                writer.bytes.append(UInt8(rule.type.rawValue))
-                writer.u16(UInt16(utf8.count))
-                writer.append(utf8)
-                kept += 1
-            }
-            writer.patchU32(at: ruleCountOffset, kept)
-        }
-
-        // Trailing names section: u32 count (== entry count), then one
-        // u16-length-prefixed UTF-8 name per entry, in entry order.
-        writer.u32(UInt32(entries.count))
-        for entry in entries {
-            let utf8 = Array(entry.name.prefix(64).utf8)
-            writer.u16(UInt16(utf8.count))
-            writer.append(utf8)
-        }
-
-        return Data(writer.bytes)
-    }
-
-    private mutating func u16(_ v: UInt16) {
-        bytes.append(UInt8(truncatingIfNeeded: v))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
-    }
-
-    private mutating func u32(_ v: UInt32) {
-        bytes.append(UInt8(truncatingIfNeeded: v))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 16))
-        bytes.append(UInt8(truncatingIfNeeded: v >> 24))
-    }
-
-    private mutating func append(_ slice: [UInt8]) { bytes.append(contentsOf: slice) }
-    private mutating func append(_ slice: Data) { bytes.append(contentsOf: slice) }
-
-    private mutating func patchU32(at offset: Int, _ v: UInt32) {
-        bytes[offset] = UInt8(truncatingIfNeeded: v)
-        bytes[offset + 1] = UInt8(truncatingIfNeeded: v >> 8)
-        bytes[offset + 2] = UInt8(truncatingIfNeeded: v >> 16)
-        bytes[offset + 3] = UInt8(truncatingIfNeeded: v >> 24)
-    }
-}
-
-nonisolated enum CustomRoutingRuleSetRefreshError: LocalizedError {
-    case missingSubscriptionURL
-    case invalidStatusCode(Int)
-    case undecodableBody
-    case tooManyRules
-
-    var errorDescription: String? {
-        switch self {
-        case .missingSubscriptionURL:
-            return "This rule set has no subscription URL."
-        case .invalidStatusCode(let code):
-            return "HTTP \(code)"
-        case .undecodableBody:
-            return String(localized: "Unknown content.")
-        case .tooManyRules:
-            return String(localized: "Rule set is too large.")
-        }
+        syncStore.save(
+            .customRuleSets,
+            items: SyncCodec.encodeItems(customRuleSets + customTombstones),
+            order: SyncCodec.order(of: customRuleSets)
+        )
     }
 }

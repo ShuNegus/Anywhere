@@ -7,81 +7,117 @@
 
 import Foundation
 import Synchronization
+import AnywhereIP
 
 nonisolated private let logger = AnywhereLogger(category: "UDPFlow")
 
 actor UDPFlow {
-
-    /// The owning stack, for traffic accounting and the TUN write-back. Weak: the stack can stop
-    /// while late transport completions are still in flight.
+    nonisolated private var flowID: ObjectIdentifier { ObjectIdentifier(self) }
+    
     private weak var stack: TunnelStack?
 
-    /// The UDP plane that owns this flow, for deregistration and the shared session / mux pool.
-    /// Weak for the same reason as ``stack``.
     private weak var plane: UDPPlane?
 
     nonisolated let flowKey: TunnelStack.UDPFlowKey
-    nonisolated let srcHost: String
-    nonisolated let srcPort: UInt16
     nonisolated let dstHost: String
-    nonisolated let dstPort: UInt16
-    nonisolated let isIPv6: Bool
+    nonisolated let sniffedHost: String?
+    nonisolated let isQUIC: Bool
+    nonisolated var dstPort: UInt16 { flowKey.destination.port }
     nonisolated let configuration: ProxyConfiguration
 
-    // Raw IP bytes for building the response packet (swapped src/dst).
-    nonisolated let srcIPBytes: Data
-    nonisolated let dstIPBytes: Data
-
-    /// Activity counters read cross-actor by the stack's idle eviction, so they live in a
-    /// `Mutex` rather than the actor's isolated state.
     private struct Activity {
         var lastActivity: TimeInterval
-        /// Downlink datagrams received; at udpStreamMinReplies the flow graduates from the short
-        /// unreplied timeout to the longer stream timeout.
         var replyCount: Int
     }
     private let activity = Mutex(Activity(lastActivity: MonotonicClock.now, replyCount: 0))
 
-    /// Monotonic expiry instant; eviction picks the smallest deadline, so
-    /// unreplied probes are shed before established streams.
     nonisolated var idleDeadline: TimeInterval {
         activity.withLock { a in
-            a.lastActivity + (a.replyCount >= TunnelConstants.udpStreamMinReplies
-                              ? TunnelConstants.udpIdleTimeoutStream
-                              : TunnelConstants.udpIdleTimeoutUnreplied)
+            a.lastActivity + (
+                a.replyCount >= TunnelConstants.udpStreamMinReplies
+                ? TunnelConstants.udpIdleTimeoutStream
+                : TunnelConstants.udpIdleTimeoutUnreplied
+            )
         }
     }
 
-    // Direct bypass path
-    private var directTransport: UDPTransport?
+    struct PressureSnapshot {
+        let idleFor: TimeInterval
+        let isAssured: Bool
+    }
 
-    // Non-mux path
+    nonisolated func pressureSnapshot(now: TimeInterval) -> PressureSnapshot {
+        activity.withLock { a in
+            PressureSnapshot(
+                idleFor: now - a.lastActivity,
+                isAssured: a.replyCount >= TunnelConstants.udpStreamMinReplies
+            )
+        }
+    }
+
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case dialing
+        case established
+        case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .dialing),
+                 (.dialing, .established):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
+    private var phase: Phase = .idle
+
+    @discardableResult
+    private func transition(to new: Phase) -> Bool {
+        guard Phase.transition(&phase, to: new) else { return false }
+        if new == .established { activityRecord.establish() }
+        if new == .closed {
+            _closed.store(true, ordering: .relaxed)
+            activityRecord.close()
+        }
+        return true
+    }
+
+    private enum Outbound {
+        case direct(UDPTransport)
+        case shadowsocks(session: ShadowsocksUDPSession, token: ShadowsocksUDPSession.Token)
+        case multiplexer(any UDPMultiplexerStream)
+        case proxy(ProxyConnection)
+    }
+    private var outbound: Outbound?
+
     private var proxyClient: ProxyClient?
-    private var proxyConnection: ProxyConnection?
 
-    // Shared SS UDP session owned by TunnelStack; borrowed only.
-    private weak var ssUDPSession: ShadowsocksUDPSession?
-    private var ssUDPSessionToken: ShadowsocksUDPSession.Token?
-
-    // Mux path
-    private var udpStream: VLESSVisionUDPStream?
-    
     private var rootTask: Task<Void, Never>?
-    
-    private var establishing = false
-    
+
+    private nonisolated let _closed = Atomic<Bool>(false)
+    nonisolated var isClosed: Bool { _closed.load(ordering: .relaxed) }
+
     nonisolated let routeTarget: RouteTarget
 
+    private nonisolated let activityRecord: ActivityPool.Record
+
+    private nonisolated let trafficMeter: TrafficMeter
+
     private var bypass: Bool {
-        if case .direct = routeTarget { return true }
+        let resolved = routeTarget.resolved(against: stack?.udpConfig().defaultRouteTarget ?? .direct)
+        if case .direct = resolved { return true }
         return false
     }
 
     private var pendingData: [Data] = []
-    private var pendingBufferSize = 0
-    private var didWarnPendingOverflow = false
-    private var closed = false
-    
+    private let ledger: UDPBufferLedger
+    private var didWarnBufferDrop = false
+    private var didWarnSendFailure = false
+
     private enum Job: Sendable {
         case send(Data)
         case drain([Data])
@@ -91,27 +127,35 @@ actor UDPFlow {
 
     private let failureReporter = ConnectionFailureReporter(prefix: "[UDP]", logger: logger)
 
-    init(stack: TunnelStack,
-         plane: UDPPlane,
-         flowKey: TunnelStack.UDPFlowKey,
-         srcHost: String, srcPort: UInt16,
-         dstHost: String, dstPort: UInt16,
-         srcIPData: Data, dstIPData: Data,
-         isIPv6: Bool,
-         configuration: ProxyConfiguration,
-         routeTarget: RouteTarget) {
+    init(
+        stack: TunnelStack,
+        plane: UDPPlane,
+        ledger: UDPBufferLedger,
+        flowKey: TunnelStack.UDPFlowKey,
+        dstHost: String,
+        sniffedHost: String? = nil,
+        isQUIC: Bool = false,
+        configuration: ProxyConfiguration,
+        routeTarget: RouteTarget,
+        ruleSetName: String?
+    ) {
         self.stack = stack
         self.plane = plane
+        self.ledger = ledger
         self.flowKey = flowKey
-        self.srcHost = srcHost
-        self.srcPort = srcPort
         self.dstHost = dstHost
-        self.dstPort = dstPort
-        self.srcIPBytes = srcIPData
-        self.dstIPBytes = dstIPData
-        self.isIPv6 = isIPv6
+        self.sniffedHost = sniffedHost
+        self.isQUIC = isQUIC
         self.configuration = configuration
         self.routeTarget = routeTarget
+        self.activityRecord = stack.udpActivity.open(
+            host: sniffedHost ?? dstHost,
+            port: flowKey.destination.port,
+            routeTarget: routeTarget,
+            defaultRouteTarget: stack.udpConfig().defaultRouteTarget,
+            ruleSetName: ruleSetName
+        )
+        self.trafficMeter = stack.openTrafficMeter(target: routeTarget)
         (self.jobs, self.jobContinuation) = AsyncStream.makeStream(of: Job.self)
     }
 
@@ -119,27 +163,19 @@ actor UDPFlow {
         failureReporter.report(operation: operation, endpoint: "\(flowKey)", error: error)
     }
 
-    nonisolated private func logTransientSendFailure(_ error: Error) {
-        TransportErrorLogger.logTransientSend(
-            endpoint: "\(flowKey)",
-            error: error,
-            logger: logger,
-            prefix: "[UDP]"
-        )
-    }
-
     private func noteTransientSendFailure(_ error: Error) {
-        guard !closed, !(error is CancellationError) else { return }
-        logTransientSendFailure(error)
+        guard phase != .closed, !didWarnSendFailure, let level = AnywhereError.logLevel(of: error) else { return }
+        didWarnSendFailure = true
+        logger.log("[UDP] \(flowKey): Send failed: \(AnywhereError.logDescription(error))", level: min(level, .warning))
     }
 
     private func handleProxySendError(_ error: Error, connection: ProxyConnection) async {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         if Self.isTerminalProxySendError(error, connection: connection) {
             reportFailure("Send", error: error)
             await closeAndRemove()
         } else {
-            logTransientSendFailure(error)
+            noteTransientSendFailure(error)
         }
     }
 
@@ -178,44 +214,74 @@ actor UDPFlow {
 
     // MARK: - Uplink
 
-    func handleReceivedData(_ data: Data, payloadLength: Int) async {
-        guard !closed else { return }
+    func handleReceivedData(_ payloads: [Data]) {
+        guard phase != .closed, !payloads.isEmpty else { return }
         activity.withLock { $0.lastActivity = MonotonicClock.now }
 
-        stack?.addBytesOut(Int64(payloadLength), target: routeTarget)
-        
-        if establishing {
-            bufferPayload(data: data, payloadLength: payloadLength)
-            return
+        var admitted: [Data] = []
+        for payload in payloads {
+            trafficMeter.addBytesOut(payload.count)
+            activityRecord.addBytesOut(payload.count)
+
+            switch phase {
+            case .idle:
+                bufferPayload(data: payload, payloadLength: payload.count)
+                guard phase != .closed else { return }
+                transition(to: .dialing)
+                rootTask = Task { await self.run() }
+            case .dialing:
+                bufferPayload(data: payload, payloadLength: payload.count)
+            case .established:
+                if admit(bytes: payload.count) { admitted.append(payload) }
+            case .closed:
+                return
+            }
         }
-        
-        if rootTask == nil {
-            bufferPayload(data: data, payloadLength: payloadLength)
-            establishing = true
-            rootTask = Task { await self.run() }
-            return
+        enqueueSend(admitted)
+    }
+
+    private func enqueueSend(_ payloads: [Data]) {
+        switch payloads.count {
+        case 0: return
+        case 1: jobContinuation.yield(.send(payloads[0]))
+        default: jobContinuation.yield(.drain(payloads))
         }
-        
-        jobContinuation.yield(.send(data.prefix(payloadLength)))
     }
 
     private func bufferPayload(data: Data, payloadLength: Int) {
-        if pendingBufferSize + payloadLength > TunnelConstants.udpMaxBufferSize {
-            if !didWarnPendingOverflow {
-                didWarnPendingOverflow = true
-                logger.warning("[UDP] Pending buffer overflow for \(flowKey); dropping datagrams until proxy connects")
-            }
-            return
-        }
+        guard admit(bytes: payloadLength) else { return }
         pendingData.append(data.prefix(payloadLength))
-        pendingBufferSize += payloadLength
     }
     
+    private func admit(bytes: Int) -> Bool {
+        switch ledger.reserve(flow: flowID, handle: flowKey, bytes: bytes) {
+        case .admitted(let victims):
+            evictOthers(victims)
+            return true
+        case .selfEvicted(let victims):
+            evictOthers(victims)
+            logger.warning("[UDP] Uplink buffer full")
+            close()
+            Task { [plane] in await plane?.remove(self) }
+            return false
+        case .dropped:
+            if !didWarnBufferDrop {
+                didWarnBufferDrop = true
+                logger.warning("[UDP] Uplink buffer full")
+            }
+            return false
+        }
+    }
+
+    private func evictOthers(_ victims: [UDPBufferLedger.Victim]) {
+        guard !victims.isEmpty else { return }
+        Task { [plane] in await plane?.evictForBufferPressure(victims) }
+    }
+
     private func flushBuffered() {
         guard !pendingData.isEmpty else { return }
         let buffered = pendingData
         pendingData.removeAll()
-        pendingBufferSize = 0
         jobContinuation.yield(.drain(buffered))
     }
 
@@ -224,37 +290,40 @@ actor UDPFlow {
     private func run() async {
         await withDiscardingTaskGroup { group in
             group.addTask { await self.runLifecycle() }
-            for await job in self.jobs {
-                switch job {
-                case .send(let payload):
-                    group.addTask { await self.runSend(payload) }
-                case .drain(let payloads):
-                    group.addTask { await self.runDrain(payloads) }
+            group.addTask { await self.runSendLoop() }
+        }
+    }
+
+    private func runSendLoop() async {
+        for await job in self.jobs {
+            switch job {
+            case .send(let payload):
+                await runSend(payload)
+                ledger.release(flow: flowID, bytes: payload.count)
+            case .drain(let payloads):
+                for payload in payloads {
+                    await runSend(payload)
+                    ledger.release(flow: flowID, bytes: payload.count)
                 }
             }
         }
     }
-    
+
     private func runSend(_ payload: Data) async {
-        guard !closed else { return }
-        if let transport = directTransport {
+        guard phase != .closed, let outbound else { return }
+        switch outbound {
+        case .direct(let transport):
             do { try await transport.send(payload) } catch { noteTransientSendFailure(error) }
-        } else if let session = ssUDPSession, let token = ssUDPSessionToken {
+        case .shadowsocks(let session, let token):
             do {
                 try await session.send(token: token, dstHost: dstHost, dstPort: dstPort, payload: payload)
             } catch {
                 noteTransientSendFailure(error)
             }
-        } else if let session = udpStream {
-            do { try await session.send(data: payload) } catch { noteTransientSendFailure(error) }
-        } else if let connection = proxyConnection {
+        case .multiplexer(let stream):
+            do { try await stream.send(data: payload) } catch { noteTransientSendFailure(error) }
+        case .proxy(let connection):
             do { try await connection.send(payload) } catch { await handleProxySendError(error, connection: connection) }
-        }
-    }
-
-    private func runDrain(_ payloads: [Data]) async {
-        for payload in payloads {
-            await runSend(payload)
         }
     }
 
@@ -267,13 +336,12 @@ actor UDPFlow {
         }
 
         let hasChain = configuration.chain != nil && !configuration.chain!.isEmpty
-        
+
         if !hasChain {
             let isDefaultConfiguration = stack?.isDefaultConfiguration(configuration.id) ?? false
-            if configuration.outboundProtocol == .vless, isDefaultConfiguration,
-               let pool = await plane?.multiplexerPool {
-                guard !closed else { return }
-                await runMuxLifecycle(pool: pool)
+            if isDefaultConfiguration, let pool = await plane?.multiplexerPool {
+                guard phase != .closed else { return }
+                await runMultiplexerLifecycle(pool: pool)
                 return
             }
             if configuration.outboundProtocol == .shadowsocks {
@@ -281,20 +349,21 @@ actor UDPFlow {
                 return
             }
         }
-        
+
         await runProxyClientLifecycle()
     }
-    
-    private func markEstablishedAndDrain() {
+
+    private func establish(_ newOutbound: Outbound) -> Bool {
+        guard transition(to: .established) else { return false }
+        outbound = newOutbound
         flushBuffered()
-        establishing = false
+        return true
     }
 
     // MARK: Direct (bypass)
 
     private func runDirectLifecycle() async {
-        let transport = UDPTransport(host: dstHost, port: dstPort)
-        self.directTransport = transport
+        let transport = UDPTransport(host: dstHost, port: dstPort, resolution: .localRequests)
 
         let connectError: Error?
         do {
@@ -303,7 +372,10 @@ actor UDPFlow {
         } catch {
             connectError = error
         }
-        guard !closed else { return }
+        guard phase != .closed else {
+            transport.cancel()
+            return
+        }
 
         if let connectError {
             reportFailure("Connect", error: connectError)
@@ -311,8 +383,11 @@ actor UDPFlow {
             return
         }
 
-        markEstablishedAndDrain()
-        
+        guard establish(.direct(transport)) else {
+            transport.cancel()
+            return
+        }
+
         do {
             while true {
                 let datagram = try await transport.receive()
@@ -323,45 +398,43 @@ actor UDPFlow {
         }
     }
 
-    // MARK: Mux
+    // MARK: Multiplexer
 
-    private func runMuxLifecycle(pool: VLESSVisionUDPMultiplexerPool) async {
-        let globalID = VLESSVisionUDPGlobalID.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)")
-
-        let result: Result<VLESSVisionUDPStream, Error>
+    private func runMultiplexerLifecycle(pool: any UDPMultiplexerPool) async {
+        let result: Result<any UDPMultiplexerStream, Error>
         do {
-            result = .success(try await pool.acquireStream(
-                network: .udp, host: dstHost, port: dstPort, globalID: globalID))
+            result = .success(try await pool.acquireUDPStream(
+                host: dstHost, port: dstPort, sourceAddress: "udp:\(flowKey.source.address):\(flowKey.source.port)"))
         } catch {
             result = .failure(error)
         }
-        guard !closed else {
-            if case .success(let session) = result { session.close() }
+        guard phase != .closed else {
+            if case .success(let stream) = result { stream.close() }
             return
         }
 
         switch result {
-        case .success(let session):
-            guard !session.closed else {
+        case .success(let stream):
+            guard !stream.closed else {
                 await closeAndRemove()
                 return
             }
-            udpStream = session
-            markEstablishedAndDrain()
-            
+            guard establish(.multiplexer(stream)) else {
+                stream.close()
+                return
+            }
+
             do {
-                while let data = try await session.receive() {
+                while let data = try await stream.receive() {
                     handleProxyData(data)
                 }
-                await receiveClosed(operation: "Mux", error: nil)
+                await receiveClosed(operation: "Multiplexer", error: nil)
             } catch {
-                await receiveClosed(operation: "Mux", error: error)
+                await receiveClosed(operation: "Multiplexer", error: error)
             }
 
         case .failure(let error):
-            if case AnywhereError.routing(.dropped) = error {} else {
-                reportFailure("Connect", error: error)
-            }
+            reportFailure("Connect", error: error)
             await closeAndRemove()
         }
     }
@@ -375,7 +448,7 @@ actor UDPFlow {
         }
 
         let sessionResult = await plane.shadowsocksSession(for: configuration)
-        guard !closed else { return }
+        guard phase != .closed else { return }
         let session: ShadowsocksUDPSession
         switch sessionResult {
         case .success(let s):
@@ -385,27 +458,11 @@ actor UDPFlow {
             await closeAndRemove()
             return
         }
-        
-        let cachedHints = DNSResolver.shared.cachedIPs(for: dstHost) ?? []
-        let (token, stream) = await session.register(
-            dstHost: dstHost, dstPort: dstPort, responseHostHints: cachedHints
-        )
-        guard !closed else {
+
+        let (token, stream) = await session.register(dstHost: dstHost, dstPort: dstPort)
+        guard establish(.shadowsocks(session: session, token: token)) else {
             await session.unregister(token: token)
             return
-        }
-
-        ssUDPSession = session
-        ssUDPSessionToken = token
-        markEstablishedAndDrain()
-        
-        if cachedHints.isEmpty, Self.isDomainName(dstHost) {
-            let host = dstHost
-            Task { [weak session] in
-                let ips = await DNSResolver.shared.resolveAll(host)
-                guard !ips.isEmpty, let session else { return }
-                await session.addResponseHints(token: token, hints: ips)
-            }
         }
 
         do {
@@ -416,24 +473,12 @@ actor UDPFlow {
             await receiveClosed(operation: "Receive", error: error)
         }
     }
-    
-    nonisolated private static func isDomainName(_ host: String) -> Bool {
-        let bare: String
-        if host.hasPrefix("[") && host.hasSuffix("]") {
-            bare = String(host.dropFirst().dropLast())
-        } else {
-            bare = host
-        }
-        var v4 = in_addr()
-        if inet_pton(AF_INET, bare, &v4) == 1 { return false }
-        var v6 = in6_addr()
-        if inet_pton(AF_INET6, bare, &v6) == 1 { return false }
-        return !bare.isEmpty
-    }
 
-    // MARK: ProxyClient (chain-capable)
+    // MARK: ProxyClient
 
     private func runProxyClientLifecycle() async {
+        guard phase != .closed else { return }
+
         let client = ProxyClient(
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
@@ -446,15 +491,17 @@ actor UDPFlow {
         } catch {
             result = .failure(error)
         }
-        guard !closed else {
+        guard phase != .closed else {
             if case .success(let connection) = result { connection.cancel() }
             return
         }
 
         switch result {
         case .success(let proxyConnection):
-            self.proxyConnection = proxyConnection
-            markEstablishedAndDrain()
+            guard establish(.proxy(proxyConnection)) else {
+                proxyConnection.cancel()
+                return
+            }
 
             do {
                 while let data = try await proxyConnection.receive() {
@@ -466,9 +513,7 @@ actor UDPFlow {
             }
 
         case .failure(let error):
-            if case AnywhereError.routing(.dropped) = error {} else {
-                reportFailure("Connect", error: error)
-            }
+            reportFailure("Connect", error: error)
             await closeAndRemove()
         }
     }
@@ -476,24 +521,21 @@ actor UDPFlow {
     // MARK: - Downlink
 
     private func handleProxyData(_ data: Data) {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         activity.withLock {
             $0.lastActivity = MonotonicClock.now
             $0.replyCount += 1
         }
 
-        stack?.addBytesIn(Int64(data.count), target: routeTarget)
-        
-        stack?.writeOutboundUDP(
-            srcIP: dstIPBytes, srcPort: dstPort,
-            dstIP: srcIPBytes, dstPort: srcPort,
-            isIPv6: isIPv6, payload: data
-        )
+        trafficMeter.addBytesIn(data.count)
+        activityRecord.addBytesIn(data.count)
+
+        stack?.writeOutboundUDP(data, from: flowKey.destination, to: flowKey.source)
     }
-    
+
     private func receiveClosed(operation: String, error: Error?) async {
-        guard !closed else { return }
-        if let error {
+        guard phase != .closed else { return }
+        if let error, !AnywhereError.isPeerClose(error) {
             reportFailure(operation, error: error)
         }
         await closeAndRemove()
@@ -507,38 +549,34 @@ actor UDPFlow {
     }
 
     func close() {
-        guard !closed else { return }
-        closed = true
+        guard transition(to: .closed) else { return }
         teardown()
     }
-    
+
     private func teardown() {
         jobContinuation.finish()
 
-        let transport = directTransport
-        let ssSession = ssUDPSession
-        let ssToken = ssUDPSessionToken
-        let connection = proxyConnection
+        let doomed = outbound
+        outbound = nil
         let client = proxyClient
-        let session = udpStream
-        directTransport = nil
-        ssUDPSession = nil
-        ssUDPSessionToken = nil
-        proxyConnection = nil
         proxyClient = nil
-        udpStream = nil
-        establishing = false
         pendingData.removeAll()
-        pendingBufferSize = 0
-        
-        transport?.cancel()
-        if let ssSession, let ssToken {
-            Task { await ssSession.unregister(token: ssToken) }
+        ledger.releaseAll(flow: flowID)
+
+        switch doomed {
+        case .direct(let transport):
+            transport.cancel()
+        case .shadowsocks(let session, let token):
+            Task { await session.unregister(token: token) }
+        case .multiplexer(let stream):
+            stream.close()
+        case .proxy(let connection):
+            connection.cancel()
+        case nil:
+            break
         }
-        connection?.cancel()
         client?.cancel()
-        session?.close()
-        
+
         rootTask?.cancel()
         rootTask = nil
     }

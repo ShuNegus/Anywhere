@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPStream")
-
 actor VLESSVisionUDPStream {
     nonisolated let sessionID: UInt16
     nonisolated let network: VLESSVisionUDPNetwork
@@ -17,14 +15,31 @@ actor VLESSVisionUDPStream {
     nonisolated let targetPort: UInt16
     private weak var multiplexer: VLESSVisionUDPMultiplexer?
     private nonisolated let globalID: Data?
-    
+
     private var firstFrameSent: Bool
-    
+
     private let sendChain = SerialSender()
-    
-    private nonisolated let _closed = Atomic<Bool>(false)
-    nonisolated var closed: Bool { _closed.load(ordering: .relaxed) }
-    
+
+    private enum Phase: PhaseTransitionable {
+        case open
+        case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.open, .closed):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+    private nonisolated let phase = Mutex<Phase>(.open)
+    nonisolated var closed: Bool { phase.withLock { $0 == .closed } }
+
+    private nonisolated func closeLifecycle() -> Bool {
+        phase.withLock { Phase.transition(&$0, to: .closed) }
+    }
+
     private let inbox = AsyncInbox<Data>()
 
     init(
@@ -58,7 +73,7 @@ actor VLESSVisionUDPStream {
             try await self.buildAndSend(data: data, multiplexer: multiplexer)
         }
     }
-    
+
     private func buildAndSend(data: Data, multiplexer: VLESSVisionUDPMultiplexer) async throws {
         let isFirstFrame = !firstFrameSent
         if isFirstFrame {
@@ -97,7 +112,7 @@ actor VLESSVisionUDPStream {
     // MARK: - Close
 
     nonisolated func close() {
-        guard !_closed.exchange(true, ordering: .relaxed) else { return }
+        guard closeLifecycle() else { return }
         inbox.finish()
         sendChain.cancel()
         Task { await self.sendEndAndRemove() }
@@ -123,7 +138,7 @@ actor VLESSVisionUDPStream {
     }
 
     nonisolated func deliverClose(error: Error? = nil) {
-        guard !_closed.exchange(true, ordering: .relaxed) else { return }
+        guard closeLifecycle() else { return }
         if let error {
             inbox.finish(throwing: error)
         } else {
@@ -132,4 +147,4 @@ actor VLESSVisionUDPStream {
     }
 }
 
-extension VLESSVisionUDPStream: MultiplexerStreamSink {}
+extension VLESSVisionUDPStream: MultiplexerStreamSink, UDPMultiplexerStream {}

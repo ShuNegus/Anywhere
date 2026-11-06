@@ -6,18 +6,23 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
+
+nonisolated private let fileImportAllowedContentTypes: [UTType] = [UTType(filenameExtension: "ajson") ?? .data]
 
 fileprivate enum Method: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 
     case qrCode = "qrCode"
     case link = "link"
+    case file = "file"
     case manual = "manual"
 
     var image: String {
         switch self {
         case .qrCode: "qrcode.viewfinder"
         case .link: "link"
+        case .file: "folder"
         case .manual: "hand.point.up.left"
         }
     }
@@ -26,21 +31,21 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
         switch self {
         case .qrCode: String(localized: "QR Code")
         case .link: String(localized: "Link")
+        case .file: String(localized: "File")
         case .manual: String(localized: "Manual")
         }
     }
 }
 
 struct AddProxyView: View {
-    @Environment(VPNViewModel.self) private var viewModel
-    @Environment(ConfigurationStore.self) private var configStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(\.dismiss) var dismiss
+    @Environment(Operations.self) private var operations
     @Binding var showingManualAddSheet: Bool
     var deepLinkURL: String?
 
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
+    @State private var showingFileImporter = false
     @State private var linkURL = ""
     @State private var isLoading = false
     @State private var showingError = false
@@ -84,6 +89,12 @@ struct AddProxyView: View {
         .qrScanner(isScanning: $showingQRScanner) { code in
             importFromString(code)
         }
+        .fileImporter(
+            isPresented: $showingFileImporter,
+            allowedContentTypes: fileImportAllowedContentTypes
+        ) { result in
+            importFromFile(result)
+        }
         .alert("Import Failed", isPresented: $showingError) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -91,7 +102,7 @@ struct AddProxyView: View {
         }
         .alert("Remnawave HWID", isPresented: $showingRemnawaveHWIDAlert) {
             Button("Enable") {
-                fetchSubscription(url: pendingSubscriptionURL, withRemnawaveHWID: true)
+                fetchSubscription(url: pendingSubscriptionURL)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -234,7 +245,6 @@ struct AddProxyView: View {
 
     private func checkClipboard() {
         guard let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-        // http/https accepted as subscription URLs since those schemes are never a single proxy.
         if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") || clip.hasPrefix("https://") {
             linkURL = clip
         }
@@ -246,6 +256,8 @@ struct AddProxyView: View {
             showingQRScanner = true
         case .link:
             importFromString(linkURL)
+        case .file:
+            showingFileImporter = true
         case .manual:
             showingManualAddSheet = true
             dismiss()
@@ -255,34 +267,65 @@ struct AddProxyView: View {
     }
 
     private func importFromString(_ string: String) {
-        let trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Only schemes the parser knows take the proxy-link path; everything else is a subscription URL.
+        var trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if let embedded = DeepLinkManager.extractAddProxyLink(from: trimmedURL) {
+            trimmedURL = embedded
+        }
+        
         if ProxyConfiguration.canParseURL(trimmedURL) {
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmedURL)
-                configStore.add(configuration); viewModel.selectIfNone(configuration)
+                operations.configurations.add(configuration); operations.selection.selectIfNone(configuration)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
                 showingError = true
             }
         } else {
-            let requiresRemnawaveHWID = SubscriptionDomainHelper.shouldRequireRemnawaveHWID(for: trimmedURL)
+            let requiresRemnawaveHWID = false
             if requiresRemnawaveHWID && !AWCore.getRemnawaveHWIDEnabled() {
                 pendingSubscriptionURL = trimmedURL
                 showingRemnawaveHWIDAlert = true
                 return
             }
-            fetchSubscription(url: trimmedURL, withRemnawaveHWID: requiresRemnawaveHWID)
+            fetchSubscription(url: trimmedURL)
         }
     }
 
-    private func fetchSubscription(url: String, withRemnawaveHWID: Bool) {
+    private func importFromFile(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            guard url.pathExtension.lowercased() == "ajson" else {
+                errorMessage = String(localized: "Invalid AJSON File.")
+                showingError = true
+                return
+            }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            guard let body = String(data: try Data(contentsOf: url), encoding: .utf8) else {
+                errorMessage = String(localized: "Invalid AJSON File.")
+                showingError = true
+                return
+            }
+            let document = try AJSONParser.parse(body)
+            guard !document.configurations.isEmpty else {
+                throw AnywhereError.subscription(.noConfigurations)
+            }
+            let imported = operations.configurations.importStandalone(document)
+            if let first = imported.first { operations.selection.selectIfNone(first) }
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+            showingError = true
+        }
+    }
+
+    private func fetchSubscription(url: String) {
         isLoading = true
         Task {
             do {
-                let result = try await SubscriptionFetcher.fetch(url: url, withRemnawaveHWID: withRemnawaveHWID)
+                let result = try await SubscriptionFetcher.fetch(url: url)
                 let subscription = Subscription(
                     name: result.name ?? URL(string: url)?.host ?? String(localized: "Subscription"),
                     url: url,
@@ -290,9 +333,11 @@ struct AddProxyView: View {
                     upload: result.upload,
                     download: result.download,
                     total: result.total,
-                    expire: result.expire
+                    expire: result.expire,
+                    iconLight: result.iconLight,
+                    iconDark: result.iconDark
                 )
-                subscriptionStore.add(subscription, configurations: result.configurations, turn: result.turn, push: result.push, turnOutcome: result.turnOutcome)
+                operations.subscriptions.add(subscription, result: result)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription

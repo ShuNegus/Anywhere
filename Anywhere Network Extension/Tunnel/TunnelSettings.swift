@@ -17,13 +17,11 @@ nonisolated struct TunnelSettings: Equatable {
     var blockWebRTC = true
     var preventDNSLeak = false
     var reflectionEnabled = false
-    var reflectionAddresses: [String] = []
     var hideVPNIcon = false
     var tunnelIncludedRoutes: [String] = []
     var tunnelExcludedRoutes: [String] = []
-    var ipRuleDNSUpstream: DNSUpstream = .system
+    var syntheticAddressExcludedDomainSuffixes: [String] = []
     var interceptExemptDNSServers: Set<String> = []
-    var advertiseIPv6ToApps = false
 
     static func load() -> TunnelSettings {
         TunnelSettings(
@@ -36,13 +34,11 @@ nonisolated struct TunnelSettings: Equatable {
             blockWebRTC: AWCore.getBlockWebRTC(),
             preventDNSLeak: AWCore.getPreventDNSLeak(),
             reflectionEnabled: AWCore.getReflectionEnabled(),
-            reflectionAddresses: AWCore.getReflectionAddresses(),
             hideVPNIcon: AWCore.getHideVPNIcon(),
             tunnelIncludedRoutes: AWCore.getTunnelIncludedRoutes(),
             tunnelExcludedRoutes: AWCore.getTunnelExcludedRoutes(),
-            ipRuleDNSUpstream: AWCore.getIPRuleDNSUpstream(),
-            interceptExemptDNSServers: TunnelStack.interceptExemptDNSServers(),
-            advertiseIPv6ToApps: AWCore.getAdvertiseIPv6ToApps()
+            syntheticAddressExcludedDomainSuffixes: AWCore.getSyntheticAddressExcludedDomainSuffixes(),
+            interceptExemptDNSServers: TunnelStack.interceptExemptDNSServers()
         )
     }
 }

@@ -15,7 +15,7 @@ import Synchronization
 // MARK: - ServerHello Result
 
 nonisolated private enum ServerHelloResult {
-    case tls13(keyShare: Data, cipherSuite: UInt16)
+    case tls13(keyShare: Data, keyShareGroup: UInt16, cipherSuite: UInt16)
     case tls12(cipherSuite: UInt16, serverRandom: Data, version: UInt16, extendedMasterSecret: Bool)
     case helloRetryRequest
 }
@@ -24,32 +24,86 @@ nonisolated private enum ServerHelloResult {
 
 actor TLSClient {
     let configuration: TLSConfiguration
-    
-    private let connectionBox = Mutex<(any ByteTransport)?>(nil)
-    nonisolated var connection: (any ByteTransport)? { connectionBox.withLock { $0 } }
-    
-    private func adoptTransport(_ transport: any ByteTransport) {
-        connectionBox.withLock { $0 = transport }
-    }
-    
-    nonisolated func takeConnection() -> (any ByteTransport)? {
-        connectionBox.withLock { connection in
-            let taken = connection
-            connection = nil
-            return taken
+
+    // MARK: Lifecycle
+
+    private enum Phase: PhaseTransitionable {
+        case idle, connecting, established, failed, cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .established),
+                 (.connecting, .failed):
+                return true
+            case (_, .cancelled):
+                return old != .cancelled
+            default:
+                return false
+            }
         }
     }
-    
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .idle
+        var connection: (any ByteTransport)?
+    }
+    private nonisolated let state = Mutex(State())
+
+    nonisolated var connection: (any ByteTransport)? { state.withLock { $0.connection } }
+
+    private nonisolated func adoptTransport(_ transport: any ByteTransport) {
+        let adopted = state.withLock { state -> Bool in
+            switch state.phase {
+            case .cancelled, .failed:
+                return false
+            case .idle, .connecting, .established:
+                state.connection = transport
+                return true
+            }
+        }
+        if !adopted { transport.cancel() }
+    }
+
+    private func claimConnect() throws {
+        try state.withLock { state in
+            switch state.phase {
+            case .idle:
+                break
+            case .cancelled:
+                throw AnywhereError.tls(.handshakeFailed(detail: "TLS client cancelled"))
+            case .connecting, .established, .failed:
+                throw AnywhereError.tls(.handshakeFailed(detail: "TLS client reused"))
+            }
+            state.transition(to: .connecting)
+        }
+    }
+
+    func commitHandshake(_ record: TLSRecordConnection) throws {
+        let (committed, taken): (Bool, (any ByteTransport)?) = state.withLock { state in
+            let committed = state.transition(to: .established)
+            let taken = state.connection
+            state.connection = nil
+            return (committed, taken)
+        }
+        guard committed else {
+            taken?.cancel()
+            record.cancel()
+            throw AnywhereError.tls(.handshakeFailed(detail: "cancelled during handshake"))
+        }
+        record.adoptTransport(taken)
+    }
+
     var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
+    private var mlkemPrivateKeyStorage: Any?
     private var storedClientHello: Data?
     private var sentSessionID: Data?
-    
+
     var echContext: ECHClientContext?
-    var echAccepted = false
     private var resolvedECHConfigList: Data?
-    
+
     var tls13 = TLS13HandshakeState()
-    
+
     var clientRandom: Data?
     var serverRandom: Data?
     var masterSecret: Data?
@@ -61,9 +115,9 @@ actor TLSClient {
     var tls12Transcript: Data?
 
     var serverCertificates: [SecCertificate] = []
-    
+
     var postHandshakeBuffer: Data?
-    
+
     var negotiatedALPN: String = ""
 
     private static let supportedTLS12CipherSuites: Set<UInt16> = [
@@ -96,9 +150,13 @@ actor TLSClient {
     }
 
     // MARK: - Public API
-    
+
     private static let handshakeDeadline: Duration = .seconds(30)
     
+    static let maxHandshakeBufferSize = 1 << 18
+    
+    private static let tls12DowngradeSentinel = Data([0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01])
+
     private func withHandshakeDeadline(
         _ handshake: @escaping @Sendable () async throws -> TLSRecordConnection
     ) async throws -> TLSRecordConnection {
@@ -115,9 +173,10 @@ actor TLSClient {
             throw error
         }
     }
-    
+
     func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
-        try await withHandshakeDeadline {
+        try claimConnect()
+        return try await withHandshakeDeadline {
             try await self.performConnect(host: host, port: port)
         }
     }
@@ -133,7 +192,7 @@ actor TLSClient {
         let clientHello = try buildTLSClientHello(privateKey: privateKey)
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
+        let transport = TCPTransport(host: host, port: port, resolution: .proxies)
         adoptTransport(transport)
         do {
             try await transport.connect(initialData: clientHello)
@@ -143,21 +202,33 @@ actor TLSClient {
 
         return try await receiveServerResponse()
     }
-    
+
     func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
-        try await withHandshakeDeadline {
+        try claimConnect()
+        return try await withHandshakeDeadline {
             try await self.performConnect(overTunnel: tunnel)
         }
     }
 
+    func connect(transport: any ByteTransport) async throws -> TLSRecordConnection {
+        try claimConnect()
+        return try await withHandshakeDeadline {
+            try await self.performConnect(transport: transport)
+        }
+    }
+
     private func performConnect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+        try await performConnect(transport: TunneledTransport(tunnel: tunnel))
+    }
+
+    private func performConnect(transport: any ByteTransport) async throws -> TLSRecordConnection {
         try await prepareECH()
 
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
         guard let privateKey = ephemeralPrivateKey else {
             throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
         }
-        adoptTransport(TunneledTransport(tunnel: tunnel))
+        adoptTransport(transport)
 
         let clientHello = try buildTLSClientHello(privateKey: privateKey)
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
@@ -173,22 +244,34 @@ actor TLSClient {
 
         return try await receiveServerResponse()
     }
-    
+
     nonisolated func cancel() {
-        takeConnection()?.cancel()
+        let victim = state.withLock { state -> (any ByteTransport)? in
+            _ = state.transition(to: .cancelled)
+            let connection = state.connection
+            state.connection = nil
+            return connection
+        }
+        victim?.cancel()
     }
 
     private func releaseOnFailure() {
-        takeConnection()?.cancel()
+        let victim = state.withLock { state -> (any ByteTransport)? in
+            _ = state.transition(to: .failed)
+            let connection = state.connection
+            state.connection = nil
+            return connection
+        }
+        victim?.cancel()
         clearHandshakeState()
     }
 
     // MARK: - ClientHello
-    
+
     private func prepareECH() async throws {
         guard configuration.echIsOpportunistic else { return }
         let serverName = configuration.serverName
-        let config: Data? = await DNSResolver.shared.resolveECHConfigList(for: serverName)
+        let config: Data? = await ECHResolver.shared.resolveConfigList(for: serverName)
         guard let config else {
             throw AnywhereError.tls(.handshakeFailed(detail:
                 "Opportunistic ECH: no ECH config published in DNS for \(serverName)"))
@@ -208,7 +291,7 @@ actor TLSClient {
             throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate session ID"))
         }
         sentSessionID = sessionId
-        
+
         if configuration.echEnabled,
            let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) ?? resolvedECHConfigList {
             let configs = try ECHConfigParser.parseConfigList(echConfigData)
@@ -249,7 +332,7 @@ actor TLSClient {
             serverName: configuration.serverName,
             publicKey: privateKey.publicKey.rawRepresentation,
             alpn: configuration.alpn ?? ["h2", "http/1.1"],
-            omitPQKeyShares: true
+            mlkemEncapsulationKey: generateMLKEMEncapsulationKey()
         )
 
         if let maxVersion = configuration.maxVersion, maxVersion.rawValue <= 0x0303 {
@@ -260,7 +343,7 @@ actor TLSClient {
     }
 
     // MARK: - Server Response Processing
-    
+
     private func receiveServerResponse(buffer: Data = Data()) async throws -> TLSRecordConnection {
         var buffer = buffer
         while buffer.count < 5 {
@@ -286,7 +369,7 @@ actor TLSClient {
             throw AnywhereError.tls(.handshakeFailed(detail: "Unexpected content type: \(contentType)"))
         }
     }
-    
+
     private func continueReceivingHandshake(buffer: Data) async throws -> TLSRecordConnection {
         var buffer = buffer
         while !bufferContainsCompleteServerHello(buffer) {
@@ -296,6 +379,9 @@ actor TLSClient {
             switch try await connection.receive() {
             case .bytes(let moreData):
                 buffer.append(moreData)
+                guard buffer.count <= Self.maxHandshakeBufferSize else {
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Handshake flight exceeds \(Self.maxHandshakeBufferSize) bytes"))
+                }
             case .end:
                 throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before ServerHello"))
             }
@@ -310,15 +396,32 @@ actor TLSClient {
         case .helloRetryRequest:
             throw AnywhereError.tls(.helloRetryRequest)
 
-        case .tls13(let serverKeyShare, let cipherSuite):
+        case .tls13(let serverKeyShare, let keyShareGroup, let cipherSuite):
+            if let maxVersion = configuration.maxVersion, maxVersion.rawValue < TLSVersion.tls13.rawValue {
+                throw AnywhereError.tls(.handshakeFailed(detail: "Server selected TLS 1.3 above the configured maximum"))
+            }
             return try await handleTLS13Handshake(
                 buffer: buffer,
                 serverKeyShare: serverKeyShare,
+                keyShareGroup: keyShareGroup,
                 cipherSuite: cipherSuite,
                 clientHello: clientHello
             )
 
         case .tls12(let cipherSuite, let serverRandom, let version, let extendedMasterSecret):
+            if echContext != nil {
+                throw AnywhereError.tls(.ech(.tls12Negotiated))
+            }
+            guard version == TLSVersion.tls12.rawValue else {
+                throw AnywhereError.tls(.handshakeFailed(detail: "Unsupported TLS version 0x\(String(version, radix: 16))"))
+            }
+            if let minVersion = configuration.minVersion, minVersion.rawValue > version {
+                throw AnywhereError.tls(.handshakeFailed(detail: "Server selected TLS 1.2 below the configured minimum"))
+            }
+            if (configuration.maxVersion?.rawValue ?? TLSVersion.tls13.rawValue) >= TLSVersion.tls13.rawValue,
+               serverRandom.suffix(8) == Self.tls12DowngradeSentinel {
+                throw AnywhereError.tls(.handshakeFailed(detail: "TLS 1.3 downgrade detected"))
+            }
             self.serverRandom = serverRandom
             self.tls12CipherSuite = cipherSuite
             self.negotiatedVersion = version
@@ -348,7 +451,7 @@ actor TLSClient {
 
         return false
     }
-    
+
     func extractServerHelloMessage(from buffer: Data) -> Data {
         var offset = 0
         while offset + 5 < buffer.count {
@@ -390,7 +493,7 @@ actor TLSClient {
                 offset += recordLen
                 continue
             }
-            
+
             let randomOffset = offset + 1 + 3 + 2
             guard randomOffset + 32 <= data.count else { return nil }
 
@@ -424,6 +527,7 @@ actor TLSClient {
 
             var foundVersion: UInt16 = 0
             var keyShareData: Data?
+            var keyShareGroup: UInt16 = 0
             var hasEMS = false
             var observedExtensionTypes = Set<UInt16>()
 
@@ -452,6 +556,12 @@ actor TLSClient {
                         let keyLen = Int(data[extOffset + 2]) << 8 | Int(data[extOffset + 3])
                         if group == TLSNamedGroup.x25519 && keyLen == 32, 4 + 32 <= extDataLen {
                             keyShareData = data.subdata(in: (extOffset + 4)..<(extOffset + 4 + 32))
+                            keyShareGroup = group
+                        } else if group == TLSNamedGroup.x25519MLKEM768,
+                                  keyLen == 1120, 4 + 1120 <= extDataLen,
+                                  offeredHybridKeyShare {
+                            keyShareData = data.subdata(in: (extOffset + 4)..<(extOffset + 4 + 1120))
+                            keyShareGroup = group
                         }
                     }
 
@@ -482,8 +592,7 @@ actor TLSClient {
 
                 extOffset += extDataLen
             }
-
-            // supported_versions is required to indicate TLS 1.3.
+            
             if foundVersion == 0x0304 {
                 guard legacyVersion == 0x0303 else { return nil }
                 if let sent = sentSessionID, sessionIDEcho != sent {
@@ -498,7 +607,7 @@ actor TLSClient {
                     return nil
                 }
                 if let keyShare = keyShareData {
-                    return .tls13(keyShare: keyShare, cipherSuite: cipherSuite)
+                    return .tls13(keyShare: keyShare, keyShareGroup: keyShareGroup, cipherSuite: cipherSuite)
                 }
                 return nil
             }
@@ -513,11 +622,11 @@ actor TLSClient {
 
     // MARK: - Certificate Validation
 
-    func validateCertificate() throws {
+    func validateCertificate() async throws {
         if configuration.insecureSkipVerify {
             return
         }
-        switch CertificatePolicy.verify(chain: serverCertificates, serverName: configuration.serverName) {
+        switch await CertificatePolicy.verify(chain: serverCertificates, serverName: configuration.serverName) {
         case .trusted:
             return
         case .rejected(let reason):
@@ -536,13 +645,37 @@ actor TLSClient {
         }
         return result == 0
     }
+    
+    private func generateMLKEMEncapsulationKey() -> Data? {
+        guard configuration.fingerprint.offersPostQuantumKeyShare else { return nil }
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+            if let mlkemPrivateKey = try? CryptoKit.MLKEM768.PrivateKey() {
+                mlkemPrivateKeyStorage = mlkemPrivateKey
+                return Data(mlkemPrivateKey.publicKey.rawRepresentation)
+            }
+        }
+        return nil
+    }
+    
+    var offeredHybridKeyShare: Bool { mlkemPrivateKeyStorage != nil }
+
+    func decapsulateMLKEM(ciphertext: Data) throws -> Data {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+            guard let mlkemPrivateKey = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
+                throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM private key not available"))
+            }
+            let sharedSecret = try mlkemPrivateKey.decapsulate(ciphertext)
+            return sharedSecret.withUnsafeBytes { Data($0) }
+        }
+        throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM not supported on this platform"))
+    }
 
     func clearHandshakeState() {
         ephemeralPrivateKey = nil
+        mlkemPrivateKeyStorage = nil
         storedClientHello = nil
         sentSessionID = nil
         echContext = nil
-        echAccepted = false
         tls13 = TLS13HandshakeState()
         postHandshakeBuffer = nil
         serverCertificates.removeAll()

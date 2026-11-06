@@ -8,10 +8,10 @@
 import SwiftUI
 
 struct ProxyEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    
     let configuration: ProxyConfiguration?
     let onSave: (ProxyConfiguration) -> Void
-
-    @Environment(\.dismiss) private var dismiss
     
     @State private var selectedProtocol: OutboundProtocol = .nowhere
     @State private var name = ""
@@ -19,17 +19,14 @@ struct ProxyEditorView: View {
     @State private var serverPort = ""
     
     @State private var nowhereKey = ""
-    @State private var nowhereUplink: NowhereNetwork = .udp
-    @State private var nowhereDownlink: NowhereNetwork = .udp
-    @State private var nowherePreconnectEnabled = true
-    @State private var nowherePoolSliderValue = Double(NowherePool.enabledDefault)
-    @State private var nowhereSNI = ""
-    @State private var nowhereALPN = ""
+    @State private var nowhereNetwork: NowhereNetwork = .tcp
+    @State private var nowhereMorph = true
+    @State private var nowhereMorphPrelude: NowhereMorphPrelude = .fade
 
     @State private var vlessUUID = ""
     @State private var vlessEncryption = "none"
     @State private var vlessFlow = ""
-    @State private var vlessTransport = "tcp"
+    @State private var vlessTransport = "raw"
     
     @State private var vlessWebSocketHost = ""
     @State private var vlessWebSocketPath = "/"
@@ -55,7 +52,7 @@ struct ProxyEditorView: View {
     @State private var vlessRealitySNI = ""
     @State private var vlessRealityPublicKey = ""
     @State private var vlessRealityShortId = ""
-    @State private var vlessFingerprint: TLSFingerprint = .chrome120
+    @State private var vlessFingerprint: TLSFingerprint = .default
     
     @State private var vlessXHTTPDownloadEnabled = false
     @State private var vlessXHTTPDownloadAddress = ""
@@ -69,7 +66,7 @@ struct ProxyEditorView: View {
     @State private var vlessXHTTPDownloadRealitySNI = ""
     @State private var vlessXHTTPDownloadRealityPublicKey = ""
     @State private var vlessXHTTPDownloadRealityShortId = ""
-    @State private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .chrome120
+    @State private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .default
     
     @State private var hysteriaPassword = ""
     @State private var hysteriaCC: HysteriaCongestionControl = .brutal
@@ -77,29 +74,9 @@ struct ProxyEditorView: View {
     @State private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
     @State private var hysteriaObfuscationType = "none"
     @State private var hysteriaObfuscationPassword = ""
-    @State private var hysteriaObfuscationMinText = String(HysteriaObfuscation.geckoMinPacketSizeDefault)
     @State private var hysteriaObfuscationMaxText = String(HysteriaObfuscation.geckoMaxPacketSizeDefault)
+    @State private var hysteriaObfuscationMinText = String(HysteriaObfuscation.geckoMinPacketSizeDefault)
     @State private var hysteriaSNI = ""
-    
-    @State private var trojanPassword = ""
-    @State private var trojanSNI = ""
-    @State private var trojanALPN = ""
-    @State private var trojanECHEnabled = false
-    @State private var trojanECHConfig = ""
-    @State private var trojanFingerprint: TLSFingerprint = .chrome120
-    
-    @State private var anytlsPassword = ""
-    @State private var anytlsSNI = ""
-    @State private var anytlsALPN = ""
-    @State private var anytlsECHEnabled = false
-    @State private var anytlsECHConfig = ""
-    @State private var anytlsFingerprint: TLSFingerprint = .chrome120
-    
-    @State private var ssPassword = ""
-    @State private var ssMethod = "aes-128-gcm"
-    
-    @State private var socks5Username = ""
-    @State private var socks5Password = ""
     
     @State private var sudokuKey = ""
     @State private var sudokuAEADMethod: SudokuAEADMethod = .chacha20Poly1305
@@ -108,43 +85,64 @@ struct ProxyEditorView: View {
     @State private var sudokuASCIIMode: SudokuASCIIMode = .preferEntropy
     @State private var sudokuCustomTablesText = ""
     @State private var sudokuEnablePureDownlink = true
-    @State private var sudokuHTTPMaskDisable = false
+    @State private var sudokuMultiplex: SudokuMultiplex = .off
+    @State private var sudokuHTTPMaskEnabled = true
     @State private var sudokuHTTPMaskMode: SudokuHTTPMaskMode = .legacy
     @State private var sudokuHTTPMaskTLS = false
     @State private var sudokuHTTPMaskHost = ""
     @State private var sudokuHTTPMaskPathRoot = ""
-    @State private var sudokuMultiplex: SudokuMultiplex = .off
     
-    @State private var naiveUsername = ""
-    @State private var naivePassword = ""
+    @State private var trojanPassword = ""
+    @State private var trojanSNI = ""
+    @State private var trojanALPN = ""
+    @State private var trojanECHEnabled = false
+    @State private var trojanECHConfig = ""
+    @State private var trojanFingerprint: TLSFingerprint = .default
+    
+    @State private var anytlsPassword = ""
+    @State private var anytlsSNI = ""
+    @State private var anytlsALPN = ""
+    @State private var anytlsECHEnabled = false
+    @State private var anytlsECHConfig = ""
+    @State private var anytlsFingerprint: TLSFingerprint = .default
+    
+    @State private var ssPassword = ""
+    @State private var ssMethod = "aes-128-gcm"
+    
+    @State private var socks5Username = ""
+    @State private var socks5Password = ""
+    
+    @State private var rfcUsername = ""
+    @State private var rfcPassword = ""
+    @State private var rfcSecurity = "tls"
+    @State private var rfcSNI = ""
+    @State private var rfcALPN = ""
+    @State private var rfcECHEnabled = false
+    @State private var rfcECHConfig = ""
+    @State private var rfcFingerprint: TLSFingerprint = .default
     
     private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isVLESSReality: Bool { vlessSecurity == "reality" }
     private var isVLESSTLS: Bool { vlessSecurity == "tls" }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
+    private var isSudoku: Bool { selectedProtocol == .sudoku }
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isAnyTLS: Bool { selectedProtocol == .anytls }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
-    private var isSudoku: Bool { selectedProtocol == .sudoku }
-    private var isNaive: Bool { selectedProtocol.isNaive }
-    
-    private var nowherePoolLevel: Int {
-        switch nowherePoolSliderValue {
-        case 1...3: 0
-        case 4...6: 1
-        default: 2
-        }
-    }
+    private var isRFC: Bool { selectedProtocol == .rfc }
+    private var isRFCTLS: Bool { rfcSecurity == "tls" }
+    private var isDirect: Bool { selectedProtocol == .direct }
     
     private var isValid: Bool {
-        guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
+        guard !name.isEmpty else { return false }
+        if isDirect { return true }
+        guard !serverAddress.isEmpty else { return false }
         if isNowhere {
-            return !nowhereKey.isEmpty
-            && nowhereKey.utf8.count <= 255
-            && nowhereALPN.utf8.count <= 255
+            return !nowhereKey.isEmpty && validNowherePort(serverPort) != nil
         }
+        guard UInt16(serverPort) != nil else { return false }
         if isVLESS {
             guard UUID(vlessString: vlessUUID) != nil,
                   !isVLESSReality || (!vlessRealitySNI.isEmpty && !vlessRealityPublicKey.isEmpty) else { return false }
@@ -163,6 +161,11 @@ struct ProxyEditorView: View {
             }
             return true
         }
+        if isSudoku {
+            guard !sudokuKey.isEmpty else { return false }
+            guard let min = Int(sudokuPaddingMinText), let max = Int(sudokuPaddingMaxText) else { return false }
+            return (0...100).contains(min) && min <= max && max <= 100
+        }
         if isTrojan {
             return !trojanPassword.isEmpty
         }
@@ -175,13 +178,8 @@ struct ProxyEditorView: View {
         if isSOCKS5 {
             return true
         }
-        if isSudoku {
-            guard !sudokuKey.isEmpty else { return false }
-            guard let min = Int(sudokuPaddingMinText), let max = Int(sudokuPaddingMaxText) else { return false }
-            return (0...100).contains(min) && min <= max && max <= 100
-        }
-        if isNaive {
-            return !naiveUsername.isEmpty && !naivePassword.isEmpty
+        if isRFC {
+            return !rfcUsername.contains(":")
         }
         return false
     }
@@ -201,7 +199,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Name", comment: nil, systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Name", systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 }
                 
@@ -210,20 +208,21 @@ struct ProxyEditorView: View {
                         Text(String("Nowhere")).tag(OutboundProtocol.nowhere)
                         Text(String("VLESS")).tag(OutboundProtocol.vless)
                         Text(String("Hysteria")).tag(OutboundProtocol.hysteria)
+                        Text(String("Sudoku")).tag(OutboundProtocol.sudoku)
                         Text(String("Trojan")).tag(OutboundProtocol.trojan)
                         Text(String("AnyTLS")).tag(OutboundProtocol.anytls)
                         Text(String("Shadowsocks")).tag(OutboundProtocol.shadowsocks)
                         Text(String("SOCKS5")).tag(OutboundProtocol.socks5)
-                        Text(String("Sudoku")).tag(OutboundProtocol.sudoku)
-                        Text(String("HTTPS")).tag(OutboundProtocol.http11)
-                        Text(String("HTTP/2")).tag(OutboundProtocol.http2)
-                        Text(String("HTTP/3")).tag(OutboundProtocol.http3)
+                        Text(String("RFC")).tag(OutboundProtocol.rfc)
+                        Text(String("Direct")).tag(OutboundProtocol.direct)
                     } label: {
-                        TextWithColorfulIcon(title: "Protocol", comment: nil, systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                        TextWithColorfulIcon(title: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
                 }
                 
-                serverSettings
+                if !isDirect {
+                    serverSettings
+                }
                 
                 networkSettings
                 
@@ -260,23 +259,23 @@ struct ProxyEditorView: View {
                     .textInputAutocapitalization(.never)
                     .multilineTextAlignment(.trailing)
             } label: {
-                TextWithColorfulIcon(title: "Address", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                TextWithColorfulIcon(title: "Address", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
             }
             LabeledContent {
                 TextField(String("443"), text: $serverPort)
                     .keyboardType(.numberPad)
                     .multilineTextAlignment(.trailing)
             } label: {
-                TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundStyle: .white, backgroundStyle: .cyan.gradient)
+                TextWithColorfulIcon(title: "Port", systemName: "123.rectangle", foregroundStyle: .white, backgroundStyle: .cyan.gradient)
             }
             if isNowhere {
                 LabeledContent {
-                    SecureField("Key", text: $nowhereKey)
+                    TextField("Key", text: $nowhereKey)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Key", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
             } else if isVLESS {
                 LabeledContent {
@@ -297,12 +296,12 @@ struct ProxyEditorView: View {
                 }
             } else if isHysteria {
                 LabeledContent {
-                    SecureField("Password", text: $hysteriaPassword)
+                    TextField("Password", text: $hysteriaPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Password", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 Picker(selection: $hysteriaObfuscationType) {
                     Text("None").tag("none")
@@ -313,22 +312,15 @@ struct ProxyEditorView: View {
                 }
                 if hysteriaObfuscationType != "none" {
                     LabeledContent {
-                        SecureField("Password", text: $hysteriaObfuscationPassword)
+                        TextField("Password", text: $hysteriaObfuscationPassword)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        TextWithColorfulIcon(title: "Password", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                     }
                 }
                 if hysteriaObfuscationType == "gecko" {
-                    LabeledContent {
-                        TextField(String(HysteriaObfuscation.geckoMinPacketSizeDefault), text: $hysteriaObfuscationMinText)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Minimum Packet Size", comment: "Minimum Packet Size for Hysteria protocol Gecko obfuscation", systemName: "minus.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
-                    }
                     LabeledContent {
                         TextField(String(HysteriaObfuscation.geckoMaxPacketSizeDefault), text: $hysteriaObfuscationMaxText)
                             .keyboardType(.numberPad)
@@ -336,33 +328,85 @@ struct ProxyEditorView: View {
                     } label: {
                         TextWithColorfulIcon(title: "Maximum Packet Size", comment: "Maximum Packet Size for Hysteria protocol Gecko obfuscation", systemName: "plus.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
+                    LabeledContent {
+                        TextField(String(HysteriaObfuscation.geckoMinPacketSizeDefault), text: $hysteriaObfuscationMinText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Minimum Packet Size", comment: "Minimum Packet Size for Hysteria protocol Gecko obfuscation", systemName: "minus.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    }
+                }
+            } else if isSudoku {
+                LabeledContent {
+                    TextField(String(localized: "Key", comment: "Key for Sudoku protocol"), text: $sudokuKey)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Key", comment: "Key for Sudoku protocol", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                }
+                Picker(selection: $sudokuAEADMethod) {
+                    ForEach(SudokuAEADMethod.allCases, id: \.self) { method in
+                        Text(method.displayName).tag(method)
+                    }
+                } label: {
+                    TextWithColorfulIcon(title: "AEAD", comment: "AEAD for Sudoku protocol", systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .red.gradient)
+                }
+                LabeledContent {
+                    TextField(String("15"), text: $sudokuPaddingMaxText)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Maximum Padding", comment: "Maximum Padding for Sudoku protocol", systemName: "plus.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                }
+                LabeledContent {
+                    TextField(String("5"), text: $sudokuPaddingMinText)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Minimum Padding", comment: "Minimum Padding for Sudoku protocol", systemName: "minus.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                }
+                Picker(selection: $sudokuASCIIMode) {
+                    ForEach(SudokuASCIIMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                } label: {
+                    TextWithColorfulIcon(title: "ASCII Mode", comment: "ASCII Mode for Sudoku protocol", systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                }
+                LabeledContent {
+                    TextField("Comma Separated", text: $sudokuCustomTablesText)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Custom Tables", comment: "Custom Tables for Sudoku protocol", systemName: "square.stack.3d.up.fill", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
                 }
             } else if isTrojan {
                 LabeledContent {
-                    SecureField("Password", text: $trojanPassword)
+                    TextField("Password", text: $trojanPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Password", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
             } else if isAnyTLS {
                 LabeledContent {
-                    SecureField("Password", text: $anytlsPassword)
+                    TextField("Password", text: $anytlsPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Password", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
             } else if isShadowsocks {
                 LabeledContent {
-                    SecureField("Password", text: $ssPassword)
+                    TextField("Password", text: $ssPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Password", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 Picker(selection: $ssMethod) {
                     Text("None").tag("none")
@@ -382,80 +426,32 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Username", comment: nil, systemName: "person.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Username", systemName: "person.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 LabeledContent {
-                    SecureField("Password", text: $socks5Password)
+                    TextField("Password", text: $socks5Password)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Password", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
-            } else if isSudoku {
+            } else if isRFC {
                 LabeledContent {
-                    SecureField(String(localized: "Key", comment: "Key for Sudoku protocol"), text: $sudokuKey)
+                    TextField("Username", text: $rfcUsername)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Key", comment: "Key for Sudoku protocol", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                }
-                Picker(selection: $sudokuAEADMethod) {
-                    ForEach(SudokuAEADMethod.allCases, id: \.self) { method in
-                        Text(method.displayName).tag(method)
-                    }
-                } label: {
-                    TextWithColorfulIcon(title: "AEAD", comment: "AEAD for Sudoku protocol", systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .red.gradient)
+                    TextWithColorfulIcon(title: "Username", systemName: "person.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 LabeledContent {
-                    TextField(String("0-100"), text: $sudokuPaddingMinText)
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Padding Min", comment: "Padding Min for Sudoku protocol", systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
-                }
-                LabeledContent {
-                    TextField(String("0-100"), text: $sudokuPaddingMaxText)
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Padding Max", comment: "Padding Max for Sudoku protocol", systemName: "arrow.up.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
-                }
-                Picker(selection: $sudokuASCIIMode) {
-                    ForEach(SudokuASCIIMode.allCases, id: \.self) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                } label: {
-                    TextWithColorfulIcon(title: "ASCII", comment: nil, systemName: "textformat.alt", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                }
-                LabeledContent {
-                    TextField("Comma Separated", text: $sudokuCustomTablesText)
+                    TextField("Password", text: $rfcPassword)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Custom Tables", comment: "Custom Tables for Sudoku protocol", systemName: "square.stack.3d.up.fill", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
-                }
-                Toggle(isOn: $sudokuEnablePureDownlink) {
-                    TextWithColorfulIcon(title: "Pure Downlink", comment: "Pure Downlink for Sudoku protocol", systemName: "arrow.down.to.line.compact", foregroundStyle: .white, backgroundStyle: .teal.gradient)
-                }
-            } else if isNaive {
-                LabeledContent {
-                    TextField("Username", text: $naiveUsername)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Username", comment: nil, systemName: "person.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                }
-                LabeledContent {
-                    SecureField("Password", text: $naivePassword)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Password", systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
             }
         }
@@ -464,34 +460,23 @@ struct ProxyEditorView: View {
     @ViewBuilder
     private var networkSettings: some View {
         if isNowhere {
-            Section("Network") {
-                Picker(selection: $nowhereUplink) {
+            Section {
+                Picker(selection: $nowhereNetwork) {
                     Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
                     Text(verbatim: "UDP").tag(NowhereNetwork.udp)
                 } label: {
-                    TextWithColorfulIcon(title: "Upload", comment: nil, systemName: "arrow.up.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Network", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
-                Picker(selection: $nowhereDownlink) {
-                    Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
-                    Text(verbatim: "UDP").tag(NowhereNetwork.udp)
-                } label: {
-                    TextWithColorfulIcon(title: "Download", comment: nil, systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                Toggle(isOn: $nowhereMorph) {
+                    TextWithColorfulIcon(title: "Morph", systemName: "waveform", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
                 }
-                if nowhereUplink == .tcp && nowhereDownlink == .tcp {
-                    Toggle(isOn: $nowherePreconnectEnabled) {
-                        TextWithColorfulIcon(title: "Preconnect", comment: nil, systemName: "bolt.horizontal.circle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                    }
-                    if nowherePreconnectEnabled {
-                        Slider(
-                            value: $nowherePoolSliderValue,
-                            in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound)
-                        ) {
-                            Text("Connections")
-                        } minimumValueLabel: {
-                            Image(systemName: "dial.low").foregroundStyle(.secondary)
-                        } maximumValueLabel: {
-                            Image(systemName: "dial.high").foregroundStyle(.secondary)
+                if nowhereMorph {
+                    Picker(selection: $nowhereMorphPrelude) {
+                        ForEach(NowhereMorphPrelude.allCases, id: \.self) { prelude in
+                            Text(prelude.displayName).tag(prelude)
                         }
+                    } label: {
+                        TextWithColorfulIcon(title: "Prelude", systemName: "text.line.first.and.arrowtriangle.forward", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
                     }
                 }
             }
@@ -507,7 +492,7 @@ struct ProxyEditorView: View {
             
             Section("Transport") {
                 Picker(selection: $vlessTransport) {
-                    Text("TCP").tag("tcp")
+                    Text("TCP").tag("raw")
                     Text("WebSocket").tag("ws")
                     Text("HTTPUpgrade").tag("httpupgrade")
                     Text("gRPC").tag("grpc")
@@ -523,7 +508,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Host", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("/", text: $vlessWebSocketPath)
@@ -531,7 +516,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Path", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                 }
                 if vlessTransport == "httpupgrade" {
@@ -542,7 +527,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Host", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("/", text: $vlessHTTPUpgradePath)
@@ -550,7 +535,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Path", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                 }
                 if vlessTransport == "grpc" {
@@ -575,7 +560,7 @@ struct ProxyEditorView: View {
                         Text("Gun").tag("gun")
                         Text("Multi").tag("multi")
                     } label: {
-                        TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Mode", systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                     LabeledContent {
                         TextField("User Agent", text: $vlessGRPCUserAgent)
@@ -583,7 +568,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "User Agent", comment: nil, systemName: "laptopcomputer", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                        TextWithColorfulIcon(title: "User Agent", systemName: "laptopcomputer", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
                 }
                 if vlessTransport == "xhttp" {
@@ -594,7 +579,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Host", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("/", text: $vlessXHTTPPath)
@@ -602,7 +587,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Path", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     Picker(selection: $vlessXHTTPMode) {
                         Text("Auto").tag("auto")
@@ -610,7 +595,7 @@ struct ProxyEditorView: View {
                         Text(String("Stream Up")).tag("stream-up")
                         Text(String("Stream One")).tag("stream-one")
                     } label: {
-                        TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Mode", systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 }
             }
@@ -640,6 +625,17 @@ struct ProxyEditorView: View {
                     }
                 }
             }
+        } else if isSudoku {
+            Toggle(isOn: $sudokuEnablePureDownlink) {
+                TextWithColorfulIcon(title: "Pure Downlink", comment: "Pure Downlink for Sudoku protocol", systemName: "arrow.down.to.line.compact", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+            }
+            Picker(selection: $sudokuMultiplex) {
+                ForEach(SudokuMultiplex.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            } label: {
+                TextWithColorfulIcon(title: "Multiplex", systemName: "rectangle.split.3x1.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
+            }
         }
     }
     
@@ -661,7 +657,7 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 LabeledContent {
                     TextField("h2,http/1.1", text: $vlessTLSALPN)
@@ -669,10 +665,10 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "ALPN", systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 Toggle(isOn: $vlessTLSECHEnabled) {
-                    TextWithColorfulIcon(title: "Enable ECH", comment: nil, systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Enable ECH", systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 if vlessTLSECHEnabled {
                     LabeledContent {
@@ -681,7 +677,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "ECH Config", comment: nil, systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        TextWithColorfulIcon(title: "ECH Config", systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                     }
                 }
                 Picker(selection: $vlessFingerprint) {
@@ -689,7 +685,7 @@ struct ProxyEditorView: View {
                         Text(fp.displayName).tag(fp)
                     }
                 } label: {
-                    TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    TextWithColorfulIcon(title: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                 }
             }
             if isVLESSReality {
@@ -700,7 +696,7 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 LabeledContent {
                     TextField("Public Key", text: $vlessRealityPublicKey)
@@ -723,7 +719,7 @@ struct ProxyEditorView: View {
                         Text(fp.displayName).tag(fp)
                     }
                 } label: {
-                    TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    TextWithColorfulIcon(title: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                 }
             }
         }
@@ -731,24 +727,16 @@ struct ProxyEditorView: View {
     
     @ViewBuilder
     private var securityLayerSettings: some View {
-        if isNowhere {
+        if isHysteria {
             Section("TLS") {
                 LabeledContent {
-                    TextField("SNI", text: $nowhereSNI)
+                    TextField("SNI", text: $hysteriaSNI)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                }
-                LabeledContent {
-                    TextField("ALPN", text: $nowhereALPN)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
             }
         } else if isTrojan {
@@ -760,7 +748,7 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 LabeledContent {
                     TextField("h2,http/1.1", text: $trojanALPN)
@@ -768,10 +756,10 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "ALPN", systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 Toggle(isOn: $trojanECHEnabled) {
-                    TextWithColorfulIcon(title: "Enable ECH", comment: nil, systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Enable ECH", systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 if trojanECHEnabled {
                     LabeledContent {
@@ -780,7 +768,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "ECH Config", comment: nil, systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        TextWithColorfulIcon(title: "ECH Config", systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                     }
                 }
                 Picker(selection: $trojanFingerprint) {
@@ -788,7 +776,7 @@ struct ProxyEditorView: View {
                         Text(fp.displayName).tag(fp)
                     }
                 } label: {
-                    TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    TextWithColorfulIcon(title: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                 }
             }
         } else if isAnyTLS {
@@ -800,7 +788,7 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 LabeledContent {
                     TextField("h2,http/1.1", text: $anytlsALPN)
@@ -808,10 +796,10 @@ struct ProxyEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "ALPN", systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 Toggle(isOn: $anytlsECHEnabled) {
-                    TextWithColorfulIcon(title: "Enable ECH", comment: nil, systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Enable ECH", systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                 }
                 if anytlsECHEnabled {
                     LabeledContent {
@@ -820,7 +808,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "ECH Config", comment: nil, systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        TextWithColorfulIcon(title: "ECH Config", systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                     }
                 }
                 Picker(selection: $anytlsFingerprint) {
@@ -828,19 +816,55 @@ struct ProxyEditorView: View {
                         Text(fp.displayName).tag(fp)
                     }
                 } label: {
-                    TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    TextWithColorfulIcon(title: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                 }
             }
-        } else if isHysteria {
+        } else if isRFC {
             Section("TLS") {
-                LabeledContent {
-                    TextField("SNI", text: $hysteriaSNI)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
+                Picker(selection: $rfcSecurity) {
+                    Text("None").tag("none")
+                    Text("TLS").tag("tls")
                 } label: {
-                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Security", comment: "Security for RFC protocol", systemName: "shield.lefthalf.filled", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                }
+                if isRFCTLS {
+                    LabeledContent {
+                        TextField("SNI", text: $rfcSNI)
+                            .keyboardType(.URL)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    }
+                    LabeledContent {
+                        TextField("h2,http/1.1", text: $rfcALPN)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "ALPN", systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    }
+                    Toggle(isOn: $rfcECHEnabled) {
+                        TextWithColorfulIcon(title: "Enable ECH", systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    }
+                    if rfcECHEnabled {
+                        LabeledContent {
+                            TextField("Base64", text: $rfcECHConfig)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "ECH Config", systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        }
+                    }
+                    Picker(selection: $rfcFingerprint) {
+                        ForEach(TLSFingerprint.allCases, id: \.self) { fp in
+                            Text(fp.displayName).tag(fp)
+                        }
+                    } label: {
+                        TextWithColorfulIcon(title: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    }
                 }
             }
         }
@@ -851,7 +875,7 @@ struct ProxyEditorView: View {
         if isVLESS && vlessTransport == "xhttp" {
             Section {
                 Toggle(isOn: $vlessXHTTPDownloadEnabled) {
-                    TextWithColorfulIcon(title: "Detached Download", comment: nil, systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
+                    TextWithColorfulIcon(title: "Detached Download", systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .indigo.gradient)
                 }
                 if vlessXHTTPDownloadEnabled {
                     LabeledContent {
@@ -861,14 +885,14 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Address", comment: nil, systemName: "server.rack", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Address", systemName: "server.rack", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("Port", text: $vlessXHTTPDownloadPort)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundStyle: .white, backgroundStyle: .cyan.gradient)
+                        TextWithColorfulIcon(title: "Port", systemName: "123.rectangle", foregroundStyle: .white, backgroundStyle: .cyan.gradient)
                     }
                     LabeledContent {
                         TextField("Host", text: $vlessXHTTPDownloadHost)
@@ -877,7 +901,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Host", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("/", text: $vlessXHTTPDownloadPath)
@@ -885,7 +909,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Path", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                 }
             }
@@ -898,7 +922,7 @@ struct ProxyEditorView: View {
                     Text("TLS").tag("tls")
                     Text("Reality").tag("reality")
                 } label: {
-                    TextWithColorfulIcon(title: "Security", comment: nil, systemName: "shield.lefthalf.filled", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Security", systemName: "shield.lefthalf.filled", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 if vlessXHTTPDownloadSecurity == "tls" {
                     LabeledContent {
@@ -908,7 +932,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("h2,http/1.1", text: $vlessXHTTPDownloadTLSALPN)
@@ -916,14 +940,14 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "ALPN", systemName: "list.bullet", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     Picker(selection: $vlessXHTTPDownloadFingerprint) {
                         ForEach(TLSFingerprint.allCases, id: \.self) { fp in
                             Text(fp.displayName).tag(fp)
                         }
                     } label: {
-                        TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                        TextWithColorfulIcon(title: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
                 }
                 if vlessXHTTPDownloadSecurity == "reality" {
@@ -934,7 +958,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "SNI", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("Public Key", text: $vlessXHTTPDownloadRealityPublicKey)
@@ -942,7 +966,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Public Key", comment: nil, systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        TextWithColorfulIcon(title: "Public Key", systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                     }
                     LabeledContent {
                         TextField("Short ID", text: $vlessXHTTPDownloadRealityShortId)
@@ -950,43 +974,34 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Short ID", comment: nil, systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        TextWithColorfulIcon(title: "Short ID", systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                     }
                     Picker(selection: $vlessXHTTPDownloadFingerprint) {
                         ForEach(TLSFingerprint.allCases, id: \.self) { fp in
                             Text(fp.displayName).tag(fp)
                         }
                     } label: {
-                        TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                        TextWithColorfulIcon(title: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
                 }
             }
         }
         
         if isSudoku {
-            Section(String(localized: "Multiplex", comment: "Multiplex for Sudoku protocol")) {
-                Picker(selection: $sudokuMultiplex) {
-                    ForEach(SudokuMultiplex.allCases, id: \.self) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                } label: {
-                    TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "rectangle.split.3x1.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
+            Section {
+                Toggle(isOn: $sudokuHTTPMaskEnabled) {
+                    TextWithColorfulIcon(title: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol", systemName: "theatermasks.fill", foregroundStyle: .white, backgroundStyle: .purple.gradient)
                 }
-            }
-            Section(String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol")) {
-                Toggle(isOn: $sudokuHTTPMaskDisable) {
-                    TextWithColorfulIcon(title: "Disable HTTP Mask", comment: "Disable HTTP Mask for Sudoku protocol", systemName: "xmark.circle.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
-                }
-                if !sudokuHTTPMaskDisable {
+                if sudokuHTTPMaskEnabled {
                     Picker(selection: $sudokuHTTPMaskMode) {
                         ForEach(SudokuHTTPMaskMode.allCases, id: \.self) { mode in
                             Text(mode.displayName).tag(mode)
                         }
                     } label: {
-                        TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .purple.gradient)
+                        TextWithColorfulIcon(title: "Mode", systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                     Toggle(isOn: $sudokuHTTPMaskTLS) {
-                        TextWithColorfulIcon(title: "TLS", comment: nil, systemName: "lock.badge.checkmark.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "TLS", systemName: "lock.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("Host", text: $sudokuHTTPMaskHost)
@@ -994,7 +1009,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Host", systemName: "network", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     LabeledContent {
                         TextField("Path Root", text: $sudokuHTTPMaskPathRoot)
@@ -1015,20 +1030,16 @@ struct ProxyEditorView: View {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
-        if case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound {
-            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
-            nowhereKey = key
-            nowhereUplink = uplink
-            nowhereDownlink = downlink
-            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
-            nowherePoolSliderValue = Double(pool > 0 ? pool : NowherePool.enabledDefault)
-            nowhereSNI = tls.serverName
-            nowhereALPN = tls.alpn?.first ?? ""
+        if case .nowhere(let nowhere) = configuration.outbound {
+            nowhereKey = nowhere.key
+            nowhereNetwork = nowhere.network
+            nowhereMorph = nowhere.morph
+            nowhereMorphPrelude = nowhere.morphPrelude
         }
-        if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _) = configuration.outbound {
-            self.vlessUUID = vlessUUID.uuidString
-            self.vlessEncryption = vlessEncryption
-            self.vlessFlow = vlessFlow ?? ""
+        if let vless = configuration.vless {
+            vlessUUID = vless.uuid.uuidString
+            vlessEncryption = vless.encryption
+            vlessFlow = vless.flow ?? ""
         } else {
             vlessUUID = configuration.id.uuidString
             vlessEncryption = "none"
@@ -1102,63 +1113,72 @@ struct ProxyEditorView: View {
             break
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni):
-            hysteriaPassword = password
-            hysteriaCC = congestionControl
-            hysteriaUploadMbpsText = String(uploadMbps)
-            hysteriaDownloadMbpsText = String(downloadMbps)
-            if let obfuscation {
+        case .hysteria(let configuration):
+            hysteriaPassword = configuration.password
+            hysteriaCC = configuration.congestionControl
+            hysteriaUploadMbpsText = String(configuration.uploadMbps)
+            hysteriaDownloadMbpsText = String(configuration.downloadMbps)
+            if let obfuscation = configuration.obfuscation {
                 hysteriaObfuscationType = obfuscation.typeTag
                 hysteriaObfuscationPassword = obfuscation.password
                 if case .gecko(_, let minPacketSize, let maxPacketSize) = obfuscation {
-                    hysteriaObfuscationMinText = String(minPacketSize)
                     hysteriaObfuscationMaxText = String(maxPacketSize)
+                    hysteriaObfuscationMinText = String(minPacketSize)
                 }
             }
-            hysteriaSNI = sni
-        case .trojan(let password, let securityLayer):
-            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
-            trojanPassword = password
+            hysteriaSNI = configuration.serverName
+        case .sudoku(let configuration):
+            sudokuKey = configuration.key
+            sudokuAEADMethod = configuration.aeadMethod
+            sudokuPaddingMinText = String(configuration.paddingMin)
+            sudokuPaddingMaxText = String(configuration.paddingMax)
+            sudokuASCIIMode = configuration.asciiMode
+            sudokuCustomTablesText = configuration.customTables.joined(separator: ",")
+            sudokuEnablePureDownlink = configuration.enablePureDownlink
+            sudokuMultiplex = configuration.multiplex
+            sudokuHTTPMaskEnabled = !configuration.httpMask.disable
+            sudokuHTTPMaskMode = configuration.httpMask.mode
+            sudokuHTTPMaskTLS = configuration.httpMask.tls
+            sudokuHTTPMaskHost = configuration.httpMask.host
+            sudokuHTTPMaskPathRoot = configuration.httpMask.pathRoot
+        case .trojan(let configuration):
+            let tls = configuration.tlsConfiguration ?? TLSConfiguration(serverName: "")
+            trojanPassword = configuration.password
             trojanSNI = tls.serverName
             trojanALPN = tls.alpn?.joined(separator: ",") ?? ""
             trojanECHEnabled = tls.echEnabled
             trojanECHConfig = tls.echConfig ?? ""
             trojanFingerprint = tls.fingerprint
-        case .anytls(let password, _, _, _, let securityLayer):
-            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
-            anytlsPassword = password
+        case .anytls(let configuration):
+            let tls = configuration.tlsConfiguration ?? TLSConfiguration(serverName: "")
+            anytlsPassword = configuration.password
             anytlsSNI = tls.serverName
             anytlsALPN = tls.alpn?.joined(separator: ",") ?? ""
             anytlsECHEnabled = tls.echEnabled
             anytlsECHConfig = tls.echConfig ?? ""
             anytlsFingerprint = tls.fingerprint
-        case .shadowsocks(let password, let method):
-            ssPassword = password
-            ssMethod = method
-        case .socks5(let user, let pass):
-            socks5Username = user ?? ""
-            socks5Password = pass ?? ""
-        case .sudoku(let sudoku):
-            sudokuKey = sudoku.key
-            sudokuAEADMethod = sudoku.aeadMethod
-            sudokuPaddingMinText = String(sudoku.paddingMin)
-            sudokuPaddingMaxText = String(sudoku.paddingMax)
-            sudokuASCIIMode = sudoku.asciiMode
-            sudokuCustomTablesText = sudoku.customTables.joined(separator: ",")
-            sudokuEnablePureDownlink = sudoku.enablePureDownlink
-            sudokuHTTPMaskDisable = sudoku.httpMask.disable
-            sudokuHTTPMaskMode = sudoku.httpMask.mode
-            sudokuHTTPMaskTLS = sudoku.httpMask.tls
-            sudokuHTTPMaskHost = sudoku.httpMask.host
-            sudokuHTTPMaskPathRoot = sudoku.httpMask.pathRoot
-            sudokuMultiplex = sudoku.multiplex
-        case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
-            naiveUsername = user
-            naivePassword = pass
+        case .shadowsocks(let configuration):
+            ssPassword = configuration.password
+            ssMethod = configuration.method
+        case .socks5(let configuration):
+            socks5Username = configuration.username ?? ""
+            socks5Password = configuration.password ?? ""
+        case .rfc(let configuration):
+            rfcUsername = configuration.username ?? ""
+            rfcPassword = configuration.password ?? ""
+            rfcSecurity = configuration.securityLayer.tag
+            if let tls = configuration.tlsConfiguration {
+                rfcSNI = tls.serverName
+                rfcALPN = tls.alpn?.joined(separator: ",") ?? ""
+                rfcECHEnabled = tls.echEnabled
+                rfcECHConfig = tls.echConfig ?? ""
+                rfcFingerprint = tls.fingerprint
+            }
+        case .direct:
+            break
         }
     }
     
-    /// Keys must match what `XHTTPConfiguration.parse` reads back. Returns nil when the split is off or address/port are missing.
     private func xhttpDownloadSettingsDict() -> [String: Any]? {
         guard vlessXHTTPDownloadEnabled,
               !vlessXHTTPDownloadAddress.isEmpty,
@@ -1195,8 +1215,6 @@ struct ProxyEditorView: View {
         return download
     }
     
-    /// Rebuilds the obfuscation enum from the decomposed fields; `make` returns nil for the "none"
-    /// type and normalizes the gecko packet-size bounds.
     private var hysteriaObfuscationValue: HysteriaObfuscation? {
         HysteriaObfuscation.make(
             type: hysteriaObfuscationType == "none" ? nil : hysteriaObfuscationType,
@@ -1207,90 +1225,21 @@ struct ProxyEditorView: View {
     }
     
     private func save() {
-        guard let port = UInt16(serverPort) else { return }
+        let port: UInt16
+        if isDirect {
+            port = 0
+        } else {
+            guard let parsedPort = UInt16(serverPort), !isNowhere || parsedPort != 0 else { return }
+            port = parsedPort
+        }
         let parsedUUID: UUID
-        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isRFC || isDirect {
             parsedUUID = self.configuration?.id ?? UUID()
         } else {
             guard let uuid = UUID(vlessString: vlessUUID) else { return }
             parsedUUID = uuid
         }
         
-        var vlessTLSConfiguration: TLSConfiguration?
-        if isVLESSTLS {
-            let sni = vlessTLSSNI.isEmpty ? serverAddress : vlessTLSSNI
-            let alpn: [String]? = vlessTLSALPN.isEmpty ? nil : vlessTLSALPN.split(separator: ",").map { String($0) }
-            let ech = vlessTLSECHConfig.trimmingCharacters(in: .whitespacesAndNewlines)
-            vlessTLSConfiguration = TLSConfiguration(
-                serverName: sni,
-                alpn: alpn,
-                echEnabled: vlessTLSECHEnabled,
-                echConfig: vlessTLSECHEnabled && !ech.isEmpty ? ech : nil,
-                fingerprint: vlessFingerprint
-            )
-        }
-        
-        var vlessRealityConfiguration: RealityConfiguration?
-        if isVLESSReality {
-            guard let publicKey = Data(base64URLEncoded: vlessRealityPublicKey) else { return }
-            let shortId = Data(hexString: vlessRealityShortId) ?? Data()
-            vlessRealityConfiguration = RealityConfiguration(
-                serverName: vlessRealitySNI,
-                publicKey: publicKey,
-                shortId: shortId,
-                fingerprint: vlessFingerprint
-            )
-        }
-        
-        var vlessWebSocketConfiguration: WebSocketConfiguration?
-        if vlessTransport == "ws" {
-            let host = vlessWebSocketHost.isEmpty ? serverAddress : vlessWebSocketHost
-            let path = vlessWebSocketPath.isEmpty ? "/" : vlessWebSocketPath
-            vlessWebSocketConfiguration = WebSocketConfiguration(host: host, path: path)
-        }
-        
-        var vlessHTTPUpgradeConfiguration: HTTPUpgradeConfiguration?
-        if vlessTransport == "httpupgrade" {
-            vlessHTTPUpgradeConfiguration = HTTPUpgradeConfiguration(host: vlessHTTPUpgradeHost.isEmpty ? serverAddress : vlessHTTPUpgradeHost, path: vlessHTTPUpgradePath.isEmpty ? "/" : vlessHTTPUpgradePath)
-        }
-        
-        var vlessXHTTPConfiguration: XHTTPConfiguration?
-        if vlessTransport == "xhttp" {
-            let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
-            let mode = XHTTPMode(rawValue: vlessXHTTPMode) ?? .auto
-            var parameters: [String: String] = [
-                "host": host,
-                "path": vlessXHTTPPath,
-                "mode": mode.rawValue
-            ]
-            // Merge advanced fields and the detached download source so neither clobbers the other.
-            var extra: [String: Any] = [:]
-            if !vlessXHTTPExtra.isEmpty, let data = vlessXHTTPExtra.data(using: .utf8),
-               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                extra = parsed
-            }
-            if let download = xhttpDownloadSettingsDict() {
-                extra["downloadSettings"] = download
-            }
-            if !extra.isEmpty,
-               let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
-               let json = String(data: data, encoding: .utf8) {
-                parameters["extra"] = json
-            }
-            vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: parameters, serverAddress: serverAddress)
-        }
-        
-        var vlessGRPCConfiguration: GRPCConfiguration?
-        if vlessTransport == "grpc" {
-            vlessGRPCConfiguration = GRPCConfiguration(
-                serviceName: vlessGRPCServiceName,
-                authority: vlessGRPCAuthority,
-                multiMode: vlessGRPCMode == "multi",
-                userAgent: vlessGRPCUserAgent
-            )
-        }
-        
-        // Strip brackets from IPv6 addresses (e.g. "[::1]" → "::1")
         let bareAddress = serverAddress.hasPrefix("[") && serverAddress.hasSuffix("]")
         ? String(serverAddress.dropFirst().dropLast())
         : serverAddress
@@ -1298,22 +1247,86 @@ struct ProxyEditorView: View {
         let outbound: Outbound
         switch selectedProtocol {
         case .nowhere:
-            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
-                ? min(
-                    NowherePool.sliderRange.upperBound,
-                    max(NowherePool.sliderRange.lowerBound, Int(nowherePoolSliderValue.rounded()))
-                )
-                : 0
-            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
-            let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
-            outbound = .nowhere(
+            outbound = .nowhere(NowhereConfiguration(
                 key: nowhereKey,
-                uplink: nowhereUplink,
-                downlink: nowhereDownlink,
-                pool: pool,
-                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
-            )
+                network: nowhereNetwork,
+                morph: nowhereMorph,
+                morphPrelude: nowhereMorphPrelude
+            ))
         case .vless:
+            var vlessTLSConfiguration: TLSConfiguration?
+            if isVLESSTLS {
+                let sni = vlessTLSSNI.isEmpty ? serverAddress : vlessTLSSNI
+                let alpn: [String]? = vlessTLSALPN.isEmpty ? nil : vlessTLSALPN.split(separator: ",").map { String($0) }
+                let ech = vlessTLSECHConfig.trimmingCharacters(in: .whitespacesAndNewlines)
+                vlessTLSConfiguration = TLSConfiguration(
+                    serverName: sni,
+                    alpn: alpn,
+                    echEnabled: vlessTLSECHEnabled,
+                    echConfig: vlessTLSECHEnabled && !ech.isEmpty ? ech : nil,
+                    fingerprint: vlessFingerprint
+                )
+            }
+            
+            var vlessRealityConfiguration: RealityConfiguration?
+            if isVLESSReality {
+                guard let publicKey = Data(base64URLEncoded: vlessRealityPublicKey) else { return }
+                let shortId = Data(hexString: vlessRealityShortId) ?? Data()
+                vlessRealityConfiguration = RealityConfiguration(
+                    serverName: vlessRealitySNI,
+                    publicKey: publicKey,
+                    shortId: shortId,
+                    fingerprint: vlessFingerprint
+                )
+            }
+            
+            var vlessWebSocketConfiguration: WebSocketConfiguration?
+            if vlessTransport == "ws" {
+                let host = vlessWebSocketHost.isEmpty ? serverAddress : vlessWebSocketHost
+                let path = vlessWebSocketPath.isEmpty ? "/" : vlessWebSocketPath
+                vlessWebSocketConfiguration = WebSocketConfiguration(host: host, path: path)
+            }
+            
+            var vlessHTTPUpgradeConfiguration: HTTPUpgradeConfiguration?
+            if vlessTransport == "httpupgrade" {
+                vlessHTTPUpgradeConfiguration = HTTPUpgradeConfiguration(host: vlessHTTPUpgradeHost.isEmpty ? serverAddress : vlessHTTPUpgradeHost, path: vlessHTTPUpgradePath.isEmpty ? "/" : vlessHTTPUpgradePath)
+            }
+            
+            var vlessXHTTPConfiguration: XHTTPConfiguration?
+            if vlessTransport == "xhttp" {
+                let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
+                let mode = XHTTPMode(rawValue: vlessXHTTPMode) ?? .auto
+                var parameters: [String: String] = [
+                    "host": host,
+                    "path": vlessXHTTPPath,
+                    "mode": mode.rawValue
+                ]
+                var extra: [String: Any] = [:]
+                if !vlessXHTTPExtra.isEmpty, let data = vlessXHTTPExtra.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    extra = parsed
+                }
+                if let download = xhttpDownloadSettingsDict() {
+                    extra["downloadSettings"] = download
+                }
+                if !extra.isEmpty,
+                   let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
+                   let json = String(data: data, encoding: .utf8) {
+                    parameters["extra"] = json
+                }
+                vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: parameters, serverAddress: serverAddress)
+            }
+            
+            var vlessGRPCConfiguration: GRPCConfiguration?
+            if vlessTransport == "grpc" {
+                vlessGRPCConfiguration = GRPCConfiguration(
+                    serviceName: vlessGRPCServiceName,
+                    authority: vlessGRPCAuthority,
+                    multiMode: vlessGRPCMode == "multi",
+                    userAgent: vlessGRPCUserAgent
+                )
+            }
+            
             let vlessXrayTransportLayer: XrayTransportLayer
             if let vlessWebSocketConfiguration { vlessXrayTransportLayer = .ws(vlessWebSocketConfiguration) }
             else if let vlessHTTPUpgradeConfiguration { vlessXrayTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
@@ -1327,92 +1340,109 @@ struct ProxyEditorView: View {
             else { vlessXraySecurityLayer = .none }
             
             outbound = .vless(
-                uuid: parsedUUID,
-                encryption: vlessEncryption,
-                flow: vlessFlow.isEmpty ? nil : vlessFlow,
-                transport: vlessXrayTransportLayer,
-                security: vlessXraySecurityLayer
+                VLESSConfiguration(
+                    uuid: parsedUUID,
+                    encryption: vlessEncryption,
+                    flow: vlessFlow.isEmpty ? nil : vlessFlow,
+                    transport: vlessXrayTransportLayer,
+                    security: vlessXraySecurityLayer
+                )
             )
         case .hysteria:
-            let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
-            let down = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
-            let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
             outbound = .hysteria(
-                password: hysteriaPassword,
-                congestionControl: hysteriaCC,
-                uploadMbps: up,
-                downloadMbps: down,
-                obfuscation: hysteriaObfuscationValue,
-                sni: sni
+                HysteriaConfiguration(
+                    password: hysteriaPassword,
+                    congestionControl: hysteriaCC,
+                    uploadMbps: Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault,
+                    downloadMbps: Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault,
+                    obfuscation: hysteriaObfuscationValue,
+                    serverName: hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
+                )
+            )
+        case .sudoku:
+            outbound = .sudoku(
+                SudokuConfiguration(
+                    key: sudokuKey,
+                    aeadMethod: sudokuAEADMethod,
+                    paddingMin: Int(sudokuPaddingMinText) ?? 5,
+                    paddingMax: Int(sudokuPaddingMaxText) ?? 15,
+                    asciiMode: sudokuASCIIMode,
+                    customTables: sudokuCustomTablesText
+                        .split(separator: ",")
+                        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty },
+                    enablePureDownlink: sudokuEnablePureDownlink,
+                    multiplex: sudokuMultiplex,
+                    httpMask: SudokuHTTPMaskConfiguration(
+                        disable: !sudokuHTTPMaskEnabled,
+                        mode: sudokuHTTPMaskMode,
+                        tls: sudokuHTTPMaskTLS,
+                        host: sudokuHTTPMaskHost,
+                        pathRoot: sudokuHTTPMaskPathRoot
+                    )
+                )
             )
         case .trojan:
             let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI
             let alpn: [String]? = trojanALPN.isEmpty ? nil : trojanALPN.split(separator: ",").map { String($0) }
             let ech = trojanECHConfig.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .trojan(
-                password: trojanPassword,
-                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: trojanECHEnabled, echConfig: trojanECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: trojanFingerprint))
+                TrojanConfiguration(
+                    password: trojanPassword,
+                    tls: TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: trojanECHEnabled, echConfig: trojanECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: trojanFingerprint)
+                )
             )
         case .anytls:
             let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
             let alpn: [String]? = anytlsALPN.isEmpty ? nil : anytlsALPN.split(separator: ",").map { String($0) }
-            // Pool-tuning knobs aren't UI-editable: preserve imported values, else sing-anytls defaults.
-            let idleCheckInterval: Int
-            let idleTimeout: Int
-            let minIdleSession: Int
-            if let existing = self.configuration?.outbound, case .anytls(_, let c, let t, let m, _) = existing {
-                idleCheckInterval = c; idleTimeout = t; minIdleSession = m
-            } else {
-                idleCheckInterval = 30; idleTimeout = 30; minIdleSession = 0
-            }
             let ech = anytlsECHConfig.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .anytls(
-                password: anytlsPassword,
-                idleCheckInterval: idleCheckInterval,
-                idleTimeout: idleTimeout,
-                minIdleSession: minIdleSession,
-                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: anytlsECHEnabled, echConfig: anytlsECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: anytlsFingerprint))
+                AnyTLSConfiguration(
+                    password: anytlsPassword,
+                    securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: anytlsECHEnabled, echConfig: anytlsECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: anytlsFingerprint)),
+                    inheritingTuningFrom: self.configuration?.anytls
+                )
             )
         case .shadowsocks:
-            outbound = .shadowsocks(password: ssPassword, method: ssMethod)
+            outbound = .shadowsocks(ShadowsocksConfiguration(password: ssPassword, method: ssMethod))
         case .socks5:
             outbound = .socks5(
-                username: socks5Username.isEmpty ? nil : socks5Username,
-                password: socks5Password.isEmpty ? nil : socks5Password
-            )
-        case .sudoku:
-            outbound = .sudoku(SudokuConfiguration(
-                key: sudokuKey,
-                aeadMethod: sudokuAEADMethod,
-                paddingMin: Int(sudokuPaddingMinText) ?? 5,
-                paddingMax: Int(sudokuPaddingMaxText) ?? 15,
-                asciiMode: sudokuASCIIMode,
-                customTables: sudokuCustomTablesText
-                    .split(separator: ",")
-                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty },
-                enablePureDownlink: sudokuEnablePureDownlink,
-                multiplex: sudokuMultiplex,
-                httpMask: SudokuHTTPMaskConfiguration(
-                    disable: sudokuHTTPMaskDisable,
-                    mode: sudokuHTTPMaskMode,
-                    tls: sudokuHTTPMaskTLS,
-                    host: sudokuHTTPMaskHost,
-                    pathRoot: sudokuHTTPMaskPathRoot
+                SOCKS5Configuration(
+                    username: socks5Username.isEmpty ? nil : socks5Username,
+                    password: socks5Password.isEmpty ? nil : socks5Password
                 )
-            ))
-        case .http11:
-            outbound = .http11(username: naiveUsername, password: naivePassword)
-        case .http2:
-            outbound = .http2(username: naiveUsername, password: naivePassword)
-        case .http3:
-            outbound = .http3(username: naiveUsername, password: naivePassword)
+            )
+        case .direct:
+            outbound = .direct(DirectConfiguration())
+        case .rfc:
+            let securityLayer: GenericSecurityLayer
+            if isRFCTLS {
+                let sni = rfcSNI.isEmpty ? bareAddress : rfcSNI
+                let alpn: [String]? = rfcALPN.isEmpty ? nil : rfcALPN.split(separator: ",").map { String($0) }
+                let ech = rfcECHConfig.trimmingCharacters(in: .whitespacesAndNewlines)
+                securityLayer = .tls(TLSConfiguration(
+                    serverName: sni,
+                    alpn: alpn,
+                    echEnabled: rfcECHEnabled,
+                    echConfig: rfcECHEnabled && !ech.isEmpty ? ech : nil,
+                    fingerprint: rfcFingerprint
+                ))
+            } else {
+                securityLayer = .none
+            }
+            outbound = .rfc(
+                RFCConfiguration(
+                    username: rfcUsername.isEmpty ? nil : rfcUsername,
+                    password: rfcPassword.isEmpty ? nil : rfcPassword,
+                    securityLayer: securityLayer
+                )
+            )
         }
         
         let configuration = ProxyConfiguration(
             id: self.configuration?.id ?? UUID(),
             name: name,
-            serverAddress: bareAddress,
+            serverAddress: isDirect ? "" : bareAddress,
             serverPort: port,
             subscriptionId: self.configuration?.subscriptionId,
             outbound: outbound
@@ -1421,4 +1451,10 @@ struct ProxyEditorView: View {
         onSave(configuration)
         dismiss()
     }
+
+    private func validNowherePort(_ value: String) -> UInt16? {
+        guard let port = UInt16(value), port != 0 else { return nil }
+        return port
+    }
+
 }

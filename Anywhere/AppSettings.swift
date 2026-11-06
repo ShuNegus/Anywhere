@@ -11,7 +11,7 @@ import Observation
 @MainActor
 @Observable
 final class AppSettings {
-    static let shared = AppSettings()
+    @ObservationIgnored var onTunnelBehaviorChange: (() -> Void)?
 
     // MARK: - Persist only
 
@@ -20,7 +20,10 @@ final class AppSettings {
     }
 
     var iCloudSyncEnabled: Bool {
-        didSet { AWCore.setICloudSyncEnabled(iCloudSyncEnabled) }
+        didSet {
+            AWCore.setICloudSyncEnabled(iCloudSyncEnabled)
+            Task { await CloudSync.shared.syncEnabledDidChange() }
+        }
     }
 
     var proModeEnabled: Bool {
@@ -31,24 +34,28 @@ final class AppSettings {
         didSet { AWCore.setShowVoyagerCard(showVoyagerCard) }
     }
 
-    var homeColorScheme: HomeColorScheme {
-        didSet { AWCore.setHomeColorScheme(homeColorScheme.rawValue) }
+    var homeBackgroundLightStartData: Data? {
+        didSet { AWCore.setThemeColorData(.homeBackgroundLightStart, homeBackgroundLightStartData) }
     }
 
-    var connectedBackgroundStartData: Data? {
-        didSet { AWCore.setThemeColorData(.connectedBackgroundStart, connectedBackgroundStartData) }
+    var homeBackgroundLightEndData: Data? {
+        didSet { AWCore.setThemeColorData(.homeBackgroundLightEnd, homeBackgroundLightEndData) }
     }
 
-    var connectedBackgroundEndData: Data? {
-        didSet { AWCore.setThemeColorData(.connectedBackgroundEnd, connectedBackgroundEndData) }
+    var homeBackgroundDarkStartData: Data? {
+        didSet { AWCore.setThemeColorData(.homeBackgroundDarkStart, homeBackgroundDarkStartData) }
     }
 
-    var disconnectedBackgroundStartData: Data? {
-        didSet { AWCore.setThemeColorData(.disconnectedBackgroundStart, disconnectedBackgroundStartData) }
+    var homeBackgroundDarkEndData: Data? {
+        didSet { AWCore.setThemeColorData(.homeBackgroundDarkEnd, homeBackgroundDarkEndData) }
     }
 
-    var disconnectedBackgroundEndData: Data? {
-        didSet { AWCore.setThemeColorData(.disconnectedBackgroundEnd, disconnectedBackgroundEndData) }
+    var statCardBackgroundLightData: Data? {
+        didSet { AWCore.setThemeColorData(.statCardBackgroundLight, statCardBackgroundLightData) }
+    }
+
+    var statCardBackgroundDarkData: Data? {
+        didSet { AWCore.setThemeColorData(.statCardBackgroundDark, statCardBackgroundDarkData) }
     }
     
     var subscriptionDNSMode: DNSMode {
@@ -58,9 +65,9 @@ final class AppSettings {
         }
     }
 
-    var subscriptionDNSPlainServer: String {
+    var subscriptionDNSUDPServer: String {
         didSet {
-            AWCore.setSubscriptionDNSPlainServer(subscriptionDNSPlainServer)
+            AWCore.setSubscriptionDNSUDPServer(subscriptionDNSUDPServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -77,70 +84,6 @@ final class AppSettings {
     }
 
     // MARK: - Persist + notify the tunnel
-
-    var advertiseIPv6ToApps: Bool {
-        didSet {
-            AWCore.setAdvertiseIPv6ToApps(advertiseIPv6ToApps)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var alwaysTrustCellular: Bool {
-        didSet {
-            AWCore.setAlwaysTrustCellular(alwaysTrustCellular)
-            if alwaysTrustCellular, alwaysUntrustCellular {
-                alwaysUntrustCellular = false
-            }
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var alwaysUntrustCellular: Bool {
-        didSet {
-            AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
-            if alwaysUntrustCellular, alwaysTrustCellular {
-                alwaysTrustCellular = false
-            }
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var blockUDP: Bool {
-        didSet {
-            AWCore.setBlockUDP(blockUDP)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var blockWebRTC: Bool {
-        didSet {
-            AWCore.setBlockWebRTC(blockWebRTC)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var hideVPNIcon: Bool {
-        didSet {
-            AWCore.setHideVPNIcon(hideVPNIcon)
-            if hideVPNIcon, advertiseIPv6ToApps {
-                advertiseIPv6ToApps = false
-            } else {
-                AWNotificationCenter.notifyTunnelSettingsChanged()
-            }
-        }
-    }
-    
-    var isGlobalMode: Bool {
-        get { proxyMode == .global }
-        set { proxyMode = newValue ? .global : .rule }
-    }
-    
-    var preventDNSLeak: Bool {
-        didSet {
-            AWCore.setPreventDNSLeak(preventDNSLeak)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
     
     var proxyMode: ProxyMode {
         didSet {
@@ -148,33 +91,10 @@ final class AppSettings {
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
-
-    var quicPolicy: QUICPolicy {
-        didSet {
-            AWCore.setQUICPolicy(quicPolicy)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
     
-    var reflectionAddresses: [String] {
-        didSet {
-            AWCore.setReflectionAddresses(reflectionAddresses)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var reflectionEnabled: Bool {
-        didSet {
-            AWCore.setReflectionEnabled(reflectionEnabled)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var trustedSSIDs: [String] {
-        didSet {
-            AWCore.setTrustedSSIDs(trustedSSIDs)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
+    var isGlobalMode: Bool {
+        get { proxyMode == .global }
+        set { proxyMode = newValue ? .global : .rule }
     }
 
     var tunnelExcludedRoutes: [String] {
@@ -190,24 +110,87 @@ final class AppSettings {
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
+
+    var syntheticAddressExcludedDomainSuffixes: [String] {
+        didSet {
+            AWCore.setSyntheticAddressExcludedDomainSuffixes(syntheticAddressExcludedDomainSuffixes)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
     
-    var ipRuleDNSMode: DNSMode {
+    var blockUDP: Bool {
         didSet {
-            AWCore.setIPRuleDNSMode(ipRuleDNSMode)
+            AWCore.setBlockUDP(blockUDP)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var quicPolicy: QUICPolicy {
+        didSet {
+            AWCore.setQUICPolicy(quicPolicy)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
-    var ipRuleDNSPlainServer: String {
+    var blockWebRTC: Bool {
         didSet {
-            AWCore.setIPRuleDNSPlainServer(ipRuleDNSPlainServer)
+            AWCore.setBlockWebRTC(blockWebRTC)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var preventDNSLeak: Bool {
+        didSet {
+            AWCore.setPreventDNSLeak(preventDNSLeak)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var alwaysTrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysTrustCellular(alwaysTrustCellular)
+            if alwaysTrustCellular, alwaysUntrustCellular {
+                alwaysUntrustCellular = false
+            }
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var alwaysUntrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
+            if alwaysUntrustCellular, alwaysTrustCellular {
+                alwaysTrustCellular = false
+            }
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var trustedSSIDs: [String] {
+        didSet {
+            AWCore.setTrustedSSIDs(trustedSSIDs)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var hideVPNIcon: Bool {
+        didSet {
+            AWCore.setHideVPNIcon(hideVPNIcon)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
-    var ipRuleDNSDoHURL: String {
+    var reflectionEnabled: Bool {
         didSet {
-            AWCore.setIPRuleDNSDoHURL(ipRuleDNSDoHURL)
+            AWCore.setReflectionEnabled(reflectionEnabled)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var hostMappings: [HostMapping] {
+        didSet {
+            HostMapping.store(hostMappings)
+            DNSHosts.shared.invalidate()
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -219,9 +202,9 @@ final class AppSettings {
         }
     }
 
-    var proxyDNSPlainServer: String {
+    var proxyDNSUDPServer: String {
         didSet {
-            AWCore.setProxyDNSPlainServer(proxyDNSPlainServer)
+            AWCore.setProxyDNSUDPServer(proxyDNSUDPServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -240,9 +223,9 @@ final class AppSettings {
         }
     }
 
-    var echDNSPlainServer: String {
+    var echDNSUDPServer: String {
         didSet {
-            AWCore.setECHDNSPlainServer(echDNSPlainServer)
+            AWCore.setECHDNSUDPServer(echDNSUDPServer)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -306,75 +289,80 @@ final class AppSettings {
     var alwaysOnEnabled: Bool {
         didSet {
             AWCore.setAlwaysOnEnabled(alwaysOnEnabled)
-            VPNViewModel.shared.reconnectVPN()
+            onTunnelBehaviorChange?()
+        }
+    }
+
+    var excludeAPNs: Bool {
+        didSet {
+            AWCore.setTunnelExcludeAPNs(excludeAPNs)
+            onTunnelBehaviorChange?()
+        }
+    }
+
+    var excludeCellularServices: Bool {
+        didSet {
+            AWCore.setTunnelExcludeCellularServices(excludeCellularServices)
+            onTunnelBehaviorChange?()
+        }
+    }
+
+    var excludeDeviceCommunication: Bool {
+        didSet {
+            AWCore.setTunnelExcludeDeviceCommunication(excludeDeviceCommunication)
+            onTunnelBehaviorChange?()
+        }
+    }
+
+    var excludeLocalNetworks: Bool {
+        didSet {
+            AWCore.setTunnelExcludeLocalNetworks(excludeLocalNetworks)
+            onTunnelBehaviorChange?()
         }
     }
 
     var includeAllNetworks: Bool {
         didSet {
             AWCore.setTunnelIncludeAllNetworks(includeAllNetworks)
-            VPNViewModel.shared.reconnectVPN()
+            onTunnelBehaviorChange?()
         }
     }
 
-    var includeAPNs: Bool {
-        didSet {
-            AWCore.setTunnelIncludeAPNs(includeAPNs)
-            VPNViewModel.shared.reconnectVPN()
-        }
-    }
-
-    var includeCellularServices: Bool {
-        didSet {
-            AWCore.setTunnelIncludeCellularServices(includeCellularServices)
-            VPNViewModel.shared.reconnectVPN()
-        }
-    }
-
-    var includeLocalNetworks: Bool {
-        didSet {
-            AWCore.setTunnelIncludeLocalNetworks(includeLocalNetworks)
-            VPNViewModel.shared.reconnectVPN()
-        }
-    }
-
-    private init() {
+    init() {
         experimentalEnabled = AWCore.getExperimentalEnabled()
         iCloudSyncEnabled = AWCore.getICloudSyncEnabled()
         proModeEnabled = AWCore.getProModeEnabled()
-        homeColorScheme = AWCore.getHomeColorScheme().flatMap(HomeColorScheme.init(rawValue:)) ?? .dark
-        connectedBackgroundStartData = AWCore.getThemeColorData(.connectedBackgroundStart)
-        connectedBackgroundEndData = AWCore.getThemeColorData(.connectedBackgroundEnd)
-        disconnectedBackgroundStartData = AWCore.getThemeColorData(.disconnectedBackgroundStart)
-        disconnectedBackgroundEndData = AWCore.getThemeColorData(.disconnectedBackgroundEnd)
+        homeBackgroundLightStartData = AWCore.getThemeColorData(.homeBackgroundLightStart)
+        homeBackgroundLightEndData = AWCore.getThemeColorData(.homeBackgroundLightEnd)
+        homeBackgroundDarkStartData = AWCore.getThemeColorData(.homeBackgroundDarkStart)
+        homeBackgroundDarkEndData = AWCore.getThemeColorData(.homeBackgroundDarkEnd)
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
         showVoyagerCard = AWCore.getShowVoyagerCard()
+        statCardBackgroundLightData = AWCore.getThemeColorData(.statCardBackgroundLight)
+        statCardBackgroundDarkData = AWCore.getThemeColorData(.statCardBackgroundDark)
         subscriptionDNSMode = AWCore.getSubscriptionDNSMode()
-        subscriptionDNSPlainServer = AWCore.getSubscriptionDNSPlainServer()
+        subscriptionDNSUDPServer = AWCore.getSubscriptionDNSUDPServer()
         subscriptionDNSDoHURL = AWCore.getSubscriptionDNSDoHURL()
 
-        advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
         alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         blockUDP = AWCore.getBlockUDP()
         blockWebRTC = AWCore.getBlockWebRTC()
         echDNSMode = AWCore.getECHDNSMode()
-        echDNSPlainServer = AWCore.getECHDNSPlainServer()
+        echDNSUDPServer = AWCore.getECHDNSUDPServer()
         echDNSDoHURL = AWCore.getECHDNSDoHURL()
         fallbackDNSMode = AWCore.getFallbackDNSMode()
         fallbackDNSServer = AWCore.getFallbackDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
-        ipRuleDNSMode = AWCore.getIPRuleDNSMode()
-        ipRuleDNSPlainServer = AWCore.getIPRuleDNSPlainServer()
-        ipRuleDNSDoHURL = AWCore.getIPRuleDNSDoHURL()
+        hostMappings = HostMapping.load()
         preventDNSLeak = AWCore.getPreventDNSLeak()
         proxyDNSMode = AWCore.getProxyDNSMode()
-        proxyDNSPlainServer = AWCore.getProxyDNSPlainServer()
+        proxyDNSUDPServer = AWCore.getProxyDNSUDPServer()
         proxyDNSDoHURL = AWCore.getProxyDNSDoHURL()
         proxyMode = AWCore.getProxyMode()
         quicPolicy = AWCore.getQUICPolicy()
-        reflectionAddresses = AWCore.getReflectionAddresses()
         reflectionEnabled = AWCore.getReflectionEnabled()
+        syntheticAddressExcludedDomainSuffixes = AWCore.getSyntheticAddressExcludedDomainSuffixes()
         trustedSSIDs = AWCore.getTrustedSSIDs()
         tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
         tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
@@ -388,9 +376,10 @@ final class AppSettings {
         allowInsecure = AWCore.getAllowInsecure()
 
         alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
+        excludeAPNs = AWCore.getTunnelExcludeAPNs()
+        excludeCellularServices = AWCore.getTunnelExcludeCellularServices()
+        excludeDeviceCommunication = AWCore.getTunnelExcludeDeviceCommunication()
+        excludeLocalNetworks = AWCore.getTunnelExcludeLocalNetworks()
         includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
-        includeAPNs = AWCore.getTunnelIncludeAPNs()
-        includeCellularServices = AWCore.getTunnelIncludeCellularServices()
-        includeLocalNetworks = AWCore.getTunnelIncludeLocalNetworks()
     }
 }

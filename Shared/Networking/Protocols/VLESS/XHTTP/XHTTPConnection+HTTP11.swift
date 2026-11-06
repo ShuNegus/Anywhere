@@ -16,8 +16,7 @@ extension XHTTPConnection {
         let method = configuration.uplinkHTTPMethod
         let path = configuration.normalizedPath
         var request = ""
-
-        // stream-one carries no session ID in the path.
+        
         let metaQuery = queryParamsForMeta()
         request += buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
@@ -47,39 +46,59 @@ extension XHTTPConnection {
     // MARK: packet-up Setup
 
     func performPacketUpSetup() async throws {
+        try await openDownloadWithConcurrentUpload()
+        startUploadResponseDrain()
+    }
+
+    @discardableResult
+    private func openDownloadWithConcurrentUpload() async throws -> any ByteTransport {
+        guard let factory = uploadConnectionFactory else {
+            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "No upload connection factory"))
+        }
         let request = buildDownloadGETRequest()
 
         guard let requestData = request.data(using: .utf8) else {
             throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Failed to encode GET request"))
         }
 
+        async let pendingUpload = factory()
         do {
-            try await download.send(requestData)
+            do {
+                try await download.send(requestData)
+            } catch {
+                throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: error.localizedDescription))
+            }
+            try await receiveResponseHeaders()
         } catch {
-            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: error.localizedDescription))
+            (try? await pendingUpload)?.cancel()
+            throw error
         }
-        try await receiveResponseHeaders()
 
-        guard let factory = uploadConnectionFactory else {
-            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "No upload connection factory"))
-        }
-        let closures: any ByteTransport
+        let upload: any ByteTransport
         do {
-            closures = try await factory()
+            upload = try await pendingUpload
         } catch {
             throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Upload connection failed: \(error.localizedDescription)"))
         }
-        state.withLock { $0.uploadTransport = closures }
-        startUploadResponseDrain()
+        let adopted = state.withLock { state -> Bool in
+            guard state.phase != .cancelled else { return false }
+            state.uploadTransport = upload
+            return true
+        }
+        guard adopted else {
+            upload.cancel()
+            throw AnywhereError.transport(.terminated)
+        }
+        return upload
     }
 
     // MARK: Upload Response Drain
-    
+
     func startUploadResponseDrain() {
         guard let upload = state.withLock({ $0.uploadTransport }) else { return }
         let task = Task { [weak self] in
             while true {
-                guard let self, self.state.withLock({ $0._isConnected }) else { return }
+                guard let self, self.state.withLock({ $0.phase != .cancelled }) else { return }
                 let chunk: TransportChunk
                 do {
                     chunk = try await upload.receive()
@@ -100,29 +119,7 @@ extension XHTTPConnection {
     // MARK: stream-up Setup
 
     func performStreamUpSetup() async throws {
-        let request = buildDownloadGETRequest()
-
-        guard let requestData = request.data(using: .utf8) else {
-            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Failed to encode GET request"))
-        }
-
-        do {
-            try await download.send(requestData)
-        } catch {
-            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: error.localizedDescription))
-        }
-        try await receiveResponseHeaders()
-
-        guard let factory = uploadConnectionFactory else {
-            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "No upload connection factory"))
-        }
-        let closures: any ByteTransport
-        do {
-            closures = try await factory()
-        } catch {
-            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Upload connection failed: \(error.localizedDescription)"))
-        }
-        state.withLock { $0.uploadTransport = closures }
+        let closures = try await openDownloadWithConcurrentUpload()
 
         let postRequest = buildStreamUpPOSTRequest()
         guard let postData = postRequest.data(using: .utf8) else {
@@ -149,7 +146,7 @@ extension XHTTPConnection {
         }
         try await receiveResponseHeaders()
     }
-    
+
     func performUploadOnlyHTTP11Setup() async throws {
         let upload = NonCancelingByteTransport(download)
         state.withLock { $0.uploadTransport = upload }
@@ -165,7 +162,6 @@ extension XHTTPConnection {
                 throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Stream-up POST send failed: \(error.localizedDescription)"))
             }
         } else {
-            // packet-up: each send() is its own POST.
             startUploadResponseDrain()
         }
     }
@@ -224,17 +220,21 @@ extension XHTTPConnection {
                 throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Empty response from server"))
             }
 
-            let headerData: Data? = state.withLock { state in
+            let headerData: Data? = try state.withLock { state in
                 state.headerBuffer.append(data)
-                guard let range = state.headerBuffer.range(of: headerEnd) else { return nil }
+                guard let range = state.headerBuffer.range(of: headerEnd) else {
+                    if state.headerBuffer.count > Self.maxResponseHeaderSize {
+                        throw AnywhereError.proxy(.xhttp, .protocolViolation(detail: "response headers too large"))
+                    }
+                    return nil
+                }
                 let headerData = Data(state.headerBuffer[state.headerBuffer.startIndex..<range.lowerBound])
                 let leftover = Data(state.headerBuffer[range.upperBound...])
                 state.headerBuffer.removeAll()
-                state.downloadHeadersParsed = true
                 if !leftover.isEmpty { state.chunkedDecoder.feed(leftover) }
                 return headerData
             }
-            guard let headerData else { continue } // headers not yet complete; read more
+            guard let headerData else { continue }
 
             guard let headerString = String(data: headerData, encoding: .utf8) else {
                 throw AnywhereError.proxy(.xhttp, .protocolViolation(detail: "Cannot decode response headers"))
@@ -259,7 +259,7 @@ extension XHTTPConnection {
         }
         try await upload.send(ChunkedTransferEncoder.encode(data))
     }
-    
+
     func sendPacketUpHTTP11(data: Data) async throws {
         guard let upload = state.withLock({ $0.uploadTransport }) else {
             throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Upload connection not established"))
@@ -282,7 +282,6 @@ extension XHTTPConnection {
         applySessionId(to: &headerBlock, path: &path)
         applySeq(to: &headerBlock, path: &path, seq: seq)
 
-        // Header/cookie placement carries the payload outside the body.
         let bodyData: Data
         let dataFields = uplinkDataFields(for: data)
         if dataFields.isEmpty {
@@ -315,7 +314,6 @@ extension XHTTPConnection {
         }
         requestData.append(bodyData)
 
-        // Rate limiting between POSTs is enforced upstream by `rateLimitPacketUp`.
         try await upload.send(requestData)
     }
 }

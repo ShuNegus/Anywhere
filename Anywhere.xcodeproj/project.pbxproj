@@ -8,51 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		78AA0002300E000000000002 /* Turn.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 78AA0001300E000000000001 /* Turn.xcframework */; };
-		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
-		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		CB71CDC52F837D11002B9E1D /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB71CDC42F837D11002B9E1D /* WidgetKit.framework */; };
-		CB71CDC72F837D11002B9E1D /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB71CDC62F837D11002B9E1D /* SwiftUI.framework */; };
-		CB71CDD42F837D11002B9E1D /* Anywhere Widget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		CBFA0DE000000000000000C1 /* AnywhereRules in Frameworks */ = {isa = PBXBuildFile; productRef = CBFA0DE000000000000000B1 /* AnywhereRules */; };
-/* End PBXBuildFile section */
-
-/* Begin PBXContainerItemProxy section */
-		78B6DF9E2FE7B70D0084897A /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = CB1C10642F23B81500B74CD8;
-			remoteInfo = Anywhere;
-		};
-		CB1C10802F23B82F00B74CD8 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = CB1C10762F23B82F00B74CD8;
-			remoteInfo = "Network Extension";
-		};
-		CB71CDD22F837D11002B9E1D /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = CB71CDC22F837D11002B9E1D;
-			remoteInfo = WidgetExtension;
-		};
-/* End PBXContainerItemProxy section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		CB1C10872F23B82F00B74CD8 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				CB71CDD42F837D11002B9E1D /* Anywhere Widget.appex in Embed Foundation Extensions */,
-				CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
+		382A1871306A04490032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A1870306A04490032C2BF /* AnywhereIP */; };
+		3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853793E30753251000675B7 /* AnywhereQUIC */; };
+		3853794130753258000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853794030753258000675B7 /* AnywhereQUIC */; };
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -61,38 +19,60 @@
 		CB1C10652F23B81500B74CD8 /* Anywhere.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Anywhere.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Network Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
-		CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Widget.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
-		CB71CDC42F837D11002B9E1D /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
-		CB71CDC62F837D11002B9E1D /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
-/* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		78170FEA300DEEC9003A8100 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Tunnel/NetworkExtensionConcurrencyBridge.swift,
-			);
-			target = CB1C10642F23B81500B74CD8 /* Anywhere */;
-		};
-		CB1C10832F23B82F00B74CD8 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere Network Extension" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
-		};
 		CB65476A2F65715600C85E4A /* Exceptions for "Shared" folder in "Anywhere Network Extension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				"Networking/Protocols/AnyTLS/ProxyClient+AnyTLS.swift",
+				"Networking/Protocols/Core/Outbound+Codable.swift",
+				"Networking/Protocols/Core/ProxyConfiguration+URLExport.swift",
+				"Networking/Protocols/Core/ProxyConfiguration+URLParsing.swift",
+				"Networking/Protocols/Direct/ProxyClient+Direct.swift",
+				"Networking/Protocols/Hysteria/ProxyClient+Hysteria.swift",
+				"Networking/Protocols/Nowhere/ProxyClient+Nowhere.swift",
+				"Networking/Protocols/QUIC/QUICConnection+Close.swift",
+				"Networking/Protocols/QUIC/QUICConnection+Connect.swift",
+				"Networking/Protocols/QUIC/QUICConnection+Events.swift",
+				"Networking/Protocols/QUIC/QUICConnection+IO.swift",
+				"Networking/Protocols/QUIC/QUICConnection+Migration.swift",
+				"Networking/Protocols/QUIC/QUICConnection+Streams.swift",
+				"Networking/Protocols/RFC/ProxyClient+RFC.swift",
+				"Networking/Protocols/SOCKS5/ProxyClient+SOCKS5.swift",
+				"Networking/Protocols/Shadowsocks/ProxyClient+Shadowsocks.swift",
+				"Networking/Protocols/Sudoku/ProxyClient+Sudoku.swift",
+				"Networking/Protocols/TLS/TLS 1.2/TLS12HandshakeKeys.swift",
+				"Networking/Protocols/TLS/TLS 1.2/TLS12KeyDerivation.swift",
+				"Networking/Protocols/TLS/TLS 1.2/TLS12ServerHandshakeState.swift",
+				"Networking/Protocols/TLS/TLS 1.2/TLSClient+TLS12.swift",
+				"Networking/Protocols/TLS/TLS 1.2/TLSRecordConnection+TLS12.swift",
+				"Networking/Protocols/TLS/TLS 1.2/TLSServer+TLS12.swift",
+				"Networking/Protocols/TLS/TLS 1.3/TLS13ApplicationKeys.swift",
+				"Networking/Protocols/TLS/TLS 1.3/TLS13HandshakeKeys.swift",
+				"Networking/Protocols/TLS/TLS 1.3/TLS13HandshakeState.swift",
+				"Networking/Protocols/TLS/TLS 1.3/TLS13KeyDerivation.swift",
+				"Networking/Protocols/TLS/TLS 1.3/TLS13ServerHandshakeState.swift",
+				"Networking/Protocols/TLS/TLS 1.3/TLSClient+TLS13.swift",
+				"Networking/Protocols/TLS/TLS 1.3/TLSRecordConnection+TLS13.swift",
+				"Networking/Protocols/Trojan/ProxyClient+Trojan.swift",
+				"Networking/Protocols/VLESS/ProxyClient+VLESS.swift",
+				"Networking/Protocols/VLESS/ProxyClient+VLESSTransport.swift",
+				"Networking/Protocols/VLESS/XHTTP/ProxyClient+XHTTP.swift",
+				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+H2.swift",
+				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+H2Transport.swift",
+				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+H3.swift",
+				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+HTTP11.swift",
+				"Utilities/Data+appendCompacting.swift",
+				"Utilities/Data+init.swift",
+				"Utilities/String+init.swift",
+				"Utilities/UUID+VLESSString.swift",
 				AWCore.swift,
 				AWNotificationCenter.swift,
 				DataStore/FailableDecodable.swift,
-				DataStore/JSONBlobStore.swift,
+				DataStore/SyncStore.swift,
 				DataStore/TurnMetadataStore.swift,
-				Localizable.xcstrings,
 				MITM/MITMCertificateStore.swift,
 				MITM/X509Builder.swift,
 				Models/DNSMode.swift,
+				Models/HostMapping.swift,
 				Models/LatencyResult.swift,
 				Models/MITMRule.swift,
 				Models/ProxyMode.swift,
@@ -104,10 +84,17 @@
 				Models/TurnMode.swift,
 				Networking/ConnectionMetrics.swift,
 				Networking/ConnectivityProbe.swift,
-				Networking/DNSMessage.swift,
-				Networking/DNSResolver.swift,
-				Networking/DNSUpstreamClient.swift,
+				Networking/DNS/DNSAddressFamily.swift,
+				Networking/DNS/DNSHosts.swift,
+				Networking/DNS/DNSLookupCache.swift,
+				Networking/DNS/DNSMessage.swift,
+				Networking/DNS/DNSName.swift,
+				Networking/DNS/DNSResolver.swift,
+				Networking/DNS/DNSUpstreamClient.swift,
+				Networking/DNS/ECHResolver.swift,
+				Networking/IPRoute.swift,
 				Networking/LatencyTester.swift,
+				Networking/Protocols/AnyTLS/AnyTLSConfiguration.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexer.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexerPool.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexerRegistry.swift,
@@ -115,31 +102,26 @@
 				Networking/Protocols/AnyTLS/AnyTLSProtocol.swift,
 				Networking/Protocols/AnyTLS/AnyTLSStream.swift,
 				Networking/Protocols/AnyTLS/AnyTLSUDPConnection.swift,
-				"Networking/Protocols/AnyTLS/ProxyClient+AnyTLS.swift",
 				Networking/Protocols/Core/AsyncInbox.swift,
 				Networking/Protocols/Core/CertificatePolicy.swift,
 				Networking/Protocols/Core/H2FlowGate.swift,
 				Networking/Protocols/Core/HPACKEncoder.swift,
-				Networking/Protocols/Core/HTTPTunnel.swift,
+				Networking/Protocols/Core/HTTP2Framer.swift,
 				Networking/Protocols/Core/Multiplexer.swift,
 				Networking/Protocols/Core/MultiplexerPool.swift,
+				Networking/Protocols/Core/PhaseTransition.swift,
 				Networking/Protocols/Core/ProxyClient.swift,
 				Networking/Protocols/Core/ProxyConfiguration.swift,
-				"Networking/Protocols/Core/ProxyConfiguration+URLExport.swift",
-				"Networking/Protocols/Core/ProxyConfiguration+URLParsing.swift",
 				Networking/Protocols/Core/ProxyConnection.swift,
+				Networking/Protocols/Core/ProxyRequest.swift,
 				Networking/Protocols/Core/ProxyUserAgent.swift,
 				Networking/Protocols/Core/SerialSender.swift,
+				Networking/Protocols/Core/TerminationLatch.swift,
 				Networking/Protocols/Core/TransportPool.swift,
 				Networking/Protocols/Core/TransportReclaim.swift,
 				Networking/Protocols/Core/TunneledTransport.swift,
 				Networking/Protocols/Core/UDPFraming.swift,
-				Networking/Protocols/Crypto/BLAKE2/blake2b.c,
-				Networking/Protocols/Crypto/BLAKE2bHasher.swift,
-				Networking/Protocols/Crypto/BLAKE3/blake3_dispatch.c,
-				Networking/Protocols/Crypto/BLAKE3/blake3_portable.c,
-				Networking/Protocols/Crypto/BLAKE3/blake3.c,
-				Networking/Protocols/Crypto/BLAKE3Hasher.swift,
+				Networking/Protocols/Direct/DirectConfiguration.swift,
 				Networking/Protocols/Direct/DirectProxyConnection.swift,
 				Networking/Protocols/Direct/DirectUDPProxyConnection.swift,
 				Networking/Protocols/HTTP3/HTTP3Framer.swift,
@@ -155,123 +137,58 @@
 				Networking/Protocols/Hysteria/HysteriaProtocol.swift,
 				Networking/Protocols/Hysteria/HysteriaSession.swift,
 				Networking/Protocols/Hysteria/HysteriaUDPConnection.swift,
-				"Networking/Protocols/Hysteria/ProxyClient+Hysteria.swift",
-				Networking/Protocols/Naive/NaiveConfiguration.swift,
-				Networking/Protocols/Naive/NaiveHTTP2FlowControl.swift,
-				Networking/Protocols/Naive/NaiveHTTP2Framer.swift,
-				Networking/Protocols/Naive/NaiveHTTP2Multiplexer.swift,
-				Networking/Protocols/Naive/NaiveHTTP2MultiplexerPool.swift,
-				Networking/Protocols/Naive/NaiveHTTP2Stream.swift,
-				Networking/Protocols/Naive/NaiveHTTP3MultiplexerPool.swift,
-				Networking/Protocols/Naive/NaiveHTTP3Stream.swift,
-				Networking/Protocols/Naive/NaiveHTTP11Connection.swift,
-				Networking/Protocols/Naive/NaivePaddingFramer.swift,
-				Networking/Protocols/Naive/NaivePaddingNegotiator.swift,
-				Networking/Protocols/Naive/NaiveProxyConnection.swift,
-				Networking/Protocols/Naive/NaiveTunnelAdapter.swift,
-				"Networking/Protocols/Naive/ProxyClient+Naive.swift",
 				Networking/Protocols/Nowhere/NowhereClient.swift,
 				Networking/Protocols/Nowhere/NowhereConfiguration.swift,
 				Networking/Protocols/Nowhere/NowhereConnection.swift,
+				Networking/Protocols/Nowhere/NowhereMorph.swift,
+				Networking/Protocols/Nowhere/NowhereMorphCrypto.swift,
 				Networking/Protocols/Nowhere/NowhereProtocol.swift,
 				Networking/Protocols/Nowhere/NowhereSession.swift,
-				Networking/Protocols/Nowhere/NowhereTCPConnectionPool.swift,
+				Networking/Protocols/Nowhere/NowhereTCPConnection.swift,
 				Networking/Protocols/Nowhere/NowhereUDPConnection.swift,
-				"Networking/Protocols/Nowhere/ProxyClient+Nowhere.swift",
-				Networking/Protocols/QUIC/BrutalCongestionControl.swift,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_acktr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_addr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_balloc.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_bbr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_buf.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_callbacks.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_cc.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_cid.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_conn_info.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_conn.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_conv.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_crypto_apple.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_crypto.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_dcidtr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_err.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_fmt.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_frame_chain.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_gaptr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_idtr.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ksl.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_log.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_map.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_mem.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_objalloc.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_opl.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_path.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pcg.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pkt.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pmtud.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ppe.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pq.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_pv.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_qlog.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_range.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ratelim.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_ringbuf.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_rob.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_rst.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_rtb.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_settings.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_str.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_strm.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_swift_brutal.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_transport_params.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_unreachable.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_vec.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_version.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_wf.c,
-				Networking/Protocols/QUIC/ngtcp2/shared.c,
+				Networking/Protocols/QUIC/GQUICClientHello.swift,
+				Networking/Protocols/QUIC/QUICClientHelloSniffer.swift,
 				Networking/Protocols/QUIC/QUICConnection.swift,
-				"Networking/Protocols/QUIC/QUICConnection+BridgeHost.swift",
-				"Networking/Protocols/QUIC/QUICConnection+Close.swift",
-				"Networking/Protocols/QUIC/QUICConnection+Connect.swift",
-				"Networking/Protocols/QUIC/QUICConnection+IO.swift",
-				"Networking/Protocols/QUIC/QUICConnection+Migration.swift",
-				"Networking/Protocols/QUIC/QUICConnection+NGTCP2.swift",
-				"Networking/Protocols/QUIC/QUICConnection+NGTCP2Callbacks.swift",
-				"Networking/Protocols/QUIC/QUICConnection+Streams.swift",
-				Networking/Protocols/QUIC/QUICCrypto.swift,
+				Networking/Protocols/QUIC/QUICConnectionCore.swift,
 				Networking/Protocols/QUIC/QUICDatagramTransport.swift,
+				Networking/Protocols/QUIC/QUICState.swift,
 				Networking/Protocols/QUIC/QUICTLSHandler.swift,
 				Networking/Protocols/QUIC/QUICTuning.swift,
 				Networking/Protocols/QUIC/QUICVarInt.swift,
-				"Networking/Protocols/Shadowsocks/ProxyClient+Shadowsocks.swift",
+				Networking/Protocols/RFC/RFCConfiguration.swift,
+				Networking/Protocols/RFC/RFCHTTP11Tunnel.swift,
+				Networking/Protocols/RFC/RFCHTTP2Multiplexer.swift,
+				Networking/Protocols/RFC/RFCHTTP2Stream.swift,
+				Networking/Protocols/RFC/RFCMultiplexerPool.swift,
+				Networking/Protocols/RFC/RFCMultiplexerRegistry.swift,
+				Networking/Protocols/RFC/RFCProtocol.swift,
+				Networking/Protocols/SOCKS5/SOCKS5Configuration.swift,
+				Networking/Protocols/SOCKS5/SOCKS5Connection.swift,
 				Networking/Protocols/Shadowsocks/Shadowsocks2022.swift,
 				Networking/Protocols/Shadowsocks/ShadowsocksAEAD.swift,
 				Networking/Protocols/Shadowsocks/ShadowsocksCipher.swift,
+				Networking/Protocols/Shadowsocks/ShadowsocksConfiguration.swift,
 				Networking/Protocols/Shadowsocks/ShadowsocksConnection.swift,
 				Networking/Protocols/Shadowsocks/ShadowsocksProtocol.swift,
 				Networking/Protocols/Shadowsocks/ShadowsocksUDPSession.swift,
-				"Networking/Protocols/SOCKS5/ProxyClient+SOCKS5.swift",
-				Networking/Protocols/SOCKS5/SOCKS5Connection.swift,
-				"Networking/Protocols/Sudoku/ProxyClient+Sudoku.swift",
+				Networking/Protocols/Sudoku/BlockingProxyStream.swift,
+				Networking/Protocols/Sudoku/SudokuBuffers.swift,
 				Networking/Protocols/Sudoku/SudokuConfiguration.swift,
+				Networking/Protocols/Sudoku/SudokuConnectionFactory.swift,
+				Networking/Protocols/Sudoku/SudokuHTTPMask.swift,
+				Networking/Protocols/Sudoku/SudokuKeyRecovery.swift,
 				Networking/Protocols/Sudoku/SudokuMultiplexerPool.swift,
+				Networking/Protocols/Sudoku/SudokuMux.swift,
+				Networking/Protocols/Sudoku/SudokuNativeClient.swift,
+				Networking/Protocols/Sudoku/SudokuNativeConfig.swift,
 				Networking/Protocols/Sudoku/SudokuNativeCore.swift,
+				Networking/Protocols/Sudoku/SudokuNativeCrypto.swift,
 				Networking/Protocols/Sudoku/SudokuProxyConnection.swift,
+				Networking/Protocols/Sudoku/SudokuRecordLayer.swift,
+				Networking/Protocols/Sudoku/SudokuSupport.swift,
 				Networking/Protocols/TLS/ECH/ECHConfig.swift,
 				Networking/Protocols/TLS/ECH/ECHConfigResolver.swift,
 				Networking/Protocols/TLS/ECH/ECHEncryption.swift,
-				"Networking/Protocols/TLS/TLS 1.2/TLS12HandshakeKeys.swift",
-				"Networking/Protocols/TLS/TLS 1.2/TLS12KeyDerivation.swift",
-				"Networking/Protocols/TLS/TLS 1.2/TLS12ServerHandshakeState.swift",
-				"Networking/Protocols/TLS/TLS 1.2/TLSClient+TLS12.swift",
-				"Networking/Protocols/TLS/TLS 1.2/TLSRecordConnection+TLS12.swift",
-				"Networking/Protocols/TLS/TLS 1.2/TLSServer+TLS12.swift",
-				"Networking/Protocols/TLS/TLS 1.3/TLS13ApplicationKeys.swift",
-				"Networking/Protocols/TLS/TLS 1.3/TLS13HandshakeKeys.swift",
-				"Networking/Protocols/TLS/TLS 1.3/TLS13HandshakeState.swift",
-				"Networking/Protocols/TLS/TLS 1.3/TLS13KeyDerivation.swift",
-				"Networking/Protocols/TLS/TLS 1.3/TLS13ServerHandshakeState.swift",
-				"Networking/Protocols/TLS/TLS 1.3/TLSClient+TLS13.swift",
-				"Networking/Protocols/TLS/TLS 1.3/TLSRecordConnection+TLS13.swift",
 				Networking/Protocols/TLS/TLSAlertDescription.swift,
 				Networking/Protocols/TLS/TLSAlertLevel.swift,
 				Networking/Protocols/TLS/TLSCipherSuite.swift,
@@ -291,7 +208,7 @@
 				Networking/Protocols/TLS/TLSServerHelloBuilder.swift,
 				Networking/Protocols/TLS/TLSSignatureScheme.swift,
 				Networking/Protocols/TLS/TLSStreamTransport.swift,
-				"Networking/Protocols/Trojan/ProxyClient+Trojan.swift",
+				Networking/Protocols/Trojan/TrojanConfiguration.swift,
 				Networking/Protocols/Trojan/TrojanConnection.swift,
 				Networking/Protocols/Trojan/TrojanProtocol.swift,
 				Networking/Protocols/Trojan/TrojanUDPConnection.swift,
@@ -310,15 +227,15 @@
 				Networking/Protocols/VLESS/HTTPUpgrade/HTTPUpgradeConfiguration.swift,
 				Networking/Protocols/VLESS/HTTPUpgrade/HTTPUpgradeConnection.swift,
 				Networking/Protocols/VLESS/HTTPUpgrade/HTTPUpgradeProxyConnection.swift,
-				"Networking/Protocols/VLESS/ProxyClient+VLESS.swift",
 				Networking/Protocols/VLESS/Reality/RealityClient.swift,
 				Networking/Protocols/VLESS/Reality/RealityConfiguration.swift,
 				Networking/Protocols/VLESS/Reality/RealityProxyConnection.swift,
+				Networking/Protocols/VLESS/VLESSConfiguration.swift,
 				Networking/Protocols/VLESS/VLESSConnection.swift,
 				Networking/Protocols/VLESS/VLESSEncryption.swift,
 				Networking/Protocols/VLESS/VLESSEncryption0RTTCache.swift,
-				Networking/Protocols/VLESS/VLESSEncryptionClient.swift,
 				Networking/Protocols/VLESS/VLESSEncryptionCTR.swift,
+				Networking/Protocols/VLESS/VLESSEncryptionClient.swift,
 				Networking/Protocols/VLESS/VLESSProtocol.swift,
 				Networking/Protocols/VLESS/VLESSUDPConnection.swift,
 				Networking/Protocols/VLESS/VLESSVision.swift,
@@ -334,16 +251,11 @@
 				Networking/Protocols/VLESS/XHTTP/XHTTPChunkedTransfer.swift,
 				Networking/Protocols/VLESS/XHTTP/XHTTPConfiguration.swift,
 				Networking/Protocols/VLESS/XHTTP/XHTTPConnection.swift,
-				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+H2.swift",
-				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+H2Transport.swift",
-				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+H3.swift",
-				"Networking/Protocols/VLESS/XHTTP/XHTTPConnection+HTTP11.swift",
 				Networking/Protocols/VLESS/XHTTP/XHTTPH2Framing.swift,
 				Networking/Protocols/VLESS/XHTTP/XHTTPH3RequestStream.swift,
 				Networking/Protocols/VLESS/XHTTP/XHTTPProxyConnection.swift,
 				Networking/Routing/FlatLabelTrie.swift,
 				Networking/Routing/TieredRouteMatcher.swift,
-				Networking/RuleResolver.swift,
 				Networking/Transport/ByteTransport.swift,
 				Networking/Transport/ByteTransportAdapters.swift,
 				Networking/Transport/DialDeadline.swift,
@@ -351,11 +263,9 @@
 				Networking/Transport/FlowSlot.swift,
 				Networking/Transport/NWTransportHelpers.swift,
 				Networking/Transport/QUICDatagramCarrier.swift,
-				"Networking/Transport/QUICDatagramCarrier+Compatibility.swift",
 				Networking/Transport/TCPTransport.swift,
-				"Networking/Transport/TCPTransport+Compatibility.swift",
 				Networking/Transport/UDPTransport.swift,
-				"Networking/Transport/UDPTransport+Compatibility.swift",
+				Networking/TunnelAddress.swift,
 				Networking/TunnelLimits.swift,
 				Protocols/SoftDeletable.swift,
 				Utilities/AnywhereError.swift,
@@ -363,15 +273,12 @@
 				Utilities/Bridges/BridgeContext.swift,
 				Utilities/Bridges/BridgeExecutor.swift,
 				Utilities/Bridges/DNSSyscallConcurrencyBridge.swift,
-				Utilities/Bridges/NGTCP2ConcurrencyBridge.swift,
 				Utilities/Bridges/SwiftRegexConcurrencyBridge.swift,
-				"Utilities/Data+appendCompacting.swift",
-				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
 				Utilities/MonotonicClock.swift,
-				"Utilities/String+init.swift",
-				Utilities/SubscriptionDomainHelper.swift,
-				"Utilities/UUID+VLESSString.swift",
+				Utilities/Timing/Deadline.swift,
+				Utilities/Timing/TickScheduler.swift,
+				Utilities/Timing/TimerPrecision.swift,
 				Utilities/VPNStatus.swift,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
@@ -396,6 +303,9 @@
 				Utilities/AnywhereError.swift,
 				Utilities/AnywhereLogger.swift,
 				Utilities/Bridges/SwiftRegexConcurrencyBridge.swift,
+				Utilities/MonotonicClock.swift,
+				Utilities/Timing/Deadline.swift,
+				Utilities/Timing/TimerPrecision.swift,
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};
@@ -425,7 +335,6 @@
 		CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				78170FEA300DEEC9003A8100 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere" target */,
 				CB1C10832F23B82F00B74CD8 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere Network Extension" target */,
 			);
 			path = "Anywhere Network Extension";
@@ -463,6 +372,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				CBFA0DE000000000000000C1 /* AnywhereRules in Frameworks */,
+				3853794130753258000675B7 /* AnywhereQUIC in Frameworks */,
+				38B2C4A5307A1F0100D4E6F1 /* YAML in Frameworks */,
+				38B2C4186D241EF7A2278F02 /* BLAKE in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -470,8 +382,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
 				78AA0002300E000000000002 /* Turn.xcframework in Frameworks */,
+				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
+				382A1871306A04490032C2BF /* AnywhereIP in Frameworks */,
+				3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */,
+				38B2C426234A7168B56E86CC /* BLAKE in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -570,6 +485,9 @@
 			name = Anywhere;
 			packageProductDependencies = (
 				CBFA0DE000000000000000B1 /* AnywhereRules */,
+				3853794030753258000675B7 /* AnywhereQUIC */,
+				38B2C4A3307A1F0100D4E6F1 /* YAML */,
+				38B2C49B7761D5E2B8BE528B /* BLAKE */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -592,6 +510,9 @@
 			);
 			name = "Anywhere Network Extension";
 			packageProductDependencies = (
+				382A1870306A04490032C2BF /* AnywhereIP */,
+				3853793E30753251000675B7 /* AnywhereQUIC */,
+				38B2C4CE1CDB7A0B75D898C9 /* BLAKE */,
 			);
 			productName = "Network Extension";
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
@@ -657,11 +578,16 @@
 				fa,
 				vi,
 				tr,
+				"zh-HK",
 			);
 			mainGroup = CB1C105C2F23B81500B74CD8;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				CBFA0DE000000000000000A1 /* XCLocalSwiftPackageReference "LocalPackages/AnywhereRules" */,
+				38B2C4A0307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereIP" */,
+				38B2C4A1307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereQUIC" */,
+				38B2C4A2307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/YAML" */,
+				38B2C44881FD8FEA5EEA4D6E /* XCLocalSwiftPackageReference "Packages/BLAKE" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -762,25 +688,9 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 352;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
-				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Tests;
@@ -792,7 +702,6 @@
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -805,25 +714,9 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 352;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
-					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
-				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Tests;
@@ -835,7 +728,6 @@
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -980,25 +872,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 355;
+				CURRENT_PROJECT_VERSION = 356;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
 				ENABLE_PREVIEWS = YES;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
-				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1008,21 +885,20 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1037,25 +913,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 355;
+				CURRENT_PROJECT_VERSION = 356;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
 				ENABLE_PREVIEWS = YES;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
-				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1065,21 +926,20 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1092,25 +952,9 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 355;
+				CURRENT_PROJECT_VERSION = 356;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Anywhere Network Extension/Network/lwip/src/include\"",
-					"\"$(SRCROOT)/Anywhere Network Extension/Network/lwip/port\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -1120,7 +964,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "su.smd.Anywhere.Network-Extension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1130,7 +974,6 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) NETWORK_EXTENSION";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere Network Extension/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,3";
@@ -1144,25 +987,9 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 355;
+				CURRENT_PROJECT_VERSION = 356;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-					"BLAKE3_NO_SSE2=1",
-					"BLAKE3_NO_SSE41=1",
-					"BLAKE3_NO_AVX2=1",
-					"BLAKE3_NO_AVX512=1",
-					"BLAKE3_USE_NEON=0",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"\"$(SRCROOT)/Anywhere Network Extension/Network/lwip/src/include\"",
-					"\"$(SRCROOT)/Anywhere Network Extension/Network/lwip/port\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
-					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -1172,7 +999,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "su.smd.Anywhere.Network-Extension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1182,7 +1009,6 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) NETWORK_EXTENSION";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere Network Extension/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2,3";
@@ -1197,7 +1023,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 355;
+				CURRENT_PROJECT_VERSION = 356;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
@@ -1209,7 +1035,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1229,7 +1055,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 355;
+				CURRENT_PROJECT_VERSION = 356;
 				DEVELOPMENT_TEAM = 7G6756ME5J;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
@@ -1241,7 +1067,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = su.smd.Anywhere.Widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1305,6 +1131,22 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		38B2C44881FD8FEA5EEA4D6E /* XCLocalSwiftPackageReference "Packages/BLAKE" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/BLAKE;
+		};
+		38B2C4A0307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereIP" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AnywhereIP;
+		};
+		38B2C4A1307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereQUIC" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AnywhereQUIC;
+		};
+		38B2C4A2307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/YAML" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/YAML;
+		};
 		CBFA0DE000000000000000A1 /* XCLocalSwiftPackageReference "LocalPackages/AnywhereRules" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = LocalPackages/AnywhereRules;
@@ -1312,6 +1154,30 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		382A1870306A04490032C2BF /* AnywhereIP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AnywhereIP;
+		};
+		3853793E30753251000675B7 /* AnywhereQUIC */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AnywhereQUIC;
+		};
+		3853794030753258000675B7 /* AnywhereQUIC */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AnywhereQUIC;
+		};
+		38B2C49B7761D5E2B8BE528B /* BLAKE */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BLAKE;
+		};
+		38B2C4A3307A1F0100D4E6F1 /* YAML */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = YAML;
+		};
+		38B2C4CE1CDB7A0B75D898C9 /* BLAKE */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BLAKE;
+		};
 		CBFA0DE000000000000000B1 /* AnywhereRules */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = CBFA0DE000000000000000A1 /* XCLocalSwiftPackageReference "LocalPackages/AnywhereRules" */;

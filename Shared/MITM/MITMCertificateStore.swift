@@ -13,20 +13,20 @@ import Synchronization
 nonisolated final class MITMCertificateStore: Sendable {
 
     // MARK: - Configuration
-    
+
     private static let accessGroup = AWCore.Identifier.appGroupSuite
-    
+
     private static let service = "su.smd.Anywhere.MITM"
 
     private static let privateKeyTag = "\(service).caPrivateKey".data(using: .utf8)!
-    private static let certAccount = "\(service).caCertificate"
+    private static let certificateAccount = "\(service).caCertificate"
     private static let serialAccount = "\(service).caSerial"
 
     private static let caSubjectCN = "Anywhere Root Certificate"
     private static let caOrganization = "Anywhere"
-    
+
     typealias CA = (privateKey: SecKey, certificateDER: Data)
-    
+
     private let cachedCA = Mutex<CA?>(nil)
 
     // MARK: - CA Lifecycle
@@ -56,7 +56,15 @@ nonisolated final class MITMCertificateStore: Sendable {
     func loadCA() -> CA? {
         cachedCA.withLock { cache in try? loadCACachedUnlocked(&cache) }
     }
-    
+
+    func reloadCA() -> Bool {
+        cachedCA.withLock { cache in
+            let previous = cache?.certificateDER
+            cache = nil
+            return (try? loadCACachedUnlocked(&cache))?.certificateDER != previous
+        }
+    }
+
     @discardableResult
     func regenerate() throws -> CA {
         try cachedCA.withLock { cache in
@@ -72,7 +80,7 @@ nonisolated final class MITMCertificateStore: Sendable {
     // MARK: - Trust State
 
     func isCATrusted() -> Bool {
-        guard let (caKey, caCertDER) = loadCA() else {
+        guard let (caPrivateKey, caCertificateDER) = loadCA() else {
             return false
         }
 
@@ -84,8 +92,8 @@ nonisolated final class MITMCertificateStore: Sendable {
         do {
             leafDER = try X509Builder.buildLeafCertificate(
                 leafPublicKey: leafKey.publicKey,
-                caPrivateKey: caKey,
-                caCertificateDER: caCertDER,
+                caPrivateKey: caPrivateKey,
+                caCertificateDER: caCertificateDER,
                 hostname: testHost,
                 serial: randomSerial(),
                 notBefore: now.addingTimeInterval(-60),
@@ -95,14 +103,14 @@ nonisolated final class MITMCertificateStore: Sendable {
             return false
         }
 
-        guard let leafCert = SecCertificateCreateWithData(nil, leafDER as CFData),
-              let caCert = SecCertificateCreateWithData(nil, caCertDER as CFData) else {
+        guard let leafCertificate = SecCertificateCreateWithData(nil, leafDER as CFData),
+              let caCertificate = SecCertificateCreateWithData(nil, caCertificateDER as CFData) else {
             return false
         }
 
         var trust: SecTrust?
         let policy = SecPolicyCreateSSL(true, testHost as CFString)
-        let chain: [SecCertificate] = [leafCert, caCert]
+        let chain: [SecCertificate] = [leafCertificate, caCertificate]
         let status = SecTrustCreateWithCertificates(chain as CFArray, policy, &trust)
         guard status == errSecSuccess, let trust else { return false }
         var error: CFError?
@@ -114,9 +122,9 @@ nonisolated final class MITMCertificateStore: Sendable {
     func exportCertificateDER() -> Data? {
         loadCA()?.certificateDER
     }
-    
+
     func exportMobileConfig() -> Data? {
-        guard let (caKey, certDER) = loadCA() else { return nil }
+        guard let (caPrivateKey, certificateDER) = loadCA() else { return nil }
 
         let identifier = "su.smd.Anywhere.mitm.root"
         let payloadIdentifier = "\(identifier).payload"
@@ -140,7 +148,7 @@ nonisolated final class MITMCertificateStore: Sendable {
                     "PayloadDisplayName": "Anywhere Root Certificate",
                     "PayloadDescription": "The CA is used in Anywhere app.",
                     "PayloadCertificateFileName": "AnywhereRootCertificate.cer",
-                    "PayloadContent": certDER,
+                    "PayloadContent": certificateDER,
                 ]
             ]
         ]
@@ -152,11 +160,11 @@ nonisolated final class MITMCertificateStore: Sendable {
         ) else {
             return nil
         }
-        
-        return (try? signProfile(profileData, caKey: caKey, caCertificateDER: certDER)) ?? profileData
+
+        return (try? signProfile(profileData, caPrivateKey: caPrivateKey, caCertificateDER: certificateDER)) ?? profileData
     }
-    
-    private func signProfile(_ profileData: Data, caKey: SecKey, caCertificateDER: Data) throws -> Data {
+
+    private func signProfile(_ profileData: Data, caPrivateKey: SecKey, caCertificateDER: Data) throws -> Data {
         let signingKey = try makeEphemeralSigningKey()
         let now = Date()
         let notAfter = Calendar(identifier: .gregorian).date(byAdding: .year, value: 1, to: now)
@@ -164,7 +172,7 @@ nonisolated final class MITMCertificateStore: Sendable {
 
         let leafDER = try X509Builder.buildSigningCertificate(
             signingKey: signingKey,
-            caPrivateKey: caKey,
+            caPrivateKey: caPrivateKey,
             caCertificateDER: caCertificateDER,
             commonName: "Anywhere Profile Signing",
             serial: randomSerial(),
@@ -179,7 +187,7 @@ nonisolated final class MITMCertificateStore: Sendable {
             certificates: [leafDER, caCertificateDER]
         )
     }
-    
+
     private func makeEphemeralSigningKey() throws -> SecKey {
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -198,11 +206,11 @@ nonisolated final class MITMCertificateStore: Sendable {
     /// Returns a fresh 16-byte random serial. Randomness, not a shared counter:
     /// two App Group processes could mint duplicates (RFC 5280 §4.1.2.2).
     func nextSerial() -> Data {
-        return randomSerial()
+        randomSerial()
     }
 
     // MARK: - Private — CA load / generate / delete
-    
+
     private func loadCACachedUnlocked(_ cache: inout CA?) throws -> CA {
         if let cache { return cache }
         let loaded = try loadCAUnlocked()
@@ -211,9 +219,9 @@ nonisolated final class MITMCertificateStore: Sendable {
     }
 
     private func loadCAUnlocked() throws -> CA {
-        let cert = try readCertificateUnlocked()
+        let certificate = try readCertificateUnlocked()
         let key = try readPrivateKeyUnlocked()
-        return (key, cert)
+        return (key, certificate)
     }
 
     private func generateCAUnlocked(_ cache: inout CA?) throws -> CA {
@@ -223,7 +231,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         let serial = randomSerial()
 
         do {
-            let certDER = try X509Builder.buildCACertificate(
+            let certificateDER = try X509Builder.buildCACertificate(
                 privateKey: privateKey,
                 subjectCN: Self.caSubjectCN,
                 organization: Self.caOrganization,
@@ -231,8 +239,8 @@ nonisolated final class MITMCertificateStore: Sendable {
                 notBefore: now.addingTimeInterval(-60 * 60),
                 notAfter: notAfter
             )
-            try writeCertificateUnlocked(certDER)
-            let ca: CA = (privateKey: privateKey, certificateDER: certDER)
+            try writeCertificateUnlocked(certificateDER)
+            let ca: CA = (privateKey: privateKey, certificateDER: certificateDER)
             cache = ca
             return ca
         } catch {
@@ -267,6 +275,7 @@ nonisolated final class MITMCertificateStore: Sendable {
             .privateKeyUsage,
             &error
         ) else {
+            _ = error?.takeRetainedValue()
             return nil
         }
         let attributes: [String: Any] = [
@@ -280,8 +289,10 @@ nonisolated final class MITMCertificateStore: Sendable {
                 kSecAttrAccessGroup as String: Self.accessGroup,
             ]
         ]
-        var err: Unmanaged<CFError>?
-        return SecKeyCreateRandomKey(attributes as CFDictionary, &err)
+        var keyError: Unmanaged<CFError>?
+        let key = SecKeyCreateRandomKey(attributes as CFDictionary, &keyError)
+        if key == nil { _ = keyError?.takeRetainedValue() }
+        return key
     }
 
     private func generateSoftwareKey() throws -> SecKey {
@@ -340,7 +351,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.certAccount,
+            kSecAttrAccount as String: Self.certificateAccount,
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecAttrAccessGroup as String: Self.accessGroup,
@@ -355,7 +366,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.certAccount,
+            kSecAttrAccount as String: Self.certificateAccount,
             kSecReturnData as String: true,
             kSecAttrAccessGroup as String: Self.accessGroup,
         ]
@@ -371,7 +382,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.certAccount,
+            kSecAttrAccount as String: Self.certificateAccount,
             kSecAttrAccessGroup as String: Self.accessGroup,
         ]
         SecItemDelete(query as CFDictionary)

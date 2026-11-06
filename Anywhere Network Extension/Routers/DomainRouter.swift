@@ -15,26 +15,28 @@ nonisolated final class DomainRouter: Sendable {
     // MARK: - Tier model
     
     fileprivate enum Tier: Int, CaseIterable {
-        case user = 0
-        case adBlock = 1
-        case builtIn = 2
-        case bypass = 3
+        case adBlock = 0
+        case builtIn = 1
+        case user = 2
+        case neutral = 3
+        case bypass = 4
     }
-    
+
     fileprivate struct RulePayload: Hashable, Sendable {
         var action: RouteTarget
         var entryIndex: UInt16
     }
-    
+
     struct Match: Sendable {
         let action: RouteTarget
         let ruleSetName: String?
     }
-    
+
     fileprivate struct RoutingState: Sendable {
         var matcher = TieredRouteMatcher<RulePayload>(tierCount: Tier.allCases.count)
         var configurationMap: [UUID: ProxyConfiguration] = [:]
         var ruleSetNames: [String] = []
+        var version: UInt64 = 1
 
         func match(resolving payload: RulePayload?) -> Match? {
             guard let payload else { return nil }
@@ -44,7 +46,7 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         // MARK: Streaming ingestion
-        
+
         mutating func ingestConfigurations(_ slice: Data) throws(AnywhereError) {
             guard let configurations = try? JSONDecoder().decode([String: ProxyConfiguration].self, from: slice) else {
                 throw AnywhereError.routing(.payloadCorrupted(.malformed))
@@ -83,70 +85,77 @@ nonisolated final class DomainRouter: Sendable {
     }
 
     private let routingState = Mutex(RoutingState())
-    
-    private let rulesVersion = Atomic<UInt64>(1)
 
-    var currentRulesVersion: UInt64 { rulesVersion.load(ordering: .relaxed) }
+    var currentRulesVersion: UInt64 { routingState.withLock { $0.version } }
 
     // MARK: - Loading
 
     func reset() {
-        routingState.withLock { $0 = RoutingState() }
-        rulesVersion.wrappingAdd(1, ordering: .relaxed)
+        _ = replaceRoutingState(with: RoutingState())
     }
 
     func loadRoutingConfiguration() {
         let newState = Self.makeRoutingState()
-        routingState.withLock { $0 = newState }
-        rulesVersion.wrappingAdd(1, ordering: .relaxed)
+        _ = replaceRoutingState(with: newState)
     }
     
+    private func replaceRoutingState(with replacement: RoutingState) -> RoutingState {
+        routingState.withLock { state in
+            var displaced = replacement
+            displaced.version = state.version &+ 1
+            swap(&state, &displaced)
+            return displaced
+        }
+    }
+
     struct CompiledRouting: Sendable {
         fileprivate let state: RoutingState
     }
-    
+
     @concurrent
     func compileRoutingConfiguration() async -> CompiledRouting {
         CompiledRouting(state: Self.makeRoutingState())
     }
-    
+
     func install(_ compiled: CompiledRouting) {
-        routingState.withLock { $0 = compiled.state }
-        rulesVersion.wrappingAdd(1, ordering: .relaxed)
+        _ = replaceRoutingState(with: compiled.state)
     }
 
     private static func makeRoutingState() -> RoutingState {
         var state = RoutingState()
-        guard let data = AWCore.getRoutingData() else {
-            logger.debug("[DomainRouter] No routing data available")
-            return state
-        }
+        guard let data = AWCore.getRoutingData() else { return state }
 
         do {
-            try data.withUnsafeBytes { raw in
+            let unresolvedEntries = try data.withUnsafeBytes { raw -> [Int] in
                 let base = raw.bindMemory(to: UInt8.self)
                 var reader = RoutingBinaryReader(bytes: base, data: data)
                 try reader.run(state: &state)
                 state.matcher.finalize(base: base)
+                return reader.unresolvedEntries
+            }
+            for index in unresolvedEntries {
+                let name = index < state.ruleSetNames.count ? state.ruleSetNames[index] : ""
+                logger.warning("[Routing] \(name.isEmpty ? "#\(index)" : name): Proxy not found")
             }
         } catch {
-            logger.report("[DomainRouter] Routing payload parse failed", error: error)
+            logger.report(error)
             return RoutingState()
         }
-
-        let tiers = state.matcher.tiers
-        logger.debug("[DomainRouter] Loaded tiers — user: \(tiers[Tier.user.rawValue].domainRuleCount)+\(tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(tiers[Tier.adBlock.rawValue].domainRuleCount)+\(tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(tiers[Tier.builtIn.rawValue].domainRuleCount)+\(tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(tiers[Tier.bypass.rawValue].domainRuleCount)+\(tiers[Tier.bypass.rawValue].ipRuleCount); \(state.configurationMap.count) configurations")
+        
         return state
     }
 
     // MARK: - Payload reader
 
     private struct RoutingBinaryReader {
-
         let bytes: UnsafeBufferPointer<UInt8>
         let data: Data
         private var cursor = 0
         private var count: Int { bytes.count }
+        
+        private var version: RoutingBinaryFormat.Version = .v2
+        private var legacyDefaultTargetId: UUID?
+        private(set) var unresolvedEntries: [Int] = []
 
         init(bytes: UnsafeBufferPointer<UInt8>, data: Data) {
             self.bytes = bytes
@@ -154,7 +163,10 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         mutating func run(state: inout RoutingState) throws(AnywhereError) {
-            try expectMagic()
+            version = try readMagic()
+            if version == .v1 {
+                legacyDefaultTargetId = AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId()
+            }
 
             let configLength = Int(try u32())
             let configStart = cursor
@@ -167,34 +179,37 @@ nonisolated final class DomainRouter: Sendable {
             for entryIndex in 0..<entryCount {
                 try readEntry(state: &state, entryIndex: UInt16(clamping: entryIndex))
             }
-
-            // Trailing names section (newer payloads): u32 count == entry count,
-            // then a u16-length-prefixed UTF-8 name per entry, in entry order.
-            state.ruleSetNames = readNames(expectedCount: entryCount) ?? []
+            
+            if version == .v1 {
+                state.ruleSetNames = []
+            } else {
+                state.ruleSetNames = try readNames(expectedCount: entryCount)
+            }
         }
 
-        private mutating func readNames(expectedCount: UInt32) -> [String]? {
-            guard cursor < count,
-                  let nameCount = try? u32(), nameCount == expectedCount else { return nil }
+        private mutating func readNames(expectedCount: UInt32) throws(AnywhereError) -> [String] {
+            let nameCount = try u32()
+            guard nameCount == expectedCount else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
             var names: [String] = []
             names.reserveCapacity(Int(nameCount))
             for _ in 0..<nameCount {
-                guard let length = try? u16(), cursor + Int(length) <= count else { return nil }
-                names.append(String(decoding: bytes[cursor..<cursor + Int(length)], as: UTF8.self))
-                cursor += Int(length)
+                let length = Int(try u16())
+                guard cursor + length <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
+                names.append(String(decoding: bytes[cursor..<cursor + length], as: UTF8.self))
+                cursor += length
             }
             return names
         }
 
         private mutating func readEntry(state: inout RoutingState, entryIndex: UInt16) throws(AnywhereError) {
-            guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
-            let action = try readAction()
+            let tier = try readTier()
+            let action = try readAction(configurations: state.configurationMap)
+            if case .proxy(let id) = action, state.configurationMap[id] == nil {
+                unresolvedEntries.append(Int(entryIndex))
+            }
             let payload = RulePayload(action: action, entryIndex: entryIndex)
 
             var remainingRules = try u32()
-            // Upper bound on this entry's CIDR rules; reserving on the first of each family lets a bulk load
-            // skip the doubling reallocations. Clamp to what the payload could hold (min rule = 3 bytes) so a
-            // corrupt count can't drive a wild reserveCapacity.
             let reserveHint = min(Int(remainingRules), count / 3)
             var reservedV4 = false
             var reservedV6 = false
@@ -218,22 +233,64 @@ nonisolated final class DomainRouter: Sendable {
             }
         }
 
-        private mutating func readAction() throws(AnywhereError) -> RouteTarget {
+        private mutating func readTier() throws(AnywhereError) -> RoutingBinaryFormat.Tier {
+            let raw = try u8()
+            let tier: RoutingBinaryFormat.Tier? = switch version {
+            case .v1: RoutingBinaryFormat.LegacyTier(rawValue: raw)?.current
+            case .v2: RoutingBinaryFormat.Tier(rawValue: raw)
+            }
+            guard let tier else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
+            return tier
+        }
+
+        private mutating func readAction(configurations: [UUID: ProxyConfiguration]) throws(AnywhereError) -> RouteTarget {
+            switch version {
+            case .v1: return try readLegacyAction(configurations: configurations)
+            case .v2: return try readCurrentAction()
+            }
+        }
+
+        private mutating func readCurrentAction() throws(AnywhereError) -> RouteTarget {
             switch RoutingBinaryFormat.Action(rawValue: try u8()) {
+            case .fallback: return .default
+            case .defaultProxy: return .defaultProxy
             case .direct: return .direct
             case .reject: return .reject
             case .proxy: return .proxy(try readUUID())
             case nil: throw AnywhereError.routing(.payloadCorrupted(.malformed))
             }
         }
+        
+        private mutating func readLegacyAction(configurations: [UUID: ProxyConfiguration]) throws(AnywhereError) -> RouteTarget {
+            guard let action = RoutingBinaryFormat.LegacyAction(rawValue: try u8()) else {
+                throw AnywhereError.routing(.payloadCorrupted(.malformed))
+            }
+            switch action {
+            case .direct: return .direct
+            case .reject: return .reject
+            case .proxy:
+                let id = try readUUID()
+                guard configurations[id] != nil, id != legacyDefaultTargetId else { return .default }
+                return .proxy(id)
+            }
+        }
 
         // MARK: Primitives
 
-        private mutating func expectMagic() throws(AnywhereError) {
+        private mutating func readMagic() throws(AnywhereError) -> RoutingBinaryFormat.Version {
             let magic = RoutingBinaryFormat.magic
             guard cursor + magic.count <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
-            for k in 0..<magic.count where bytes[cursor + k] != magic[k] { throw AnywhereError.routing(.payloadCorrupted(.badMagic)) }
+            let head = bytes[cursor..<cursor + magic.count]
+            let version: RoutingBinaryFormat.Version
+            if head.elementsEqual(magic) {
+                version = .v2
+            } else if head.elementsEqual(RoutingBinaryFormat.legacyMagic) {
+                version = .v1
+            } else {
+                throw AnywhereError.routing(.payloadCorrupted(.badMagic))
+            }
             cursor += magic.count
+            return version
         }
 
         private mutating func u8() throws(AnywhereError) -> UInt8 {
@@ -261,41 +318,46 @@ nonisolated final class DomainRouter: Sendable {
 
         private mutating func readUUID() throws(AnywhereError) -> UUID {
             guard cursor + 16 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
-            let u = UUID(uuid: (bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
-                                bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7],
-                                bytes[cursor + 8], bytes[cursor + 9], bytes[cursor + 10], bytes[cursor + 11],
-                                bytes[cursor + 12], bytes[cursor + 13], bytes[cursor + 14], bytes[cursor + 15]))
+            let uuid = UUID(uuid: (
+                bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
+                bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7],
+                bytes[cursor + 8], bytes[cursor + 9], bytes[cursor + 10], bytes[cursor + 11],
+                bytes[cursor + 12], bytes[cursor + 13], bytes[cursor + 14], bytes[cursor + 15])
+            )
             cursor += 16
-            return u
+            return uuid
         }
     }
 
-    // MARK: - Matching (public API)
+    // MARK: - Matching
 
     var hasRules: Bool {
         routingState.withLock { $0.matcher.hasRules }
     }
-    
+
     func matchDomain(_ domain: String) -> Match? {
-        guard !domain.isEmpty else { return nil }
-        // Lowercase once, outside the lock, and share the UTF-8 bytes across tiers.
+        matchDomainVersioned(domain).match
+    }
+
+    func matchDomainVersioned(_ domain: String) -> (match: Match?, version: UInt64) {
+        guard !domain.isEmpty else { return (nil, currentRulesVersion) }
         var lowered = RouteMatching.asciiLowercasedIfNeeded(domain)
         return routingState.withLock { state in
             let payload = lowered.withUTF8 { state.matcher.matchDomain(bytes: $0) }
-            return state.match(resolving: payload)
+            return (state.match(resolving: payload), state.version)
         }
     }
-    
+
     func matchIP(_ ip: String) -> Match? {
         routingState.withLock { state in
             let payload = state.matcher.matchIP(ip)
             return state.match(resolving: payload)
         }
     }
-    
+
     func resolveConfiguration(action: RouteTarget) -> ProxyConfiguration? {
         switch action {
-        case .direct, .reject:
+        case .default, .defaultProxy, .direct, .reject:
             return nil
         case .proxy(let id):
             return routingState.withLock { $0.configurationMap[id] }

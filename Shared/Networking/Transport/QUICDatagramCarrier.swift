@@ -6,93 +6,199 @@
 //
 
 import Foundation
-import Network
+import Synchronization
 import Darwin
-
-nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
-
-nonisolated protocol QUICDatagramEngine: AnyObject, Sendable {
-    func send(_ datagram: Data)
-    func close()
-}
+import Network
 
 nonisolated struct QUICDatagramEngineSink: Sendable {
-    fileprivate let bridge: NGTCP2ConcurrencyBridge
     fileprivate weak var carrier: QUICDatagramCarrier?
 
     func ready(interfaceType: NWInterface.InterfaceType?) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleReady(interfaceType: interfaceType) } }
+        carrier?.update { $0.handleReady(interfaceType: interfaceType) }
     }
 
     func waiting(_ code: Int32) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleWaiting(code) } }
+        carrier?.update { $0.handleWaiting(code) }
     }
 
     func failed(_ code: Int32) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.deliverError(code) } }
+        carrier?.update { $0.deliverError(code) }
     }
 
     func viabilityLost() {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleViabilityLost() } }
+        carrier?.update { $0.handleViabilityLost() }
     }
 
     func betterPath() {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleBetterPath() } }
+        carrier?.update { $0.handleBetterPath() }
     }
 
     func pathChanged(interfaceType: NWInterface.InterfaceType?) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handlePathUpdate(interfaceType: interfaceType) } }
+        carrier?.update { $0.handlePathUpdate(interfaceType: interfaceType) }
     }
 
     func packet(_ datagram: Data) {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.deliverPacket(datagram) } }
+        carrier?.deliverPacket(datagram)
     }
 
     func finished() {
-        bridge.enqueue { [self] in carrier?.assumeIsolated { $0.handleEngineFinished() } }
+        carrier?.update { $0.handleEngineFinished() }
     }
 }
 
-actor QUICDatagramCarrier {
-    nonisolated var unownedExecutor: UnownedSerialExecutor {
-        bridge.executor.asUnownedSerialExecutor()
+nonisolated final class QUICDatagramCarrier: Sendable {
+    private let state: QUICState<QUICDatagramCarrierCore>
+
+    init(obfuscator: QUICPacketObfuscator?, executor: BridgeExecutor) {
+        state = QUICState(QUICDatagramCarrierCore(obfuscator: obfuscator, executor: executor), queue: executor.queue)
+        state.update { $0.owner = self }
     }
 
-    private let bridge: NGTCP2ConcurrencyBridge
+    fileprivate func update<T: Sendable>(_ body: (QUICDatagramCarrierCore) -> T) -> T { state.update(body) }
+    var currentInterfaceType: NWInterface.InterfaceType? { state.read { $0.currentInterfaceType } }
+    var onPathDown: (@Sendable () -> Void)? {
+        get { state.read { $0.onPathDown } }
+        set { update { $0.onPathDown = newValue } }
+    }
+    var onBetterPath: (@Sendable () -> Void)? {
+        get { state.read { $0.onBetterPath } }
+        set { update { $0.onBetterPath = newValue } }
+    }
+    var onReady: (@Sendable () -> Void)? {
+        get { state.read { $0.onReady } }
+        set {
+            update { core in
+                if core.isReady, let newValue { core.publish(newValue) }
+                else { core.onReady = newValue }
+            }
+        }
+    }
+    func connect(remoteAddr: sockaddr_storage, localAddr: inout sockaddr_storage) throws {
+        let result: Result<sockaddr_storage, Error> = update { core in
+            Result {
+                var local = sockaddr_storage()
+                try core.connect(remoteAddr: remoteAddr, localAddr: &local)
+                return local
+            }
+        }
+        localAddr = try result.get()
+    }
+    func startReceiving(onPacket: @escaping @Sendable (Data) -> Void, onError: @escaping @Sendable (Int32) -> Void) {
+        update { $0.startReceiving(onPacket: onPacket, onError: onError) }
+    }
+    func send(_ datagrams: [Data]) {
+        guard !datagrams.isEmpty else { return }
+        state.read { $0.sendingEngine }?.send(datagrams)
+    }
+    func close() { update { $0.close() } }
+
+    fileprivate func deliverPacket(_ packet: Data) {
+        state.read { $0.receivingPacketHandler }?(packet)
+    }
+}
+
+nonisolated final class QUICDatagramCarrierCore: QUICPublishingState {
+    weak var owner: QUICDatagramCarrier?
+    var publications: [@Sendable () -> Void] = []
+    func publish(_ action: @escaping @Sendable () -> Void) { publications.append(action) }
 
     private let obfuscator: QUICPacketObfuscator?
+    private let executor: BridgeExecutor
 
-    private var engine: (any QUICDatagramEngine)?
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case connecting(QUICDatagramEngine)
+        case ready(QUICDatagramEngine)
+        case failed(Int32)
+        case finished
+        case closed
+
+        var engine: QUICDatagramEngine? {
+            switch self {
+            case .connecting(let engine), .ready(let engine): engine
+            case .idle, .failed, .finished, .closed: nil
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .idle: "idle"
+            case .connecting: "connecting"
+            case .ready: "ready"
+            case .failed(let code): "failed(\(code))"
+            case .finished: "finished"
+            case .closed: "closed"
+            }
+        }
+
+        var isTerminal: Bool {
+            switch self {
+            case .failed, .finished, .closed: true
+            case .idle, .connecting, .ready: false
+            }
+        }
+
+        var isClosed: Bool {
+            if case .closed = self { true } else { false }
+        }
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .ready):
+                return true
+            case (_, .failed), (_, .finished):
+                return !old.isTerminal
+            case (_, .closed):
+                return !old.isClosed
+            default:
+                return false
+            }
+        }
+    }
+    private var phase: Phase = .idle
 
     private var packetHandler: (@Sendable (Data) -> Void)?
-    private var reveiceErrorHandler: (@Sendable (Int32) -> Void)?
+    private var receiveErrorHandler: (@Sendable (Int32) -> Void)?
 
     var onPathDown: (@Sendable () -> Void)?
     var onBetterPath: (@Sendable () -> Void)?
-    var onReady: (() -> Void)?
+    var onReady: (@Sendable () -> Void)?
 
-    private var ready = false
-    private var closed = false
     private var flowSlot: FlowSlot?
 
     private var cachedInterfaceType: NWInterface.InterfaceType?
 
-    init(bridge: NGTCP2ConcurrencyBridge, obfuscator: QUICPacketObfuscator?) {
-        self.bridge = bridge
+    init(obfuscator: QUICPacketObfuscator?, executor: BridgeExecutor) {
         self.obfuscator = obfuscator
+        self.executor = executor
     }
 
     deinit {
-        engine?.close()
+        phase.engine?.close()
     }
 
     var currentInterfaceType: NWInterface.InterfaceType? {
         cachedInterfaceType
     }
 
+    var isReady: Bool { if case .ready = phase { true } else { false } }
+
+    var sendingEngine: QUICDatagramEngine? { phase.engine }
+
+    var receivingPacketHandler: (@Sendable (Data) -> Void)? {
+        switch phase {
+        case .connecting, .ready: packetHandler
+        case .idle, .failed, .finished, .closed: nil
+        }
+    }
+
     // MARK: - Connect
 
     func connect(remoteAddr: sockaddr_storage, localAddr: inout sockaddr_storage) throws {
+        guard case .idle = phase else {
+            throw AnywhereError.quic(.connectionFailed(detail: "carrier is \(phase.label)"))
+        }
         guard let endpoint = Self.nwEndpoint(from: remoteAddr) else {
             throw AnywhereError.quic(.connectionFailed(detail: "invalid remote address"))
         }
@@ -100,12 +206,11 @@ actor QUICDatagramCarrier {
 
         flowSlot = FlowSlot(context: "[QUIC] Datagram carrier")
 
-        let sink = QUICDatagramEngineSink(bridge: bridge, carrier: self)
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            engine = ModernQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)
-        } else {
-            engine = LegacyQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)
-        }
+        let sink = QUICDatagramEngineSink(carrier: owner)
+        Phase.transition(
+            &phase,
+            to: .connecting(QUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, executor: executor, sink: sink))
+        )
     }
 
     // MARK: - Receive
@@ -114,66 +219,77 @@ actor QUICDatagramCarrier {
         onPacket: @escaping @Sendable (Data) -> Void,
         onError: @escaping @Sendable (Int32) -> Void
     ) {
+        let deadCode: Int32?
+        switch phase {
+        case .failed(let code):
+            deadCode = code
+        case .finished, .closed:
+            deadCode = POSIXErrorCode.ECONNABORTED.rawValue
+        case .idle, .connecting, .ready:
+            deadCode = nil
+        }
+        if let deadCode {
+            publish { onError(deadCode) }
+            return
+        }
         packetHandler = onPacket
-        reveiceErrorHandler = onError
-    }
-
-    // MARK: - Send
-
-    func send(_ datagram: Data) {
-        guard !datagram.isEmpty, let engine else { return }
-        engine.send(datagram)
+        receiveErrorHandler = onError
     }
 
     // MARK: - Close
 
     func close() {
-        guard !closed else { return }
-        closed = true
+        if case .closed = phase { return }
         releaseFlowSlot()
-        engine?.close()
-        engine = nil
+        phase.engine?.close()
+        Phase.transition(&phase, to: .closed)
         packetHandler = nil
-        reveiceErrorHandler = nil
+        receiveErrorHandler = nil
         onPathDown = nil
         onBetterPath = nil
         onReady = nil
-        ready = false
     }
 
     // MARK: - State handling
 
     fileprivate func handleReady(interfaceType: NWInterface.InterfaceType?) {
-        guard !closed, !ready else { return }
-        ready = true
+        guard case .connecting(let engine) = phase,
+              Phase.transition(&phase, to: .ready(engine)) else { return }
         cachedInterfaceType = interfaceType
         if let onReady {
             self.onReady = nil
-            onReady()
+            publish { onReady() }
         }
     }
 
     fileprivate func handleWaiting(_ code: Int32) {
-        guard !closed else { return }
-        if ready, let onPathDown {
-            onPathDown()
-        } else {
-            deliverError(code)
+        switch phase {
+        case .ready:
+            if let onPathDown {
+                publish { onPathDown() }
+            } else {
+                enterFailed(code)
+            }
+        case .connecting:
+            enterFailed(code)
+        case .idle, .failed, .finished, .closed:
+            break
         }
     }
 
     fileprivate func handleViabilityLost() {
-        guard !closed, ready else { return }
+        guard case .ready = phase else { return }
         if let onPathDown {
-            onPathDown()
+            publish { onPathDown() }
         } else {
-            deliverError(POSIXErrorCode.ENETDOWN.rawValue)
+            enterFailed(POSIXErrorCode.ENETDOWN.rawValue)
         }
     }
 
     fileprivate func handleBetterPath() {
-        guard !closed, ready else { return }
-        onBetterPath?()
+        guard case .ready = phase else { return }
+        let handler = onBetterPath
+        publish { handler?() }
     }
 
     fileprivate func handlePathUpdate(interfaceType: NWInterface.InterfaceType?) {
@@ -181,21 +297,41 @@ actor QUICDatagramCarrier {
     }
 
     fileprivate func handleEngineFinished() {
-        engine = nil
         releaseFlowSlot()
+        switch phase {
+        case .idle, .failed, .finished, .closed:
+            return
+        case .connecting, .ready:
+            if case .ready(let engine) = phase, let onPathDown {
+                engine.close()
+                Phase.transition(&phase, to: .finished)
+                publish { onPathDown() }
+            } else {
+                enterFailed(POSIXErrorCode.ECONNABORTED.rawValue)
+            }
+        }
     }
 
-    // MARK: - Delivery
-
-    fileprivate func deliverPacket(_ packet: Data) {
-        guard !closed, let packetHandler else { return }
-        packetHandler(packet)
-    }
+    // MARK: - Errors
 
     fileprivate func deliverError(_ code: Int32) {
-        guard !closed, let handler = reveiceErrorHandler else { return }
-        reveiceErrorHandler = nil
-        handler(code)
+        enterFailed(code)
+    }
+
+    private func enterFailed(_ code: Int32) {
+        switch phase {
+        case .failed, .finished, .closed:
+            return
+        case .idle, .connecting, .ready:
+            break
+        }
+        phase.engine?.close()
+        Phase.transition(&phase, to: .failed(code))
+        releaseFlowSlot()
+        if let handler = receiveErrorHandler {
+            receiveErrorHandler = nil
+            publish { handler(code) }
+        }
     }
 
     private func releaseFlowSlot() {
@@ -258,24 +394,43 @@ actor QUICDatagramCarrier {
     }
 }
 
-// MARK: - Modern engine
+// MARK: - Engine
 
-@available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)
-nonisolated final class ModernQUICDatagramEngine: QUICDatagramEngine, Sendable {
-
+nonisolated final class QUICDatagramEngine: Sendable {
     private static let receiveConcurrency = 16
 
-    private let connection: NetworkConnection<UDP>
+    private enum PreludePhase {
+        case initial, sending, sent, failed
+    }
+
+    private struct PreludeState {
+        var phase: PreludePhase
+        var pending: [Data]
+    }
+
+    private enum SendAction {
+        case start, send, overflow, stop
+    }
+
+    private let connection: NWConnection
     private let obfuscator: QUICPacketObfuscator?
-    private let driverTask: Task<Void, Never>
+    private let executor: BridgeExecutor
+    private let sink: QUICDatagramEngineSink
+    private let preludeState = Mutex(PreludeState(phase: .initial, pending: []))
 
-    init(endpoint: NWEndpoint, obfuscator: QUICPacketObfuscator?, sink: QUICDatagramEngineSink) {
-        let connection = NetworkConnection(to: endpoint) { UDP() }
+    private let terminated = OneShotLatch()
 
-        connection.onStateUpdate { connection, state in
+    init(endpoint: NWEndpoint, obfuscator: QUICPacketObfuscator?, executor: BridgeExecutor, sink: QUICDatagramEngineSink) {
+        let connection = NWConnection(to: endpoint, using: .udp)
+        self.connection = connection
+        self.obfuscator = obfuscator
+        self.executor = executor
+        self.sink = sink
+
+        connection.stateUpdateHandler = { [weak connection] state in
             switch state {
             case .ready:
-                sink.ready(interfaceType: connection.currentPath?.availableInterfaces.first?.type)
+                sink.ready(interfaceType: connection?.currentPath?.availableInterfaces.first?.type)
             case .failed(let error):
                 sink.failed(AnywhereError.errnoCode(from: error))
             case .waiting(let error):
@@ -284,114 +439,153 @@ nonisolated final class ModernQUICDatagramEngine: QUICDatagramEngine, Sendable {
                 break
             }
         }
-        connection.onViabilityUpdate { _, viable in
+        connection.viabilityUpdateHandler = { viable in
             guard !viable else { return }
             sink.viabilityLost()
         }
-        connection.onBetterPathUpdate { _, better in
+        connection.betterPathUpdateHandler = { better in
             guard better else { return }
             sink.betterPath()
         }
-        connection.onPathUpdate { _, path in
+        connection.pathUpdateHandler = { path in
             sink.pathChanged(interfaceType: path.availableInterfaces.first?.type)
         }
 
-        self.connection = connection
-        self.obfuscator = obfuscator
-        self.driverTask = Task { [obfuscator] in
-            await Self.runDriver(connection: connection, sink: sink, obfuscator: obfuscator)
+        connection.start(queue: executor.queue)
+        for _ in 0..<Self.receiveConcurrency {
+            Self.armReceive(on: connection, obfuscator: obfuscator, sink: sink, terminated: terminated)
         }
     }
 
     deinit {
-        driverTask.cancel()
+        connection.cancel()
+    }
+    
+    func send(_ datagrams: [Data]) {
+        if executor.isOnQueue {
+            transmit(datagrams)
+        } else {
+            executor.queue.async { [self] in transmit(datagrams) }
+        }
     }
 
-    func send(_ datagram: Data) {
-        Task { [connection, obfuscator] in
-            await Self.transmit(datagram, over: connection, obfuscator: obfuscator)
+    private func transmit(_ datagrams: [Data]) {
+        guard let obfuscator = obfuscator as? QUICPreludeCapable else {
+            transmitPackets(datagrams)
+            return
+        }
+        guard !terminated.isClaimed else { return }
+        let action = preludeState.withLock { state -> SendAction in
+            switch state.phase {
+            case .initial, .sending:
+                guard datagrams.count <= QUICConnectionCore.maxQueuedTransportDatagrams - state.pending.count else {
+                    return .overflow
+                }
+                let action: SendAction = state.phase == .initial ? .start : .stop
+                state.phase = .sending
+                state.pending.append(contentsOf: datagrams)
+                return action
+            case .sent:
+                return .send
+            case .failed:
+                return .stop
+            }
+        }
+        switch action {
+        case .start:
+            do {
+                let prelude = try obfuscator.makePrelude()
+                guard !terminated.isClaimed else { return }
+                connection.send(content: prelude, completion: .contentProcessed { [weak self] error in
+                    self?.finishPrelude(error)
+                })
+            } catch {
+                failPrelude(EIO)
+            }
+        case .send:
+            transmitPackets(datagrams)
+        case .overflow:
+            failPrelude(ENOBUFS)
+        case .stop:
+            break
+        }
+    }
+
+    private func finishPrelude(_ error: NWError?) {
+        if let error {
+            failPrelude(AnywhereError.errnoCode(from: error))
+            return
+        }
+        let pending = preludeState.withLock { state -> [Data]? in
+            guard state.phase == .sending else { return nil }
+            state.phase = .sent
+            let pending = state.pending
+            state.pending = []
+            return pending
+        }
+        if let pending, !terminated.isClaimed { transmitPackets(pending) }
+    }
+
+    private func failPrelude(_ code: Int32) {
+        let failed = preludeState.withLock { state -> Bool in
+            guard state.phase == .initial || state.phase == .sending else { return false }
+            state.phase = .failed
+            state.pending = []
+            return true
+        }
+        if failed, !terminated.isClaimed { sink.failed(code) }
+    }
+
+    private func transmitPackets(_ datagrams: [Data]) {
+        connection.batch {
+            for datagram in datagrams {
+                if let obfuscator {
+                    let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+                    for wire in wireDatagrams {
+                        connection.send(content: wire, completion: .contentProcessed { _ in })
+                    }
+                } else {
+                    connection.send(content: datagram, completion: .contentProcessed { _ in })
+                }
+            }
         }
     }
 
     func close() {
-        driverTask.cancel()
-    }
-
-    @concurrent
-    private static func transmit(
-        _ datagram: Data,
-        over connection: NetworkConnection<UDP>,
-        obfuscator: QUICPacketObfuscator?
-    ) async {
-        if let obfuscator {
-            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-            for wire in wireDatagrams {
-                try? await connection.send(wire)
-            }
-        } else {
-            try? await connection.send(datagram)
+        terminated.claim()
+        preludeState.withLock { state in
+            state.phase = .failed
+            state.pending = []
         }
+        let connection = connection
+        executor.queue.async { connection.cancel() }
     }
 
-    // MARK: - Driver
-
-    @concurrent
-    private static func runDriver(
-        connection: NetworkConnection<UDP>,
+    private static func armReceive(
+        on connection: NWConnection,
+        obfuscator: QUICPacketObfuscator?,
         sink: QUICDatagramEngineSink,
-        obfuscator: QUICPacketObfuscator?
-    ) async {
-        do {
-            try await Self.runReceiveLoop(
-                connection,
-                sink: sink,
-                obfuscator: obfuscator
-            )
-        } catch {
-
-        }
-        sink.finished()
-    }
-
-    private static func runReceiveLoop(
-        _ connection: NetworkConnection<UDP>,
-        sink: QUICDatagramEngineSink,
-        obfuscator: QUICPacketObfuscator?
-    ) async throws {
-        do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<receiveConcurrency {
-                    group.addTask {
-                        try await Self.drainReceives(
-                            connection,
-                            sink: sink,
-                            obfuscator: obfuscator
-                        )
-                    }
+        terminated: OneShotLatch
+    ) {
+        connection.receiveMessage { content, _, _, error in
+            if let error {
+                if terminated.claim() {
+                    sink.failed(AnywhereError.errnoCode(from: error))
+                    sink.finished()
                 }
-                try await group.next()
+                return
             }
-        } catch {
-            sink.failed(AnywhereError.errnoCode(from: error))
-            throw error
-        }
-    }
-
-    @concurrent
-    private static func drainReceives(
-        _ connection: NetworkConnection<UDP>,
-        sink: QUICDatagramEngineSink,
-        obfuscator: QUICPacketObfuscator?
-    ) async throws {
-        while true {
-            let message = try await connection.receive()
-            var packet = message.content
-            guard !packet.isEmpty else { continue }
-            if let obfuscator {
-                guard let opened = obfuscator.open(packet) else { continue }
-                packet = opened
+            if let content, !content.isEmpty {
+                if let obfuscator {
+                    if let opened = obfuscator.open(content) {
+                        sink.packet(opened)
+                    }
+                } else {
+                    sink.packet(content)
+                }
             }
-            sink.packet(packet)
+            guard !terminated.isClaimed else { return }
+            Self.armReceive(on: connection, obfuscator: obfuscator, sink: sink, terminated: terminated)
         }
     }
 }

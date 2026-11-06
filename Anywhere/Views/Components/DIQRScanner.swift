@@ -177,7 +177,7 @@ fileprivate struct DIQRScannerView: View {
 
     @ViewBuilder
     private func ScannerView(_ size: CGSize) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 40, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 40)
         
         ZStack {
             if let permissionState = camera.permissionState {
@@ -334,7 +334,7 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                     session.startRunning()
                 }
             } catch {
-                logger.report("Camera configuration failed", error: error)
+                logger.report("[QR] Camera configuration failed", error: error)
             }
         }
         

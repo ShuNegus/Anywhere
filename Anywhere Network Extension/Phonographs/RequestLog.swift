@@ -9,17 +9,20 @@ import Foundation
 import Synchronization
 
 nonisolated final class RequestLog: Sendable {
-
     typealias Entry = TunnelRequestEntry
 
     private let entries = Mutex<[Entry]>([])
+    private let defaultRouteTarget = Mutex<RouteTarget>(.direct)
     
+    func setDefaultRouteTarget(_ target: RouteTarget) {
+        defaultRouteTarget.withLock { $0 = target }
+    }
+
     func record(
         protocol: TunnelRequestProtocol,
         host: String,
         port: UInt16,
         routeTarget: RouteTarget,
-        viaDefault: Bool = false,
         ruleSetName: String? = nil
     ) {
         let now = CFAbsoluteTimeGetCurrent()
@@ -29,16 +32,15 @@ nonisolated final class RequestLog: Sendable {
             host: host,
             port: port,
             routeTarget: routeTarget,
-            viaDefault: viaDefault,
-            ruleSetName: ruleSetName
+            ruleSetName: ruleSetName,
+            defaultRouteTarget: defaultRouteTarget.withLock { $0 }
         )
         entries.withLock { entries in
             entries.append(entry)
             Self.compact(&entries, now: now)
         }
     }
-
-    /// Returns all entries within the retention window; safe from any thread.
+    
     func snapshot() -> [Entry] {
         let now = CFAbsoluteTimeGetCurrent()
         return entries.withLock { entries in

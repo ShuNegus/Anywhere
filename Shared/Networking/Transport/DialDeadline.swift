@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import Synchronization
 
 nonisolated func withDialDeadline<T: Sendable>(
     _ duration: Duration,
@@ -31,7 +30,11 @@ nonisolated func withDialDeadline<T: Sendable>(
             }
         }
         group.addTask {
-            do { try await Task.sleep(for: duration) } catch { return nil }
+            do { try await Task.sleep(for: duration, precision: .relaxed) } catch {
+                guard winner.claim() else { return nil }
+                onExpiry()
+                throw CancellationError()
+            }
             guard winner.claim() else { return nil }
             onExpiry()
             throw makeError()
@@ -45,9 +48,7 @@ nonisolated func withDialDeadline<T: Sendable>(
 }
 
 nonisolated final class RaceClaim: Sendable {
-    private let claimed = Atomic<Bool>(false)
+    private let claimed = OneShotLatch()
 
-    func claim() -> Bool {
-        !claimed.exchange(true, ordering: .relaxed)
-    }
+    func claim() -> Bool { claimed.claim() }
 }

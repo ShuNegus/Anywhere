@@ -8,75 +8,106 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "HysteriaUDPConnection")
-
 actor HysteriaUDPConnection {
 
     private let session: HysteriaSession
     private let destination: String
 
-    /// Readiness mirror for the nonisolated `isConnected`/send-guard.
-    private nonisolated let _isReady = Atomic<Bool>(false)
-    /// Assigned once in `open()`, read from the send path.
-    private nonisolated let _sessionID = Atomic<UInt32>(0)
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case opening
+        case open(sid: UInt32)
+        case closed
 
-    /// Inbound datagram messages from the demux. The producer (`yield`/`finish`) is `Sendable` and
-    /// driven on the ngtcp2 queue; `receiveRaw()` is the single consumer and reassembles, so the
-    /// defrag slots are plain actor-isolated state.
-    private let rawInbox = AsyncInbox<HysteriaProtocol.UDPMessage>()
+        var isClosed: Bool {
+            if case .closed = self { true } else { false }
+        }
 
-    /// Per-PacketID reassembly slot; fragments arrive interleaved, so each PacketID owns one.
-    /// Evicted on completion, TTL expiry, or cap overflow.
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .opening),
+                 (.opening, .open):
+                return true
+            case (_, .closed):
+                return !old.isClosed
+            default:
+                return false
+            }
+        }
+    }
+    private nonisolated let phase = Mutex<Phase>(.idle)
+    
+    private let rawInbox = AsyncInbox<HysteriaProtocol.UDPMessage>(capacity: 256)
+    
     private struct DefragSlot {
         var fragments: [Data?]
         var received: Int
         let fragmentCount: Int
-        let createdAt: DispatchTime
+        let createdAt: UInt64
     }
     private var defragSlots: [UInt16: DefragSlot] = [:]
     private nonisolated static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
-    /// Concurrent reassembly cap; 32 bounds worst-case memory to ~11 MB while keeping eviction rare.
-    private nonisolated static let maxDefragSlots = 32
-
-    /// Monotonic PacketID, wrapping 0xFFFF → 1 and skipping 0 ("unfragmented" to some servers);
-    /// colliding IDs would merge two packets into one corrupt defrag slot. Allocated in `newPacketID`,
-    /// whose actor-isolated synchronous execution gives each concurrent send a distinct id.
+    private nonisolated static let maxDefragSlots = 4
+    
     private var nextPacketID: UInt16 = 1
-
-    /// Guards `teardown()` so the session is released exactly once.
-    private var closed = false
 
     init(session: HysteriaSession, destination: String) {
         self.session = session
         self.destination = destination
     }
 
-    nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
+    nonisolated var isConnected: Bool {
+        phase.withLock { if case .open = $0 { true } else { false } }
+    }
     nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
     nonisolated var deliversDatagrams: Bool { true }
 
-    private var sessionID: UInt32 {
-        get { _sessionID.load(ordering: .relaxed) }
-        set { _sessionID.store(newValue, ordering: .relaxed) }
+    private nonisolated var currentSID: UInt32? {
+        phase.withLock { if case .open(let sid) = $0 { sid } else { nil } }
+    }
+
+    private nonisolated func closeLifecycle() -> UInt32? {
+        phase.withLock { state in
+            let sid: UInt32?
+            switch state {
+            case .closed: return nil
+            case .open(let s): sid = s
+            case .idle, .opening: sid = nil
+            }
+            Phase.transition(&state, to: .closed)
+            return sid
+        }
     }
 
     // MARK: - Open
 
     func open() async throws {
-        let sid = try await session.registerUDPSession(self)
-        sessionID = sid
-        _isReady.store(true, ordering: .relaxed)
+        let begin = phase.withLock { Phase.transition(&$0, to: .opening) }
+        guard begin else { throw AnywhereError.proxy(.hysteria, .streamClosed) }
+
+        let sid: UInt32
+        do {
+            sid = try await session.registerUDPSession(self)
+        } catch {
+            _ = closeLifecycle()
+            throw error
+        }
+        let adopted = phase.withLock { Phase.transition(&$0, to: .open(sid: sid)) }
+        guard adopted else {
+            session.releaseUDPSession(sid)
+            throw AnywhereError.proxy(.hysteria, .streamClosed)
+        }
     }
 
-    // MARK: - Demux feed (nonisolated; driven on the ngtcp2 queue)
+    // MARK: - Demux feed
 
     nonisolated func feedDatagram(_ message: HysteriaProtocol.UDPMessage) {
         rawInbox.yield(message)
     }
 
     nonisolated func handleSessionError(_ error: Error) {
-        _isReady.store(false, ordering: .relaxed)
         rawInbox.finish(throwing: error)
+        _ = closeLifecycle()
     }
 
     // MARK: - ProxyConnection overrides
@@ -90,12 +121,11 @@ actor HysteriaUDPConnection {
             } else {
                 assembled = assembleFragment(message)
             }
-            // Drop empty payloads: an empty datagram would look like EOF to the reader.
             guard let payload = assembled, !payload.isEmpty else { continue }
             return payload
         }
     }
-    
+
     private func nextMessage() async throws -> HysteriaProtocol.UDPMessage? {
         try await rawInbox.next()
     }
@@ -103,13 +133,11 @@ actor HysteriaUDPConnection {
     private func assembleFragment(_ message: HysteriaProtocol.UDPMessage) -> Data? {
         guard message.fragID < message.fragCount, message.fragCount > 0 else { return nil }
 
-        let now = DispatchTime.now()
-        let nowNs = now.uptimeNanoseconds
-
-        // Lazy TTL eviction: a full-dict scan per fragment is noticeable at the cap.
+        let nowNs = MonotonicClock.nanoseconds
+        
         let existing = defragSlots[message.packetID]
         let existingIsExpired = existing.map {
-            nowNs &- $0.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+            nowNs &- $0.createdAt > Self.defragSlotTTLNanos
         } ?? false
 
         var slot: DefragSlot
@@ -117,16 +145,14 @@ actor HysteriaUDPConnection {
            existing.fragmentCount == Int(message.fragCount) {
             slot = existing
         } else {
-            // New slot at cap: evict expired slots first, else the oldest.
             if existing == nil || existingIsExpired,
                defragSlots.count >= Self.maxDefragSlots {
                 let victim: UInt16? = defragSlots
                     .lazy
                     .map { (key: $0.key, slot: $0.value) }
                     .min { lhs, rhs in
-                        // Prefer expired slots over live ones, then oldest.
-                        let lhsExpired = nowNs &- lhs.slot.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
-                        let rhsExpired = nowNs &- rhs.slot.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+                        let lhsExpired = nowNs &- lhs.slot.createdAt > Self.defragSlotTTLNanos
+                        let rhsExpired = nowNs &- rhs.slot.createdAt > Self.defragSlotTTLNanos
                         if lhsExpired != rhsExpired { return lhsExpired }
                         return lhs.slot.createdAt < rhs.slot.createdAt
                     }?.key
@@ -138,7 +164,7 @@ actor HysteriaUDPConnection {
                 fragments: Array(repeating: nil, count: Int(message.fragCount)),
                 received: 0,
                 fragmentCount: Int(message.fragCount),
-                createdAt: now
+                createdAt: nowNs
             )
         }
 
@@ -160,25 +186,16 @@ actor HysteriaUDPConnection {
         }
         return full
     }
-
-    /// Wraps `data` in a Hysteria UDP datagram, fragmenting at the QUIC DATAGRAM MTU.
+    
     func sendRaw(_ data: Data) async throws {
-        // The wire format requires ≥1 data byte after the address; the server discards zero-byte payloads.
         guard !data.isEmpty else { return }
-        guard _isReady.load(ordering: .relaxed) else {
-            throw AnywhereError.proxy(.hysteria, .streamClosed)
-        }
-        // No send lock: actor isolation makes PacketID allocation atomic (distinct ids per
-        // concurrent send), and QUIC writes each fragment batch atomically. UDP tolerates
-        // whole-datagram reordering, so nothing further needs serializing.
         try await attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1)
     }
-
-    /// Fragments `data` and submits to QUIC; on `datagramTooLarge` (PMTU shrank mid-send)
-    /// retries once with the bound from the error.
+    
     private func attemptSend(data: Data, maxSizeOverride: Int?, retriesLeft: Int) async throws {
-        // maxSize 0 (DATAGRAM unsupported / MTU collapsed) is permanent for this fixed
-        // destination — surface a terminal error.
+        guard let sessionID = currentSID else {
+            throw AnywhereError.proxy(.hysteria, .streamClosed)
+        }
         let maxSize: Int
         if let maxSizeOverride {
             maxSize = maxSizeOverride
@@ -206,7 +223,7 @@ actor HysteriaUDPConnection {
         } catch {
             if case AnywhereError.quic(.datagramTooLarge(let maxBound)) = error,
                retriesLeft > 0 {
-                guard _isReady.load(ordering: .relaxed) else {
+                guard isConnected else {
                     throw AnywhereError.proxy(.hysteria, .streamClosed)
                 }
                 try await attemptSend(data: data, maxSizeOverride: maxBound, retriesLeft: retriesLeft - 1)
@@ -217,21 +234,19 @@ actor HysteriaUDPConnection {
     }
 
     nonisolated func cancel() {
-        _isReady.store(false, ordering: .relaxed)
         rawInbox.finish()
-        Task { await self.teardown() }
+        if let sid = closeLifecycle() {
+            session.releaseUDPSession(sid)
+        }
+        Task { await self.clearDefragSlots() }
     }
 
-    private func teardown() {
-        guard !closed else { return }
-        closed = true
-        session.releaseUDPSession(_sessionID.load(ordering: .relaxed))
+    private func clearDefragSlots() {
         defragSlots.removeAll()
     }
 
     // MARK: - Helpers
-
-    /// Next PacketID. Actor-isolated, so concurrent sends never collide.
+    
     private func newPacketID() -> UInt16 {
         let pid = nextPacketID
         nextPacketID = nextPacketID == UInt16.max ? 1 : nextPacketID + 1

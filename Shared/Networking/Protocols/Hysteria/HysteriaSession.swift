@@ -8,19 +8,31 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "HysteriaSession")
-
 nonisolated final class HysteriaSession: Sendable {
+    private enum Phase: PhaseTransitionable {
+        case idle, connecting, authenticating, ready, closed
 
-    enum State { case idle, connecting, authenticating, ready, closed }
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .authenticating),
+                 (.authenticating, .ready):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
 
     private let quic: QUICConnection
-    private let configuration: HysteriaConfiguration
-    
-    private struct Session {
-        var state: State = .idle
-        var closed = false
-        
+    private let configuration: HysteriaRuntimeConfiguration
+    private let closesWhenDrained: Bool
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .idle
+
         var authStreamID: Int64 = -1
         var authBuffer = Data()
         var authHeadersReceived = false
@@ -30,48 +42,56 @@ nonisolated final class HysteriaSession: Sendable {
 
         var udpSessions: [UInt32: HysteriaUDPConnection] = [:]
         var nextUDPSessionID: UInt32 = 1
-        
-        var idleSince: ContinuousClock.Instant?
-        var idleSweepTask: Task<Void, Never>?
+
+        var idleClose: DeadlineToken?
+        var idleGeneration: UInt64 = 0
+        var carriedConnection = false
+        var authDeadline: DeadlineToken?
 
         var udpSupported = false
         var serverRxBytesPerSec: UInt64 = 0
+
+        var onClose: (@Sendable () -> Void)?
     }
-    private let lock = Mutex(Session())
-    
+    private let state = Mutex(State())
+
     private static let authBufferMaxBytes = 16 * 1024
-    
+
     private static let idleCloseDelay: TimeInterval = 60
-    
+
+    private static let authResponseTimeout: Duration = .seconds(10)
+
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
 
     // MARK: Pool-visible state
-    
-    private struct PoolState {
-        var isClosed = false
-        var tcpCount = 0
-        var udpCount = 0
-        var onClose: (@Sendable () -> Void)?
-    }
-    private let _poolState = Mutex(PoolState())
 
     var isClosed: Bool {
-        _poolState.withLock { $0.isClosed }
+        state.withLock { $0.phase == .closed }
     }
 
     var hasActiveConnections: Bool {
-        _poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
+        state.withLock { !$0.tcpStreams.isEmpty || !$0.udpSessions.isEmpty }
     }
-    
+
     func setOnClose(_ hook: @escaping @Sendable () -> Void) {
-        _poolState.withLock { $0.onClose = hook }
+        let fireNow: Bool = state.withLock { session in
+            guard session.phase != .closed else { return true }
+            session.onClose = hook
+            return false
+        }
+        if fireNow { hook() }
     }
 
     // MARK: - Init
-    
-    init(configuration: HysteriaConfiguration, transport: QUICDatagramTransport? = nil) {
+
+    init(
+        configuration: HysteriaRuntimeConfiguration,
+        transport: QUICDatagramTransport? = nil,
+        closesWhenDrained: Bool = false
+    ) {
         self.configuration = configuration
+        self.closesWhenDrained = closesWhenDrained
         let obfuscator: QUICPacketObfuscator?
         switch configuration.obfuscation {
         case .salamander(let password):
@@ -99,24 +119,18 @@ nonisolated final class HysteriaSession: Sendable {
     // MARK: - Lifecycle
 
     func ensureReady() async throws {
-        let begin: Bool = lock.withLock { session in
-            guard session.state == .idle else { return false }
-            session.state = .connecting
-            return true
-        }
+        let begin: Bool = state.withLock { $0.transition(to: .connecting) }
         if begin { startConnection() }
         try await readyTask.value
     }
 
     private func startConnection() {
-        QUICCrypto.registerCallbacks()
-        
         quic.handlers.withLock { handlers in
             handlers.connectionClosed = { [weak self] error in
                 self?.failSession(error)
             }
         }
-        
+
         Task { [self] in
             do {
                 try await quic.connect()
@@ -128,39 +142,66 @@ nonisolated final class HysteriaSession: Sendable {
                 handlers.streamData = { [weak self] sid, data, fin in
                     self?.handleStreamData(sid: sid, data: data, fin: fin)
                 }
-                handlers.streamTermination = { [weak self] sid, error in
-                    self?.handleStreamTermination(sid: sid, error: error)
+                handlers.streamTermination = { [weak self] sid, error, cause in
+                    self?.handleStreamTermination(sid: sid, error: error, cause: cause)
                 }
                 handlers.datagram = { [weak self] data in
                     self?.handleDatagram(data)
                 }
             }
-            
-            let opened: Bool = await quic.run { self.openControlAndAuthOnQueue() }
+
+            let opened = self.openControlAndAuth()
             if !opened {
                 failSession(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Failed to open auth stream")))
+                return
             }
+            armAuthDeadline()
         }
     }
     
-    private func openControlAndAuthOnQueue() -> Bool {
+    private func armAuthDeadline() {
+        let token = TickScheduler.shared.schedule(in: Self.authResponseTimeout, precision: .relaxed) { [weak self] in
+            guard let self else { return }
+            let stalled = self.state.withLock { $0.phase == .authenticating }
+            if stalled {
+                self.failSession(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth response timed out")))
+            }
+        }
+        let stale: DeadlineToken? = state.withLock { session in
+            guard session.phase == .authenticating else { return token }
+            let stale = session.authDeadline
+            session.authDeadline = token
+            return stale
+        }
+        stale?.cancel()
+    }
+
+    private func disarmAuthDeadline() {
+        state.withLock { session -> DeadlineToken? in
+            let armed = session.authDeadline
+            session.authDeadline = nil
+            return armed
+        }?.cancel()
+    }
+
+    private func openControlAndAuth() -> Bool {
         if let sid = quic.openUniStream() {
             var payload = Data()
             payload.append(0x00) // stream type = control
             payload.append(Self.clientSettingsFrame())
-            quic.writeStreamOnQueue(sid, data: payload)
+            quic.submitStreamWrite(sid, data: payload)
         }
         if let encoderStreamID = quic.openUniStream() {
-            quic.writeStreamOnQueue(encoderStreamID, data: Data([0x02]))
+            quic.submitStreamWrite(encoderStreamID, data: Data([0x02]))
         }
         if let decoderStreamID = quic.openUniStream() {
-            quic.writeStreamOnQueue(decoderStreamID, data: Data([0x03]))
+            quic.submitStreamWrite(decoderStreamID, data: Data([0x03]))
         }
 
         guard let sid = quic.openBidiStream() else { return false }
-        lock.withLock { session in
+        state.withLock { session in
             session.authStreamID = sid
-            if session.state == .connecting { session.state = .authenticating }
+            session.transition(to: .authenticating)
         }
 
         let extraHeaders: [(name: String, value: String)] = [
@@ -172,10 +213,10 @@ nonisolated final class HysteriaSession: Sendable {
         let frame = HysteriaHTTP3Codec.encodeAuthRequestFrame(
             authority: "hysteria", path: "/auth", extraHeaders: extraHeaders
         )
-        quic.writeStreamOnQueue(sid, data: frame)
+        quic.submitStreamWrite(sid, data: frame)
         return true
     }
-    
+
     private static func parseNextHTTP3Frame(_ buffer: Data) -> (type: UInt64, payload: Data, consumed: Int)? {
         guard let (frameType, typeLen) = HysteriaProtocol.decodeVarInt(from: buffer, offset: 0) else { return nil }
         guard let (payloadLen, lenBytes) = HysteriaProtocol.decodeVarInt(from: buffer, offset: typeLen) else { return nil }
@@ -186,14 +227,12 @@ nonisolated final class HysteriaSession: Sendable {
         let payload = buffer[(base + headerLen)..<(base + total)]
         return (frameType, payload, total)
     }
-    
+
     private static func clientSettingsFrame() -> Data {
-        // id=0x01 (QPACK_MAX_TABLE_CAPACITY) val=0,
-        // id=0x07 (QPACK_BLOCKED_STREAMS) val=0.
         let payload = Data([0x01, 0x00, 0x07, 0x00])
         var frame = Data()
-        frame.append(0x04)                  // type = SETTINGS (1-byte varint)
-        frame.append(UInt8(payload.count))  // len   (1-byte varint)
+        frame.append(0x04)
+        frame.append(UInt8(payload.count))
         frame.append(payload)
         return frame
     }
@@ -201,15 +240,15 @@ nonisolated final class HysteriaSession: Sendable {
     // MARK: - Stream dispatch
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
-        enum Route { case auth; case tcp(HysteriaConnection); case serverReject(first: Bool); case ignore }
-        let route: Route = lock.withLock { session in
+        enum Route { case auth; case tcp(HysteriaConnection); case serverReject(first: Bool); case orphan; case ignore }
+        let route: Route = state.withLock { session in
             if sid == session.authStreamID { return .auth }
             if let connection = session.tcpStreams[sid] { return .tcp(connection) }
-            // Server-initiated stream (uni or bidi): reject it once so it stops streaming garbage.
-            if (sid & 0x01) == 0x01, !data.isEmpty {
+            guard !data.isEmpty else { return .ignore }
+            if (sid & 0x01) == 0x01 {
                 return .serverReject(first: session.rejectedServerStreams.insert(sid).inserted)
             }
-            return .ignore
+            return .orphan
         }
 
         switch route {
@@ -222,11 +261,13 @@ nonisolated final class HysteriaSession: Sendable {
             if first {
                 quic.shutdownStream(sid, appErrorCode: HysteriaProtocol.closeErrCodeProtocolError)
             }
+        case .orphan:
+            quic.extendStreamOffset(sid, count: data.count)
         case .ignore:
             break
         }
     }
-    
+
     private enum AuthOutcome {
         case needMore
         case fail(Error)
@@ -236,9 +277,10 @@ nonisolated final class HysteriaSession: Sendable {
 
     private func handleAuthStreamData(_ data: Data, fin: Bool) {
         var creditStreamID: Int64 = -1
-        let outcome: AuthOutcome = lock.withLock { session in
+        let outcome: AuthOutcome = state.withLock { session in
             creditStreamID = session.authStreamID
-            
+
+            guard session.phase == .authenticating else { return .needMore }
             guard !session.authHeadersReceived else { return .needMore }
 
             session.authBuffer.append(data)
@@ -276,7 +318,7 @@ nonisolated final class HysteriaSession: Sendable {
             session.udpSupported = (headers.first(where: { $0.name == "hysteria-udp" })?.value).map {
                 $0.lowercased() == "true"
             } ?? false
-            
+
             var brutal: BrutalAction? = nil
             if configuration.congestionControl == .brutal {
                 let ccRxValue = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
@@ -294,10 +336,10 @@ nonisolated final class HysteriaSession: Sendable {
                 }
             }
 
-            session.state = .ready
+            guard session.transition(to: .ready) else { return .needMore }
             return .ready(brutal: brutal, authStreamID: session.authStreamID)
         }
-        
+
         quic.extendStreamOffset(creditStreamID, count: data.count)
 
         switch outcome {
@@ -306,6 +348,7 @@ nonisolated final class HysteriaSession: Sendable {
         case .fail(let error):
             failSession(error)
         case .ready(let brutal, let authStreamID):
+            disarmAuthDeadline()
             switch brutal {
             case .uninstall: quic.uninstallBrutalCC()
             case .setBandwidth(let bps): quic.setBrutalBandwidth(bps)
@@ -316,11 +359,15 @@ nonisolated final class HysteriaSession: Sendable {
         }
     }
 
-    private func handleStreamTermination(sid: Int64, error: Error?) {
+    private func handleStreamTermination(
+        sid: Int64,
+        error: Error?,
+        cause: QUICConnection.StreamTerminationCause
+    ) {
         enum Effect { case none; case failAuth(Error); case tcp(HysteriaConnection) }
-        let effect: Effect = lock.withLock { session in
+        let effect: Effect = state.withLock { session in
             if sid == session.authStreamID {
-                if session.state != .ready {
+                if session.phase != .ready {
                     return .failAuth(error ?? AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth stream closed before completion")))
                 }
                 return .none
@@ -336,9 +383,8 @@ nonisolated final class HysteriaSession: Sendable {
         case .failAuth(let error):
             failSession(error)
         case .tcp(let connection):
-            _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
             updateIdleCloseTimer()
-            connection.handleStreamTermination(error: error)
+            connection.handleStreamTermination(error: error, cause: cause)
         }
     }
 
@@ -346,7 +392,7 @@ nonisolated final class HysteriaSession: Sendable {
 
     private func handleDatagram(_ data: Data) {
         guard let message = HysteriaProtocol.decodeUDPMessage(data) else { return }
-        let connection = lock.withLock { $0.udpSessions[message.sessionID] }
+        let connection = state.withLock { $0.udpSessions[message.sessionID] }
         connection?.feedDatagram(message)
     }
 
@@ -354,10 +400,10 @@ nonisolated final class HysteriaSession: Sendable {
 
     func openTCPStream(for connection: HysteriaConnection) async throws -> Int64 {
         enum Result { case notReady; case openFailed; case ok(Int64) }
-        let result: Result = await quic.run {
-            guard self.lock.withLock({ $0.state == .ready }) else { return .notReady }
+        let result: Result = self.state.withLock { session in
+            guard session.phase == .ready else { return .notReady }
             guard let sid = self.quic.openBidiStream() else { return .openFailed }
-            self.lock.withLock { $0.tcpStreams[sid] = connection }
+            session.tcpStreams[sid] = connection
             return .ok(sid)
         }
         switch result {
@@ -366,12 +412,11 @@ nonisolated final class HysteriaSession: Sendable {
         case .openFailed:
             throw AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Failed to open TCP stream"))
         case .ok(let sid):
-            _poolState.withLock { $0.tcpCount += 1 }
             updateIdleCloseTimer()
             return sid
         }
     }
-    
+
     func writeStream(_ sid: Int64, data: Data) async throws {
         try await quic.writeStream(sid, data: data)
     }
@@ -385,9 +430,8 @@ nonisolated final class HysteriaSession: Sendable {
     }
 
     func releaseTCPStream(_ sid: Int64) {
-        let removed = lock.withLock { $0.tcpStreams.removeValue(forKey: sid) != nil }
+        let removed = state.withLock { $0.tcpStreams.removeValue(forKey: sid) != nil }
         if removed {
-            _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
             updateIdleCloseTimer()
         }
     }
@@ -395,8 +439,8 @@ nonisolated final class HysteriaSession: Sendable {
     // MARK: - UDP session API
 
     func registerUDPSession(_ conn: HysteriaUDPConnection) async throws -> UInt32 {
-        let sid: UInt32 = try lock.withLock { session in
-            guard session.state == .ready else { throw AnywhereError.proxy(.hysteria, .notReady) }
+        let sid: UInt32 = try state.withLock { session in
+            guard session.phase == .ready else { throw AnywhereError.proxy(.hysteria, .notReady) }
             guard session.udpSupported else { throw AnywhereError.proxy(.hysteria, .unsupported(feature: "UDP")) }
             guard session.udpSessions.count < Int(UInt32.max) else {
                 throw AnywhereError.proxy(.hysteria, .connectionClosed(detail: "UDP session pool exhausted"))
@@ -409,125 +453,118 @@ nonisolated final class HysteriaSession: Sendable {
             session.udpSessions[sid] = conn
             return sid
         }
-        _poolState.withLock { $0.udpCount += 1 }
         updateIdleCloseTimer()
         return sid
     }
 
     func releaseUDPSession(_ sessionID: UInt32) {
-        let removed = lock.withLock { $0.udpSessions.removeValue(forKey: sessionID) != nil }
+        let removed = state.withLock { $0.udpSessions.removeValue(forKey: sessionID) != nil }
         if removed {
-            _poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
             updateIdleCloseTimer()
         }
     }
-    
+
     private func updateIdleCloseTimer() {
-        let total = _poolState.withLock { $0.tcpCount + $0.udpCount }
-        lock.withLock { session in
-            guard session.state == .ready, !session.closed else {
-                session.idleSince = nil
-                return
+        let (stale, closeNow): (DeadlineToken?, Bool) = state.withLock { session in
+            guard session.phase == .ready else {
+                let stale = session.idleClose
+                session.idleClose = nil
+                return (stale, false)
             }
-            session.idleSince = total == 0 ? ContinuousClock.now : nil
-            if session.idleSweepTask == nil {
-                session.idleSweepTask = Task { [weak self] in await self?.runIdleSweep() }
+            let idle = session.tcpStreams.isEmpty && session.udpSessions.isEmpty
+            if idle {
+                if closesWhenDrained, session.carriedConnection { return (nil, true) }
+                guard session.idleClose == nil else { return (nil, false) }
+                session.idleGeneration &+= 1
+                let generation = session.idleGeneration
+                session.idleClose = TickScheduler.shared.schedule(
+                    in: .seconds(Self.idleCloseDelay),
+                    precision: .relaxed
+                ) { [weak self] in self?.idleCloseFired(generation: generation) }
+                return (nil, false)
             }
+            session.carriedConnection = true
+            let stale = session.idleClose
+            session.idleClose = nil
+            return (stale, false)
         }
+        stale?.cancel()
+        if closeNow { closeIfStillIdle() }
     }
-    
-    private func runIdleSweep() async {
-        enum Step { case closeNow; case sleep(Duration); case stop }
-        while !Task.isCancelled {
-            let step: Step = lock.withLock { session in
-                guard !session.closed, session.state == .ready else { return .stop }
-                guard let since = session.idleSince else { return .sleep(.seconds(Self.idleCloseDelay)) }
-                let elapsed = since.duration(to: ContinuousClock.now)
-                if elapsed >= .seconds(Self.idleCloseDelay) { return .closeNow }
-                return .sleep(.seconds(Self.idleCloseDelay) - elapsed)
-            }
-            switch step {
-            case .stop:
-                return
-            case .sleep(let duration):
-                try? await Task.sleep(for: duration)
-            case .closeNow:
-                closeIfStillIdle()
-                let done = lock.withLock { session -> Bool in
-                    if session.closed { return true }
-                    session.idleSince = nil
-                    return false
-                }
-                if done { return }
-            }
+
+    private func idleCloseFired(generation: UInt64) {
+        let current: Bool = state.withLock { session in
+            guard session.idleGeneration == generation else { return false }
+            session.idleClose = nil
+            return true
         }
+        guard current else { return }
+        closeIfStillIdle()
     }
 
     private func closeIfStillIdle() {
-        guard lock.withLock({ $0.state == .ready }) else { return }
-        let liveCount = _poolState.withLock { $0.tcpCount + $0.udpCount }
-        guard liveCount == 0 else { return }
         performTeardown(
             readyError: AnywhereError.proxy(.hysteria, .streamClosed),
-            connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed"))
+            connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed")),
+            onlyIfIdle: true
         )
     }
-    
+
     func writeDatagrams(_ datagrams: [Data]) async throws {
         try await quic.writeDatagrams(datagrams)
     }
-    
+
     func currentMaxDatagramPayloadSize() async -> Int {
         await quic.currentMaxDatagramPayloadSize()
     }
 
     // MARK: - Close
-    
+
     func close() {
         performTeardown(
             readyError: AnywhereError.proxy(.hysteria, .streamClosed),
             connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed"))
         )
     }
-    
+
     private func failSession(_ error: Error) {
         performTeardown(readyError: error, connectionError: error)
     }
-    
-    private func performTeardown(readyError: Error, connectionError: Error) {
+
+    private func performTeardown(readyError: Error, connectionError: Error, onlyIfIdle: Bool = false) {
         struct Teardown {
             var tcp: [HysteriaConnection]
             var udp: [HysteriaUDPConnection]
-            var idleSweepTask: Task<Void, Never>?
+            var idleClose: DeadlineToken?
+            var authDeadline: DeadlineToken?
+            var onClose: (@Sendable () -> Void)?
         }
-        let teardown: Teardown? = lock.withLock { session in
-            guard !session.closed else { return nil }
-            session.closed = true
-            session.state = .closed
+        let teardown: Teardown? = state.withLock { session in
+            if onlyIfIdle {
+                guard session.phase == .ready, session.tcpStreams.isEmpty, session.udpSessions.isEmpty else {
+                    return nil
+                }
+            }
+            guard session.transition(to: .closed) else { return nil }
             let snapshot = Teardown(
                 tcp: Array(session.tcpStreams.values),
                 udp: Array(session.udpSessions.values),
-                idleSweepTask: session.idleSweepTask
+                idleClose: session.idleClose,
+                authDeadline: session.authDeadline,
+                onClose: session.onClose
             )
-            session.idleSweepTask = nil
-            session.idleSince = nil
+            session.idleClose = nil
+            session.authDeadline = nil
             session.tcpStreams.removeAll()
             session.udpSessions.removeAll()
             session.rejectedServerStreams.removeAll()
+            session.onClose = nil
             return snapshot
         }
         guard let teardown else { return }
 
-        teardown.idleSweepTask?.cancel()
-        
-        let onClose = _poolState.withLock { state in
-            state.isClosed = true
-            state.tcpCount = 0
-            state.udpCount = 0
-            let hook = state.onClose
-            state.onClose = nil
-            return hook
-        }
+        teardown.idleClose?.cancel()
+        teardown.authDeadline?.cancel()
 
         readySignal.finish(throwing: readyError)
 
@@ -535,6 +572,6 @@ nonisolated final class HysteriaSession: Sendable {
         for connection in teardown.udp { connection.handleSessionError(connectionError) }
 
         quic.close()
-        onClose?()
+        teardown.onClose?()
     }
 }

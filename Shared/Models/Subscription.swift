@@ -16,12 +16,13 @@ nonisolated struct Subscription: Identifiable, Codable, SoftDeletable {
     var download: Int64?
     var total: Int64?
     var expire: Date?
-    var collapsed: Bool
+    var iconLight: Data?
+    var iconDark: Data?
     var isNameCustomized: Bool
     var updatedAt: Date
     var deletedAt: Date? = nil
 
-    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, collapsed: Bool = false, isNameCustomized: Bool = false, updatedAt: Date = .now) {
+    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, iconLight: Data? = nil, iconDark: Data? = nil, isNameCustomized: Bool = false, updatedAt: Date = .now) {
         self.id = id
         self.name = name
         self.url = url
@@ -30,7 +31,8 @@ nonisolated struct Subscription: Identifiable, Codable, SoftDeletable {
         self.download = download
         self.total = total
         self.expire = expire
-        self.collapsed = collapsed
+        self.iconLight = iconLight
+        self.iconDark = iconDark
         self.isNameCustomized = isNameCustomized
         self.updatedAt = updatedAt
     }
@@ -45,9 +47,10 @@ nonisolated struct Subscription: Identifiable, Codable, SoftDeletable {
         download = try container.decodeIfPresent(Int64.self, forKey: .download)
         total = try container.decodeIfPresent(Int64.self, forKey: .total)
         expire = try container.decodeIfPresent(Date.self, forKey: .expire)
-        collapsed = (try? container.decode(Bool.self, forKey: .collapsed)) ?? false
+        iconLight = try container.decodeIfPresent(Data.self, forKey: .iconLight)
+        iconDark = try container.decodeIfPresent(Data.self, forKey: .iconDark)
         isNameCustomized = (try? container.decode(Bool.self, forKey: .isNameCustomized)) ?? false
-        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
     }
 }

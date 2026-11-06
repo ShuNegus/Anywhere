@@ -48,7 +48,7 @@ actor RealityClient {
         let clientHello = try buildRealityClientHello(privateKey: privateKey)
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
+        let transport = TCPTransport(host: host, port: port, resolution: .proxies)
         self.connection = transport
         do {
             try await transport.connect(initialData: clientHello)
@@ -88,6 +88,8 @@ actor RealityClient {
     }
     
     private static let handshakeDeadline: Duration = .seconds(30)
+    
+    private static let maxHandshakeBufferSize = 1 << 18
 
     private func withHandshakeDeadline(
         _ handshake: @escaping @Sendable () async throws -> TLSRecordConnection
@@ -125,12 +127,12 @@ actor RealityClient {
         guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
             throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate random bytes"))
         }
-
-        // SessionId carries the Reality metadata in the first 16 bytes.
+        
         var sessionId = Data(count: 32)
-        sessionId[0] = 26  // protocol version 26.7.28
-        sessionId[1] = 7
-        sessionId[2] = 28
+        // protocol version 26.9.9
+        sessionId[0] = 26
+        sessionId[1] = 9
+        sessionId[2] = 9
         sessionId[3] = 0
 
         let timestamp = UInt32(Date().timeIntervalSince1970)
@@ -156,16 +158,13 @@ actor RealityClient {
         }
 
         var mlkemEncapsulationKey: Data?
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *), configuration.fingerprint.offersPostQuantumKeyShare {
             if let mlkemPrivateKey = try? CryptoKit.MLKEM768.PrivateKey() {
                 mlkemPrivateKeyStorage = mlkemPrivateKey
                 mlkemEncapsulationKey = Data(mlkemPrivateKey.publicKey.rawRepresentation)
             }
         }
-        #endif
-
-        // The zero-SessionId ClientHello is the AES-GCM AAD; the field is patched in place below.
+        
         let zeroSessionId = Data(count: 32)
         var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
@@ -230,6 +229,9 @@ actor RealityClient {
             switch try await connection.receive() {
             case .bytes(let moreData):
                 buffer.append(moreData)
+                guard buffer.count <= Self.maxHandshakeBufferSize else {
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Handshake flight exceeds \(Self.maxHandshakeBufferSize) bytes"))
+                }
             case .end:
                 throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before ServerHello"))
             }
@@ -463,8 +465,6 @@ actor RealityClient {
                                 fullTranscript.append(hsMessage)
                                 if let decompressed = decompressCertificate(hsBody) {
                                     serverCertVerified = verifyRealityCertificate(certBody: decompressed)
-                                } else {
-                                    logger.warning("[Reality] Failed to decompress CompressedCertificate")
                                 }
                                 
                             case TLSHandshakeType.finished:
@@ -544,6 +544,9 @@ actor RealityClient {
                 switch try await connection.receive() {
                 case .bytes(let moreData):
                     buffer.append(moreData)
+                    guard buffer.count <= Self.maxHandshakeBufferSize else {
+                        throw AnywhereError.tls(.handshakeFailed(detail: "Handshake flight exceeds \(Self.maxHandshakeBufferSize) bytes"))
+                    }
                     startOffset = processedOffset
                     continue
                 case .end:
@@ -653,9 +656,8 @@ actor RealityClient {
         let tbsHeaderStart = offset
         guard let tbsLen = parseDERSequence(certDER, offset: &offset) else { return nil }
         let tbsEnd = offset + tbsLen
-
-        // Search TBSCertificate for ed25519 OID (1.3.101.112 = 06 03 2b 65 70)
-        // followed by BIT STRING containing 32-byte public key (03 21 00 <32 bytes>)
+        guard tbsEnd <= certDER.count else { return nil }
+        
         var publicKey: Data?
         for i in tbsHeaderStart..<tbsEnd {
             guard i + 40 <= tbsEnd else { break }
@@ -676,7 +678,7 @@ actor RealityClient {
         guard offset < certDER.count, certDER[offset] == 0x03 else { return nil }
         offset += 1
         guard let sigBitStringLen = parseDERLength(certDER, offset: &offset) else { return nil }
-        guard sigBitStringLen >= 1, offset < certDER.count, certDER[offset] == 0x00 else { return nil }
+        guard sigBitStringLen >= 1, offset + sigBitStringLen <= certDER.count, certDER[offset] == 0x00 else { return nil }
         let signature = certDER.subdata(in: (offset + 1)..<(offset + sigBitStringLen))
 
         return (pubKey, signature)
@@ -716,8 +718,8 @@ actor RealityClient {
         let algorithm = UInt16(body[0]) << 8 | UInt16(body[1])
         let uncompressedLength = Int(body[2]) << 16 | Int(body[3]) << 8 | Int(body[4])
         let compressedLength = Int(body[5]) << 16 | Int(body[6]) << 8 | Int(body[7])
-        guard 8 + compressedLength <= body.count else { return nil }
-        guard uncompressedLength > 0 && uncompressedLength <= 1 << 24 else { return nil }
+        guard compressedLength > 0, 8 + compressedLength <= body.count else { return nil }
+        guard uncompressedLength > 0 && uncompressedLength <= 1 << 17 else { return nil }
         let compressed = body.subdata(in: 8..<(8 + compressedLength))
 
         let compressionAlgorithm: compression_algorithm
@@ -725,7 +727,7 @@ actor RealityClient {
         case 0x0001: compressionAlgorithm = COMPRESSION_ZLIB
         case 0x0002: compressionAlgorithm = COMPRESSION_BROTLI
         default:
-            logger.warning("[Reality] Unknown certificate compression algorithm: 0x\(String(format: "%04x", algorithm))")
+            logger.warning("[Reality] Unsupported certificate compression: 0x\(String(format: "%04x", algorithm))")
             return nil
         }
 
@@ -742,11 +744,11 @@ actor RealityClient {
                 )
             }
         }
-        guard decodedSize > 0 else {
-            logger.warning("[Reality] Certificate decompression failed (algorithm: 0x\(String(format: "%04x", algorithm)))")
+        guard decodedSize == uncompressedLength else {
+            logger.warning("[Reality] Certificate decompression failed: 0x\(String(format: "%04x", algorithm))")
             return nil
         }
-        return Data(decompressed.prefix(decodedSize))
+        return decompressed
     }
 
     // MARK: - Helpers
@@ -771,7 +773,6 @@ actor RealityClient {
     }
 
     private func decapsulateMLKEM(ciphertext: Data) throws -> Data {
-        #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
             guard let mlkemPrivateKey = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
                 throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM private key not available"))
@@ -779,7 +780,6 @@ actor RealityClient {
             let sharedSecret = try mlkemPrivateKey.decapsulate(ciphertext)
             return sharedSecret.withUnsafeBytes { Data($0) }
         }
-        #endif
         throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM not supported on this platform"))
     }
 

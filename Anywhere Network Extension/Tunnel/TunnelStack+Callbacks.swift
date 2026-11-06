@@ -7,164 +7,100 @@
 
 import Foundation
 import Synchronization
+import AnywhereIP
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Callbacks")
 
-// MARK: - C-Callback Crossing Types
-
-struct LWIPRawPointer: @unchecked Sendable { let raw: UnsafeRawPointer }
-
-struct LWIPPCBHandle: @unchecked Sendable { let raw: UnsafeMutableRawPointer }
-
-struct LWIPReleaseAction: @unchecked Sendable {
-    let ctx: UnsafeMutableRawPointer?
-    let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
-    
-    static let noop = LWIPReleaseAction(ctx: nil, fn: { _ in })
-    
-    func run() { fn(ctx) }
-}
-
 extension TunnelStack {
-
-    // MARK: - Callback Installation
-    
-    func installLwipCallbacks() {
-        lwip_bridge_set_host_ctx(BridgeContext.passUnretained(self))
-        
-        lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
-            guard let stack = TunnelStack.lwipHost(), let data, let release else { return }
-            let packet = Data(
-                bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
-                count: Int(len),
-                deallocator: .none
-            )
-            let releaseAction = LWIPReleaseAction(ctx: releaseCtx, fn: release)
-            stack.assumeIsolated {
-                $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, release: releaseAction)
-            }
-        }
-        
-        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, _, isIPv6 in
-            guard let stack = TunnelStack.lwipHost() else {
-                return Int32(LWIP_BRIDGE_SYN_PASS)
-            }
-            if let dstIP, stack.connectionRouter.isRejectMarkedDestination(rawIP: dstIP, isIPv6: isIPv6 != 0) {
-                return Int32(LWIP_BRIDGE_SYN_DROP)
-            }
-            return stack.assumeIsolated { $0.lwipSynVerdict() }
-        }
-        
-        lwip_bridge_set_tcp_stray_filter_fn { _, _, dstIP, _, isIPv6 in
-            guard let stack = TunnelStack.lwipHost(), let dstIP,
-                  stack.connectionRouter.isRejectMarkedDestination(rawIP: dstIP, isIPv6: isIPv6 != 0) else {
-                return Int32(LWIP_BRIDGE_SYN_PASS)
-            }
-            return Int32(LWIP_BRIDGE_SYN_DROP)
-        }
-
-        lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb, silentDrop in
-            guard let stack = TunnelStack.lwipHost(), let pcb, let dstIP else { return nil }
-            let pcbHandle = LWIPPCBHandle(raw: pcb)
-            let dstIPBox = LWIPRawPointer(raw: dstIP)
-            let verdict = stack.assumeIsolated({
-                $0.lwipAccept(pcb: pcbHandle.raw, dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0)
-            })
-            switch verdict {
-            case .accept(let connection):
-                return connection.adopt()
-            case .dropSilently:
-                silentDrop?.pointee = 1
-                return nil
-            case .abort:
-                return nil
-            }
-        }
-        
-        lwip_bridge_set_tcp_recv_fn { connection, data, len in
-            guard let connection else {
-                logger.debug("[LWIPBridge] tcp_recv: connection is nil")
-                return
-            }
-            let dataBox = data.map { LWIPRawPointer(raw: $0) }
-            BridgeContext.unretained(connection, as: TCPConnection.self).assumeIsolated { conn in
-                if let dataBox, len > 0 {
-                    conn.handleReceivedData(bytes: dataBox.raw, count: Int(len))
-                } else {
-                    conn.handleRemoteClose()
+    func makeIPStack() -> IPStack {
+        let generation = dataPlaneGeneration.wrappingAdd(1, ordering: .acquiringAndReleasing).newValue
+        outputBuffer.withLock { $0.generation = generation }
+        return IPStack(
+            configuration: .init(
+                maximumConnections: TunnelLimits.tcpMaxConnections,
+                pendingSendBytes: TunnelConstants.tcpWindowSize,
+                acknowledgmentDelay: TunnelConstants.tcpAcknowledgmentDelay,
+                maximumWindow: TunnelConstants.tcpMaximumWindow,
+                maximumSendBuffer: TunnelConstants.tcpMaximumSendBuffer,
+                bufferGrowthBudget: TunnelConstants.tcpBufferGrowthBudget
+            ),
+            output: { [weak self] packets in
+                self?.enqueueTCPOutput(packets, generation: generation)
+            },
+            accept: { [weak self] pending in
+                guard let self else { pending.reject(); return }
+                Task { await self.accept(pending, generation: generation)?.start() }
+            },
+            datagrams: { [weak self] batch in
+                self?.admitDatagrams(batch)
+            },
+            synFilter: { [weak self] _, destination in
+                guard let self else { return .drop }
+                guard !self.isRejectMarked(destination.address), self.ipStackSynVerdict() else {
+                    self.recordRejectedSYN(to: destination)
+                    return .drop
                 }
+                return .accept
+            },
+            strayFilter: { [weak self] _, destination in
+                self.map { !$0.isRejectMarked(destination.address) } ?? false
+            }
+        )
+    }
+
+    nonisolated func isRejectMarked(_ address: IPAddress) -> Bool {
+        withUnsafeTemporaryAllocation(byteCount: 16, alignment: 8) { bytes in
+            address.write(to: bytes.baseAddress!)
+            return connectionRouter.isRejectMarkedDestination(rawIP: bytes.baseAddress!, isIPv6: address.isIPv6)
+        }
+    }
+
+    nonisolated private func recordRejectedSYN(to destination: IPEndpoint) {
+        let ip = destination.address.description
+        requestLog.record(
+            protocol: .tcp,
+            host: connectionRouter.syntheticAddressPool.lookup(ip: ip)?.domain ?? ip,
+            port: destination.port,
+            routeTarget: .reject
+        )
+    }
+
+    nonisolated private func ipStackSynVerdict() -> Bool {
+        guard tcpConnections.withLock({ $0.count }) >= TunnelLimits.tcpMaxConnections else { return true }
+        let now = MonotonicClock.now
+        guard let victim = findPressureVictim(now: now) else {
+            tcpPressureLog.withLock { $0.noteDropped(now: now, logger: logger) }
+            return false
+        }
+        victim.evictForConnectionPressure()
+        return true
+    }
+
+    nonisolated private func findPressureVictim(now: TimeInterval) -> TCPConnection? {
+        var establishing: (connection: TCPConnection, idleFor: TimeInterval)?
+        var established: (connection: TCPConnection, idleFor: TimeInterval)?
+        for delegate in tcpConnections.withLock({ Array($0.connections.values) }) {
+            guard let tier = delegate.connectionPressureCandidate(now: now) else { continue }
+            switch tier {
+            case .establishing(let idleFor):
+                if idleFor > (establishing?.idleFor ?? -1) { establishing = (delegate, idleFor) }
+            case .established(let idleFor):
+                if idleFor > (established?.idleFor ?? -1) { established = (delegate, idleFor) }
             }
         }
-        
-        lwip_bridge_set_tcp_sent_fn { connection, len in
-            guard let connection else { return }
-            BridgeContext.unretained(connection, as: TCPConnection.self).assumeIsolated { $0.handleSent(len: len) }
-        }
-        
-        lwip_bridge_set_tcp_err_fn { connection, err in
-            guard let connection else {
-                logger.debug("[LWIPBridge] tcp_err: connection is nil, err=\(err)")
-                return
-            }
-            BridgeContext.consume(connection, as: TCPConnection.self).assumeIsolated { $0.handleError(err: err) }
-        }
-    }
-    
-    private static func lwipHost() -> TunnelStack? {
-        guard let ctx = lwip_bridge_host_ctx() else { return nil }
-        return BridgeContext.unretained(ctx, as: TunnelStack.self)
+        return (establishing ?? established)?.connection
     }
 
-    // MARK: - Callbacks
-    
-    func lwipDidOutput(_ packet: Data, isIPv6: Bool, release: LWIPReleaseAction) {
-        let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
-        let needsKick: Bool = outputBuffer.withLock { buffer in
-            buffer.packets.append(packet)
-            buffer.protocols.append(proto)
-            buffer.releases.append(release)
-            if buffer.drainInFlight { return false }
-            buffer.drainInFlight = true
-            return true
+    private func accept(_ pending: PendingConnection, generation: UInt64) -> TCPConnection? {
+        guard dataPlaneUp, dataPlaneGeneration.load(ordering: .acquiring) == generation, let defaultConfiguration = configuration else {
+            pending.reject(); return nil
         }
-        if needsKick {
-            kickOutputDrain()
-        }
-    }
-    
-    func lwipSynVerdict() -> Int32 {
-        let activeTCP = Int(lwip_bridge_active_tcp_count())
-        if activeTCP >= TunnelLimits.tcpMaxConnections {
-            logger.warning("[TCP] Connection cap reached (\(activeTCP)/\(TunnelLimits.tcpMaxConnections))")
-            isPressureFlushing.store(true, ordering: .relaxed)
-            lwip_bridge_discard_all_tcp()
-            isPressureFlushing.store(false, ordering: .relaxed)
-        }
-        return Int32(LWIP_BRIDGE_SYN_PASS)
-    }
-    
-    enum AcceptVerdict {
-        case accept(TCPConnection)
-        case dropSilently
-        case abort
-    }
-
-    func lwipAccept(
-        pcb: UnsafeMutableRawPointer,
-        dstIP: UnsafeRawPointer,
-        dstPort: UInt16,
-        isIPv6: Bool
-    ) -> AcceptVerdict {
-        guard let defaultConfiguration = configuration else {
-            logger.debug("[TunnelStack] tcp_accept: guard failed")
-            return .abort
-        }
-
-        let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)
-        let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
+        let dstIPString = pending.destination.address.description
+        let dstPort = pending.destination.port
+        let decision = connectionRouter.decision(forIP: dstIPString)
 
         var connectionConfiguration = defaultConfiguration
-        var routeTarget = defaultRouteTarget
+        var routeTarget: RouteTarget = .default
         var ruleSetName: String? = nil
 
         switch decision.action {
@@ -174,8 +110,6 @@ extension TunnelStack {
             if let configuration {
                 connectionConfiguration = configuration
             }
-        case .routeViaDefault:
-            break
         case .reject(let matchedRuleSet):
             requestLog.record(
                 protocol: .tcp,
@@ -184,12 +118,9 @@ extension TunnelStack {
                 routeTarget: .reject,
                 ruleSetName: matchedRuleSet
             )
-            let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
-            logger.debug("[TCP] Rejected by \(reason) (going dark): \(decision.host):\(dstPort)")
-            return .dropSilently
+            pending.reject(reset: false); return nil
         case .unreachable:
-            logger.debug("[TCP] Aborted (stale fake-IP): \(dstIPString):\(dstPort)")
-            return .abort
+            pending.reject(); return nil
         }
 
         let dstHost = decision.host
@@ -198,19 +129,20 @@ extension TunnelStack {
         if mitmEnabled && mitmPolicy.matches(dstHost) {
             sniffSNI = true
         }
-
-        return .accept(TCPConnection(
+        
+        guard let nativeConnection = pending.accept() else { return nil }
+        let delegate = TCPConnection(
             stack: self,
-            pcb: LWIPPCBHandle(raw: pcb),
+            connection: nativeConnection,
             dstHost: dstHost,
             dstPort: dstPort,
             configuration: connectionConfiguration,
             routeTarget: routeTarget,
-            viaDefault: decision.viaDefault,
             ruleSetName: ruleSetName,
             sniffSNI: sniffSNI,
-            hostIsResolvedDomain: decision.hostIsResolvedDomain,
-            bridge: lwipBridge
-        ))
+            hostIsResolvedDomain: decision.hostIsResolvedDomain
+        )
+        tcpConnections.withLock { $0.insert(delegate) }
+        return delegate
     }
 }

@@ -10,118 +10,72 @@ import Synchronization
 
 nonisolated final class NowhereFlowOpenAttempt: Sendable {
     private struct State {
-        var connections: [ObjectIdentifier: ProxyConnection] = [:]
         var cancelled = false
-        var resolved = false
-        var deadline: Task<Void, Never>?
-        var earlyDataWriteStarted = false
+        var connection: ProxyConnection?
     }
     private let state = Mutex(State())
 
-    /// Binds the concrete half as soon as it exists. A cancellation that won
-    /// the race closes it before any late success can escape.
     func bind(_ connection: ProxyConnection) -> Bool {
         let accepted = state.withLock { state in
             guard !state.cancelled else { return false }
-            state.connections[ObjectIdentifier(connection)] = connection
+            state.connection = connection
             return true
         }
         if !accepted { connection.cancel() }
         return accepted
     }
 
-    var isCancelled: Bool { state.withLock { $0.cancelled } }
-
-    func markEarlyDataWriteStarted() {
-        state.withLock { $0.earlyDataWriteStarted = true }
-    }
-
-    var hasStartedEarlyDataWrite: Bool { state.withLock { $0.earlyDataWriteStarted } }
-
-    func armDeadline(at deadline: DispatchTime, handler: @escaping @Sendable () -> Void) {
-        // A Task starts on creation, so only spin one up if we might still arm.
-        let shouldArm = state.withLock { state -> Bool in !state.resolved }
-        guard shouldArm else { return }
-
-        let task = Task { [weak self] in
-            let nowNanos = DispatchTime.now().uptimeNanoseconds
-            let deadlineNanos = deadline.uptimeNanoseconds
-            let delayNanos = deadlineNanos > nowNanos ? deadlineNanos - nowNanos : 0
-            try? await Task.sleep(nanoseconds: delayNanos)
-            guard !Task.isCancelled, let self, self.claimResult() else { return }
-            self.cancel()
-            handler()
-        }
-
-        let armed = state.withLock { state -> Bool in
-            guard !state.resolved else { return false }
-            state.deadline?.cancel()
-            state.deadline = task
-            return true
-        }
-        if !armed { task.cancel() }
-    }
-
-    func claimResult() -> Bool {
-        let (accepted, deadline): (Bool, Task<Void, Never>?) = state.withLock { state in
-            guard !state.resolved else { return (false, nil) }
-            state.resolved = true
-            let deadline = state.deadline
-            state.deadline = nil
-            return (true, deadline)
-        }
-        deadline?.cancel()
-        return accepted
-    }
-
     func cancel() {
-        let connections = state.withLock { state -> [ProxyConnection] in
-            guard !state.cancelled else { return [] }
+        let connection = state.withLock { state -> ProxyConnection? in
+            guard !state.cancelled else { return nil }
             state.cancelled = true
-            let connections = Array(state.connections.values)
-            state.connections.removeAll(keepingCapacity: false)
-            return connections
+            let connection = state.connection
+            state.connection = nil
+            return connection
         }
-        for connection in connections { connection.cancel() }
+        connection?.cancel()
     }
 }
 
 nonisolated final class NowhereClient: Sendable {
-
     private struct Key: Hashable {
         let host: String
+        let connectHost: String
         let port: UInt16
         let key: String
-        let uplink: NowhereNetwork
-        let downlink: NowhereNetwork
-        let sni: String
-        let alpn: String
-        let chainSignature: String
-        let sessionID: Data
+        let morph: Bool
+        let morphPrelude: NowhereMorphPrelude
+        let chain: [ProxyConfiguration]
     }
 
     private struct RegistryState {
         var entries: [Key: NowhereClient] = [:]
-        /// Coalesces concurrent first-time builds for the same key: the leader stores its in-flight
-        /// build task here and every joiner awaits it, so there is no waiter array of continuations.
         var pending: [Key: Task<NowhereClient, Error>] = [:]
         var epoch: UInt64 = 0
+        var sealed = false
     }
     private static let registry = Mutex(RegistryState())
 
-    static func shared(for configuration: NowhereConfiguration) -> NowhereClient {
+    static func seal() {
+        registry.withLock { $0.sealed = true }
+    }
+
+    static func unseal() {
+        registry.withLock { $0.sealed = false }
+    }
+
+    static func shared(for configuration: NowhereRuntimeConfiguration) throws -> NowhereClient {
         let key = Key(
             host: configuration.proxyHost,
+            connectHost: configuration.connectHost,
             port: configuration.proxyPort,
             key: configuration.key,
-            uplink: configuration.uplink,
-            downlink: configuration.downlink,
-            sni: configuration.tls.serverName,
-            alpn: configuration.alpn,
-            chainSignature: "",
-            sessionID: configuration.sessionID
+            morph: configuration.morph,
+            morphPrelude: configuration.morphPrelude,
+            chain: []
         )
-        return registry.withLock { state in
+        return try registry.withLock { state in
+            guard !state.sealed else { throw AnywhereError.transport(.terminated) }
             if let existing = state.entries[key] { return existing }
             let client = NowhereClient(
                 configuration: configuration,
@@ -135,7 +89,7 @@ nonisolated final class NowhereClient: Sendable {
     }
 
     static func chained(
-        configuration: NowhereConfiguration,
+        configuration: NowhereRuntimeConfiguration,
         transport: QUICDatagramTransport
     ) -> NowhereClient {
         NowhereClient(
@@ -147,47 +101,45 @@ nonisolated final class NowhereClient: Sendable {
     }
 
     static func acquireChained(
-        configuration: NowhereConfiguration,
-        chainSignature: String,
+        configuration: NowhereRuntimeConfiguration,
+        chain: [ProxyConfiguration],
         builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
     ) async throws -> NowhereClient {
         let key = Key(
             host: configuration.proxyHost,
+            connectHost: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
-            uplink: configuration.uplink,
-            downlink: configuration.downlink,
-            sni: configuration.tls.serverName,
-            alpn: configuration.alpn,
-            chainSignature: chainSignature,
-            sessionID: configuration.sessionID
+            morph: configuration.morph,
+            morphPrelude: configuration.morphPrelude,
+            chain: chain
         )
 
         enum Decision { case existing(NowhereClient); case join(Task<NowhereClient, Error>) }
-        let decision: Decision = registry.withLock { state in
+        let decision: Decision = try registry.withLock { state in
+            guard !state.sealed else { throw AnywhereError.transport(.terminated) }
             if let client = state.entries[key] { return .existing(client) }
             if let inFlight = state.pending[key] { return .join(inFlight) }
             let buildEpoch = state.epoch
             let task = Task<NowhereClient, Error> {
                 try await Self.buildChained(key: key, configuration: configuration,
-                                            buildEpoch: buildEpoch, builder: builder)
+                                            buildEpoch: buildEpoch,
+                                            builder: builder)
             }
-            state.pending[key] = task           // our task leads; joiners await it
+            state.pending[key] = task
             return .join(task)
         }
         switch decision {
         case .existing(let client):
             return client
         case .join(let task):
-            return try await task.value
+            return try await nowhereCancellableValue(of: task)
         }
     }
 
-    /// Runs the coalesced build once for the leader; joiners share its result via `task.value`.
-    /// Clears the pending slot and honors the epoch guard (a `closeAll` mid-build discards the result).
     private static func buildChained(
         key: Key,
-        configuration: NowhereConfiguration,
+        configuration: NowhereRuntimeConfiguration,
         buildEpoch: UInt64,
         builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
     ) async throws -> NowhereClient {
@@ -195,12 +147,17 @@ nonisolated final class NowhereClient: Sendable {
         do { builderResult = .success(try await builder()) }
         catch { builderResult = .failure(error) }
 
-        let (outcome, discarded): (Result<NowhereClient, Error>, [ProxyClient]) = registry.withLock { state in
-            state.pending.removeValue(forKey: key)
-            guard state.epoch == buildEpoch else {
-                let discarded = (try? builderResult.get())?.1 ?? []
-                return (.failure(AnywhereError.proxy(.nowhere, .streamClosed)), discarded)
+        typealias Discard = (Result<NowhereClient, Error>, QUICDatagramTransport?, [ProxyClient])
+        let (outcome, staleTransport, staleHolders): Discard = registry.withLock { state in
+            guard state.epoch == buildEpoch, !state.sealed else {
+                let built = try? builderResult.get()
+                return (
+                    .failure(AnywhereError.proxy(.nowhere, .streamClosed)),
+                    built?.0,
+                    built?.1 ?? []
+                )
             }
+            state.pending.removeValue(forKey: key)
             switch builderResult {
             case .success(let (transport, holders)):
                 let client = NowhereClient(
@@ -210,16 +167,17 @@ nonisolated final class NowhereClient: Sendable {
                     poolKey: key
                 )
                 state.entries[key] = client
-                return (.success(client), [])
+                return (.success(client), nil, [])
             case .failure(let error):
-                return (.failure(error), [])
+                return (.failure(error), nil, [])
             }
         }
-        for client in discarded { await client.cancel() }
+        staleTransport?.cancel()
+        for client in staleHolders { await client.cancel() }
         return try outcome.get()
     }
 
-    private let configuration: NowhereConfiguration
+    private let configuration: NowhereRuntimeConfiguration
     private let transport: QUICDatagramTransport?
     private let poolKey: Key?
 
@@ -227,11 +185,12 @@ nonisolated final class NowhereClient: Sendable {
         var session: NowhereSession? = nil
         var transportConsumed = false
         var chainHolders: [ProxyClient]
+        var retired = false
     }
     private let state: Mutex<SessionState>
 
     private init(
-        configuration: NowhereConfiguration,
+        configuration: NowhereRuntimeConfiguration,
         transport: QUICDatagramTransport?,
         chainHolders: [ProxyClient],
         poolKey: Key?
@@ -248,8 +207,9 @@ nonisolated final class NowhereClient: Sendable {
             case transportSpent
             case fresh(NowhereSession)
         }
-        let acquired: Acquired = state.withLock { state in
-            if let existing = state.session, !existing.isClosed {
+        let acquired: Acquired = try state.withLock { state in
+            guard !state.retired else { return .transportSpent }
+            if let existing = state.session, !existing.isClosed, !existing.isDraining {
                 return .reuse(existing)
             }
 
@@ -264,7 +224,11 @@ nonisolated final class NowhereClient: Sendable {
                 return .transportSpent
             }
 
-            let newSession = NowhereSession(configuration: configuration, transport: transport)
+            let newSession = try NowhereSession(
+                configuration: configuration,
+                transport: transport,
+                closesWhenDrained: poolKey == nil
+            )
             state.session = newSession
             if transport != nil { state.transportConsumed = true }
             return .fresh(newSession)
@@ -277,8 +241,8 @@ nonisolated final class NowhereClient: Sendable {
         case .transportSpent:
             throw AnywhereError.proxy(.nowhere, .streamClosed)
         case .fresh(let newSession):
-            newSession.setOnClose { [weak self, weak newSession] in
-                guard let self, let newSession else { return }
+            newSession.setOnClose { [self, weak newSession] in
+                guard let newSession else { return }
                 self.handleSessionClose(newSession)
             }
 
@@ -309,25 +273,16 @@ nonisolated final class NowhereClient: Sendable {
         }
     }
 
-    func openTCPHalf(
+    func openTCP(
         destination: NowhereProtocol.Target,
-        header: NowhereProtocol.FlowHeader,
         initialData: Data?,
         attempt: NowhereFlowOpenAttempt? = nil
     ) async throws -> ProxyConnection {
-        let session: NowhereSession
-        do {
-            session = try await acquireSession()
-        } catch {
-            if Self.isStaleSessionError(error) { invalidateSession() }
-            throw error
-        }
+        let session = try await acquireSession()
         let connection = NowhereConnection(
             session: session,
             destination: destination,
-            flowHeader: header,
-            initialData: initialData,
-            attempt: attempt
+            initialData: initialData
         )
         guard attempt?.bind(connection) != false else {
             throw AnywhereError.proxy(.nowhere, .streamClosed)
@@ -337,29 +292,18 @@ nonisolated final class NowhereClient: Sendable {
             return connection
         } catch {
             connection.cancel()
-            if Self.isStaleSessionError(error) {
-                invalidateSession(ifCurrent: session)
-            }
             throw error
         }
     }
 
     func openUDP(
         destination: NowhereProtocol.Target,
-        header: NowhereProtocol.FlowHeader,
         attempt: NowhereFlowOpenAttempt? = nil
     ) async throws -> ProxyConnection {
-        let session: NowhereSession
-        do {
-            session = try await acquireSession()
-        } catch {
-            if Self.isStaleSessionError(error) { invalidateSession() }
-            throw error
-        }
+        let session = try await acquireSession()
         let connection = NowhereUDPConnection(
             session: session,
-            destination: destination,
-            flowHeader: header
+            destination: destination
         )
         guard attempt?.bind(connection) != false else {
             throw AnywhereError.proxy(.nowhere, .streamClosed)
@@ -369,53 +313,24 @@ nonisolated final class NowhereClient: Sendable {
             return connection
         } catch {
             connection.cancel()
-            if Self.isStaleSessionError(error) {
-                invalidateSession(ifCurrent: session)
-            }
             throw error
         }
     }
 
-    private static func isStaleSessionError(_ error: Error) -> Bool {
-        guard case AnywhereError.proxy(.nowhere, let failure) = error else { return false }
-        switch failure {
-        case .notReady, .streamClosed: return true
-        case .flowRejected(let code) where code == NowhereProtocol.FlowRejectCode.sessionReplaced.rawValue:
-            return true
-        default: return false
-        }
-    }
-
-    private func invalidateSession(ifCurrent expected: NowhereSession? = nil) {
-        let invalidated: (NowhereSession, [ProxyClient])? = state.withLock { state in
-            guard let current = state.session,
-                  expected == nil || current === expected else { return nil }
+    private func retire() {
+        let resources: (NowhereSession?, [ProxyClient])? = state.withLock { state in
+            guard !state.retired else { return nil }
+            state.retired = true
+            let current = state.session
             state.session = nil
             let holders = state.chainHolders
             state.chainHolders = []
-            if transport != nil, let key = poolKey {
-                Self.registry.withLock { registryState in
-                    if registryState.entries[key] === self {
-                        registryState.entries.removeValue(forKey: key)
-                    }
-                }
-            }
             return (current, holders)
         }
-
-        guard let (current, holders) = invalidated else { return }
-        current.close()
-
-        for client in holders {
-            client.cancel()
-        }
-    }
-
-    /// Invalidates only the direct shared client identified by this transport
-    /// configuration. Used when the TCP half of an asymmetric flow reports
-    /// SessionReplaced before the QUIC sibling observes its session close.
-    static func invalidateSharedSession(for configuration: NowhereConfiguration) {
-        shared(for: configuration).invalidateSession()
+        guard let resources else { return }
+        resources.0?.close()
+        transport?.cancel()
+        for client in resources.1 { client.cancel() }
     }
 
     static func closeAll() {
@@ -424,13 +339,12 @@ nonisolated final class NowhereClient: Sendable {
             state.entries.removeAll(keepingCapacity: false)
             let pending = Array(state.pending.values)
             state.pending.removeAll(keepingCapacity: false)
-            // Bumping the epoch makes any in-flight build discard its result and fail its joiners.
             state.epoch &+= 1
             return (clients, pending)
         }
         for task in pending { task.cancel() }
         for client in clients {
-            client.invalidateSession()
+            client.retire()
         }
     }
 }
@@ -440,8 +354,23 @@ nonisolated extension NowhereClient {
     private final class Pool: TransportPool {
         func reclaim() {
             NowhereClient.closeAll()
-            NowhereTCPConnectionPoolRegistry.shared.closeAll()
-            NowhereTransportIdentityRegistry.shared.reset()
         }
     }
+}
+
+nonisolated func nowhereCancellableValue<Value: Sendable>(of task: Task<Value, Error>) async throws -> Value {
+    try Task.checkCancellation()
+    let inbox = AsyncInbox<Value>()
+    let waiter = Task<Void, Never> {
+        do {
+            inbox.yield(try await task.value)
+            inbox.finish()
+        } catch {
+            inbox.finish(throwing: error)
+        }
+    }
+    defer { waiter.cancel() }
+    guard let value = try await inbox.next() else { throw CancellationError() }
+    try Task.checkCancellation()
+    return value
 }

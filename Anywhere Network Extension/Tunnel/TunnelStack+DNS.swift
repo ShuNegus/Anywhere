@@ -9,7 +9,7 @@ import Foundation
 
 extension TunnelStack {
 
-    // MARK: - DNS Interception (Fake-IP)
+    // MARK: - DNS Interception (Synthetic Address)
 
     enum DNSDestination {
         case anywhereResolver
@@ -17,8 +17,7 @@ extension TunnelStack {
     }
     
     static let interceptedDNSServers: [String: DNSDestination] = [
-        TunnelConstants.tunnelAddressIPv4: .anywhereResolver,
-        TunnelConstants.tunnelAddressIPv6: .anywhereResolver,
+        TunnelAddress.ipv4: .anywhereResolver,
         "8.8.8.8": .publicResolver,
         "8.8.4.4": .publicResolver,
         "2001:4860:4860::8888": .publicResolver,
@@ -28,13 +27,12 @@ extension TunnelStack {
     static func interceptExemptDNSServers() -> Set<String> {
         let upstreams = [
             AWCore.getSubscriptionDNSUpstream(),
-            AWCore.getIPRuleDNSUpstream(),
             AWCore.getProxyDNSUpstream(),
             AWCore.getECHDNSUpstream(),
             AWCore.getFallbackDNSUpstream()
         ]
         var addresses: Set<String> = []
-        for case .plain(let host, _) in upstreams
+        for case .udp(let host, _) in upstreams
         where interceptedDNSServers[host] == .publicResolver {
             addresses.insert(host)
         }

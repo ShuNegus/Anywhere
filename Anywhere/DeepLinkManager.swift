@@ -12,13 +12,14 @@ import Observation
 @Observable
 final class DeepLinkManager {
     var url: String?
-    var ruleSetLinks: [URL]?
+    var ruleSetLink: URL?
+    var moduleLink: URL?
 
     func handle(url: URL) {
         switch url.scheme?.lowercased() {
         case "anywhere":
             handleAnywhereScheme(url)
-        case "nowhere", "vless", "hysteria2", "hy2", "trojan", "anytls", "ss", "quic", "sudoku":
+        case "nowhere", "vless", "hysteria2", "hy2", "sudoku", "trojan", "anytls", "ss", "rfc":
             self.url = url.absoluteString
         default:
             break
@@ -26,35 +27,30 @@ final class DeepLinkManager {
     }
 
     private func handleAnywhereScheme(_ url: URL) {
+        guard let link = Self.extractLink(from: url.absoluteString) else { return }
         switch url.host?.lowercased() {
         case "add-proxy":
-            handleAddProxy(url)
+            self.url = link
         case "add-rule-set":
-            handleAddRuleSet(url)
+            ruleSetLink = URL(string: link)
+        case "add-module":
+            moduleLink = URL(string: link)
         default:
             break
         }
     }
 
-    private func handleAddProxy(_ url: URL) {
-        // Take everything after "?link=" verbatim so the inner proxy/subscription
-        // URL — which may itself carry "?", "&", "=" — survives unescaped.
-        let string = url.absoluteString
-        guard let range = string.range(of: "?link=") else { return }
-        let rawLink = String(string[range.upperBound...])
-        guard !rawLink.isEmpty else { return }
-        self.url = rawLink.removingPercentEncoding ?? rawLink
+    nonisolated static func extractAddProxyLink(from string: String) -> String? {
+        guard string.lowercased().hasPrefix("anywhere://add-proxy") else { return nil }
+        return extractLink(from: string)
     }
-    
-    private func handleAddRuleSet(_ url: URL) {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let queryItems = components.queryItems else { return }
-        let links: [URL] = queryItems
-            .filter { $0.name.lowercased() == "link" }
-            .compactMap { $0.value?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .compactMap { URL(string: $0) }
-        guard !links.isEmpty else { return }
-        self.ruleSetLinks = links
+
+    /// Every `anywhere://` deep link carries exactly one link: everything after
+    /// `?link=`, taken verbatim, so the inner URL needs no percent-encoding.
+    private nonisolated static func extractLink(from string: String) -> String? {
+        guard let range = string.range(of: "?link=") else { return nil }
+        let rawLink = String(string[range.upperBound...])
+        guard !rawLink.isEmpty else { return nil }
+        return rawLink.removingPercentEncoding ?? rawLink
     }
 }

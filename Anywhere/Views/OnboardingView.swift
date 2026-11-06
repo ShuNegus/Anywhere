@@ -9,6 +9,7 @@ import Foundation
 import SwiftUI
 
 struct OnboardingView: View {
+    @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Binding var onboardingCompleted: Bool
 
@@ -33,12 +34,8 @@ struct OnboardingView: View {
                 .padding(.bottom, 16)
         }
         .background(
-            LinearGradient(
-                colors: [Color.disconnectedBackgroundStart, Color.disconnectedBackgroundEnd],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            BackgroundGradient()
+                .ignoresSafeArea()
         )
         .onAppear {
             if let country = CountryBypassCatalog.shared.suggestedCountryCode() {
@@ -58,8 +55,9 @@ struct OnboardingView: View {
                 } label: {
                     Text("Back")
                         .fontWeight(.medium)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(.primary)
                 }
+                .buttonStyle(.plain)
             }
 
             Spacer()
@@ -74,10 +72,9 @@ struct OnboardingView: View {
             } label: {
                 Text(currentPage < 1 ? "Next" : "Get Started")
                     .fontWeight(.semibold)
-                    .foregroundStyle(.white)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 12)
-                    .background(.white.opacity(0.2), in: Capsule())
+                    .background(.white.opacity(0.8), in: Capsule())
             }
             .buttonStyle(.plain)
         }
@@ -93,15 +90,13 @@ struct OnboardingView: View {
 
                 Image(systemName: "globe.americas.fill")
                     .font(.system(size: 56))
-                    .foregroundStyle(.white.opacity(0.9))
 
                 VStack(spacing: 8) {
                     Text("Country Bypass")
                         .font(.title.bold())
-                        .foregroundStyle(.white)
                     Text("Route traffic to your home country directly, bypassing the proxy for faster local access.")
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 32)
                 }
@@ -113,12 +108,11 @@ struct OnboardingView: View {
                         } label: {
                             HStack {
                                 Text("Disable")
-                                    .foregroundStyle(.white)
                                 Spacer()
                                 if bypassCountryCode == "" {
                                     Image(systemName: "checkmark")
                                         .fontWeight(.semibold)
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(Color.accentColor)
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -133,7 +127,7 @@ struct OnboardingView: View {
                             }
                         }
                     }
-                    .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 24))
                     .padding(.horizontal, 24)
                 }
             }
@@ -146,12 +140,11 @@ struct OnboardingView: View {
         Button(action: action) {
             HStack {
                 Text("\(flag(for: code)) \(name)")
-                    .foregroundStyle(.white)
                 Spacer()
                 if bypassCountryCode == code {
                     Image(systemName: "checkmark")
                         .fontWeight(.semibold)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color.accentColor)
                 }
             }
             .padding(.horizontal, 16)
@@ -169,15 +162,13 @@ struct OnboardingView: View {
 
             Image(systemName: "shield.checkered")
                 .font(.system(size: 56))
-                .foregroundStyle(.white.opacity(0.9))
 
             VStack(spacing: 8) {
-                Text("AD Blocking")
+                Text("Block Advertisements")
                     .font(.title.bold())
-                    .foregroundStyle(.white)
                 Text("Block ads and trackers at the network level for a cleaner browsing experience.")
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
             }
@@ -190,17 +181,16 @@ struct OnboardingView: View {
                 HStack {
                     Image(systemName: adBlockEnabled ? "checkmark.shield.fill" : "shield.slash")
                         .font(.title2)
-                        .foregroundStyle(adBlockEnabled ? .green : .white.opacity(0.5))
+                        .foregroundStyle(adBlockEnabled ? .green : .secondary)
                         .contentTransition(.symbolEffect(.replace))
-                    Text("Enable AD Blocking")
+                    Text("Block Advertisements")
                         .font(.body.weight(.medium))
-                        .foregroundStyle(.white)
                     Spacer()
                     Toggle("", isOn: $adBlockEnabled)
                         .labelsHidden()
                 }
                 .padding(16)
-                .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 24))
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 24)
@@ -218,12 +208,12 @@ struct OnboardingView: View {
         }
         
         if adBlockEnabled {
-            if let adBlock = RoutingRuleSetStore.shared.adBlockRuleSet {
-                RoutingRuleSetStore.shared.updateAssignment(adBlock, configurationId: "REJECT")
+            if let adBlock = ruleSetStore.adBlockRuleSet {
+                operations.routingRuleSets.updateAssignment(adBlock, configurationId: "REJECT")
             }
         }
         
-        ruleSetStore.bypassCountryCode = bypassCountryCode
+        operations.routingRuleSets.setBypassCountryCode(bypassCountryCode)
 
         AWCore.setOnboardingCompleted(true)
 

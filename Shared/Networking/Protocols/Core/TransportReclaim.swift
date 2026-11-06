@@ -8,8 +8,6 @@
 import Foundation
 
 nonisolated enum TransportReclaim {
-
-    /// Called from `lwipQueue` on device wake, network-path change, and tunnel stop.
     static func reclaimAll() {
         for proto in OutboundProtocol.allCases {
             switch proto {
@@ -20,12 +18,24 @@ nonisolated enum TransportReclaim {
             case .hysteria: HysteriaClient.pool.reclaim()
             case .anytls:   AnyTLSMultiplexerRegistry.shared.reclaim()
             case .sudoku:   SudokuMultiplexerRegistry.shared.reclaim()
-            case .http2:    NaiveHTTP2MultiplexerPool.shared.reclaim()
-            case .http3:    NaiveHTTP3MultiplexerPool.shared.reclaim()
-            // Per-connection or instance-tier only — no process-wide warm state.
-            case .trojan, .shadowsocks, .socks5, .http11:
+            case .rfc:      RFCMultiplexerRegistry.shared.reclaim()
+            case .trojan, .shadowsocks, .socks5, .direct:
                 break
             }
         }
+    }
+    
+    static func sealAll() {
+        NowhereClient.seal()
+        AnyTLSMultiplexerRegistry.shared.seal()
+        SudokuMultiplexerRegistry.shared.seal()
+        RFCMultiplexerRegistry.shared.seal()
+    }
+
+    static func unsealAll() {
+        NowhereClient.unseal()
+        AnyTLSMultiplexerRegistry.shared.unseal()
+        SudokuMultiplexerRegistry.shared.unseal()
+        RFCMultiplexerRegistry.shared.unseal()
     }
 }

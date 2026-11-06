@@ -15,35 +15,28 @@ nonisolated extension TLSRecordConnection {
     // MARK: - TLS 1.3 Record Crypto
 
     func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
-        // One atomic fetch pairs this record's sequence number with its key generation.
+        var innerPlaintext = Data(capacity: plaintext.count + 1)
+        innerPlaintext.append(plaintext)
+        innerPlaintext.append(contentType)
+        var record = Data(capacity: 5 + innerPlaintext.count + 16)
+        try appendTLS13Record(innerPlaintext: innerPlaintext, to: &record)
+        return record
+    }
+
+    func appendTLS13Record(innerPlaintext: Data, to records: inout Data) throws {
         let egress = nextEgressState()
 
-        let innerLen = plaintext.count + 1
-        let encryptedLen = innerLen + 16
+        let encryptedLen = innerPlaintext.count + 16
 
         var nonce = egress.iv
         xorSeqIntoNonce(&nonce, seqNum: egress.seqNum)
 
-        var innerPlaintext = Data(count: innerLen)
-        innerPlaintext.withUnsafeMutableBytes { buffer in
-            plaintext.copyBytes(to: buffer)
-            buffer[plaintext.count] = contentType
-        }
-
         let aad = Data([TLSContentType.applicationData, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
 
-        let (sealedCt, sealedTag) = try sealAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egress.symmetricKey)
-
-        var record = Data(capacity: 5 + encryptedLen)
-        record.append(aad)
-        record.append(sealedCt)
-        record.append(sealedTag)
-        return record
+        records.append(aad)
+        try appendSealedAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egress.symmetricKey, to: &records)
     }
-
-    /// Opens one record with the `ingress` snapshot (keys + sequence number, fetched atomically
-    /// by the caller); latches close-notify/KeyUpdate flags through `state`, which the caller
-    /// holds under the `receiveState` lock.
+    
     func decryptTLS13Record(ciphertext: Data, header: Data, ingress: DirectionState, receive state: inout ReceiveState) throws -> Data {
         guard ciphertext.count >= 16 else {
             throw AnywhereError.tls(.record(.ciphertextTooShort))
@@ -74,11 +67,9 @@ nonisolated extension TLSRecordConnection {
         guard contentLen >= 0 else {
             throw AnywhereError.tls(.record(.missingContentType))
         }
-
-        // A KeyUpdate must rekey the read side here or every subsequent record fails AEAD
-        // authentication (RFC 8446 §7.2).
+        
         if innerContentType == TLSContentType.handshake {
-            handlePostHandshakeTLS13(Data(decrypted.prefix(Int(contentLen))), receive: &state)
+            try handlePostHandshakeTLS13(decrypted.prefix(Int(contentLen)), receive: &state)
             return Data()
         }
 
@@ -96,11 +87,11 @@ nonisolated extension TLSRecordConnection {
         return decrypted.prefix(Int(contentLen))
     }
 
-    // MARK: - TLS 1.3 KeyUpdate (RFC 8446 §7.2)
-
-    /// Runs on the receive path with the `receiveState` lock held; flags are latched through
-    /// `state` rather than re-locking.
-    private func handlePostHandshakeTLS13(_ messages: Data, receive state: inout ReceiveState) {
+    // MARK: - TLS 1.3 KeyUpdate
+    
+    private func handlePostHandshakeTLS13(_ fragment: Data, receive state: inout ReceiveState) throws {
+        state.pendingPostHandshake.append(fragment)
+        let messages = state.pendingPostHandshake
         var i = messages.startIndex
         let end = messages.endIndex
         while i + 4 <= end {
@@ -108,12 +99,15 @@ nonisolated extension TLSRecordConnection {
             let length = Int(messages[i + 1]) << 16 | Int(messages[i + 2]) << 8 | Int(messages[i + 3])
             let bodyStart = i + 4
             let bodyEnd = bodyStart + length
-            guard bodyEnd <= end else { break }
+            guard bodyEnd <= end else {
+                guard length <= 1 << 17 else {
+                    throw AnywhereError.tls(.record(.malformed(detail: "post-handshake message too large (\(length) bytes)")))
+                }
+                break
+            }
 
             if type == TLSHandshakeType.keyUpdate {
-                // Peer switched its sending keys; advance ours for reading.
                 rekeyIngress()
-                // request_update == 1 ("update_requested") obliges us to KeyUpdate back.
                 let requestUpdate = length >= 1 ? messages[bodyStart] : 0
                 if requestUpdate == 1 {
                     state.keyUpdateResponsePending = true
@@ -121,11 +115,9 @@ nonisolated extension TLSRecordConnection {
             }
             i = bodyEnd
         }
+        state.pendingPostHandshake = i < end ? Data(messages[i..<end]) : Data()
     }
-
-    /// Advances the ingress key generation. No-op when the traffic secret is unavailable
-    /// (e.g. TLS 1.2). The key swap and the sequence-counter reset commit under one
-    /// ingress-state lock hold, so no record can pair the new generation with a stale counter.
+    
     private func rekeyIngress() {
         let keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
         mutateIngressState { state in
@@ -138,17 +130,11 @@ nonisolated extension TLSRecordConnection {
             state.seqNum = 0
         }
     }
-
-    /// Sends our KeyUpdate using the *current* write keys, then advances egress. The whole
-    /// method runs under the send chain so the build → send → key-switch sequence is atomic with
-    /// respect to application sends; called only after `receiveState`'s lock has been released.
-    func sendKeyUpdateResponseAndRekeyEgress() async {
-        try? await chainedSend { [self] in
-            // Build the KeyUpdate with the CURRENT egress keys, put it on the wire, then advance
-            // egress — all on the send chain so no application send interleaves the key switch.
+    
+    func enqueueKeyUpdateResponseAndRekeyEgress() {
+        enqueueChainedSend { [self] in
             let record: Data
             do {
-                // KeyUpdate: msg_type(24) | uint24 length(1) | request_update == update_not_requested(0).
                 let keyUpdate = Data([TLSHandshakeType.keyUpdate, 0x00, 0x00, 0x01, 0x00])
                 record = try encryptTLS13Record(plaintext: keyUpdate, contentType: TLSContentType.handshake)
             } catch {

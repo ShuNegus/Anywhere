@@ -40,95 +40,54 @@ nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
     var isOnQueue: Bool {
         DispatchQueue.getSpecific(key: onQueueKey) == true
     }
-    
-    // MARK: - Timers
-    
-    func makeRepeatingTimer(intervalMs: Int, leewayMs: Int,
-                            handler: @escaping @Sendable () -> Void) -> BridgeTimer {
-        BridgeTimer(queue: queue, intervalMs: intervalMs, leewayMs: leewayMs, handler: handler)
-    }
-    
-    func makeDeadlineTimer(handler: @escaping @Sendable () -> Void) -> BridgeDeadlineTimer {
-        BridgeDeadlineTimer(queue: queue, handler: handler)
-    }
-}
-
-nonisolated final class BridgeTimer: @unchecked Sendable {
-    
-    private let timer: DispatchSourceTimer
-    
-    private var suspended = false
-    private var cancelled = false
-    
-    fileprivate init(
-        queue: DispatchQueue,
-        intervalMs: Int,
-        leewayMs: Int,
-        handler: @escaping @Sendable () -> Void
-    ) {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(
-            deadline: .now() + .milliseconds(intervalMs),
-            repeating: .milliseconds(intervalMs),
-            leeway: .milliseconds(leewayMs)
-        )
-        timer.setEventHandler(handler: handler)
-        self.timer = timer
-        timer.resume()
-    }
-    
-    func suspend() {
-        guard !suspended, !cancelled else { return }
-        suspended = true
-        timer.suspend()
-    }
-    
-    func resume() {
-        guard suspended, !cancelled else { return }
-        suspended = false
-        timer.resume()
-    }
-    
-    func cancel() {
-        guard !cancelled else { return }
-        cancelled = true
-        if suspended {
-            suspended = false
-            timer.resume()
-        }
-        timer.cancel()
-    }
 }
 
 nonisolated final class BridgeDeadlineTimer: @unchecked Sendable {
-    
+
     private let timer: DispatchSourceTimer
-    private var cancelled = false
-    
-    fileprivate init(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
+    private let cancelled = OneShotLatch()
+
+    init(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.setEventHandler(handler: handler)
         self.timer = timer
         timer.schedule(deadline: .distantFuture, leeway: .nanoseconds(0))
         timer.resume()
     }
-    
+
+    func arm(at instant: MonotonicClock.Instant, precision: TimerPrecision) {
+        guard !cancelled.isClaimed else { return }
+        let remaining = max(MonotonicClock.instant.duration(to: instant), .zero)
+        let tolerance = precision.tolerance(forRemaining: remaining)
+        timer.schedule(
+            deadline: .now() + Self.dispatchInterval(remaining),
+            leeway: Self.dispatchInterval(tolerance)
+        )
+    }
+
     func schedule(afterNanoseconds nanoseconds: UInt64) {
-        guard !cancelled else { return }
+        guard !cancelled.isClaimed else { return }
         timer.schedule(
             deadline: .now() + .nanoseconds(Int(min(nanoseconds, UInt64(Int.max)))),
             leeway: .nanoseconds(0)
         )
     }
-    
+
     func parkUntilRearmed() {
-        guard !cancelled else { return }
+        guard !cancelled.isClaimed else { return }
         timer.schedule(deadline: .distantFuture, leeway: .nanoseconds(0))
     }
-    
+
+    private static func dispatchInterval(_ duration: Duration) -> DispatchTimeInterval {
+        .nanoseconds(Int(clamping: max(duration.nanosecondsClamped, 0)))
+    }
+
     func cancel() {
-        guard !cancelled else { return }
-        cancelled = true
+        guard cancelled.claim() else { return }
         timer.cancel()
+    }
+
+    deinit {
+        cancel()
     }
 }

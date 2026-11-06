@@ -7,28 +7,29 @@
 
 import Foundation
 
-/// Typed envelope for IPC between the main app and the network extension.
 nonisolated enum TunnelMessage: Codable, Sendable {
-    /// Key in `startVPNTunnel(options:)` carrying an encoded `setConfiguration`.
-    static let optionKey = "tunnelMessage"
-
-    /// Apply the configuration; used at startup and to switch proxies while running.
-    case setConfiguration(ProxyConfiguration)
-
-    /// Latency-test the given configuration, independent of the active tunnel. Reply: `LatencyTestResponse`.
     case testLatency(ProxyConfiguration)
-
-    /// Query current byte counters. Reply: `StatsResponse`.
     case fetchStats
-
-    /// Query the recent log buffer. Reply: `LogsResponse`.
+    case resetStats
     case fetchLogs
-
-    /// Query the recent request log. Reply: `RequestsResponse`.
     case fetchRequests
 
     /// Query live TURN relay counts. Reply: `TurnStatsResponse`.
     case fetchTurnStats
+    case fetchActivity(TunnelActivityProtocol)
+}
+
+// MARK: - Active Configuration
+
+nonisolated enum ActiveConfiguration {
+    static func load() throws -> ProxyConfiguration? {
+        guard let data = AWCore.getActiveConfigurationData() else { return nil }
+        return try JSONDecoder().decode(ProxyConfiguration.self, from: data)
+    }
+
+    static func store(_ configuration: ProxyConfiguration?) throws {
+        AWCore.setActiveConfigurationData(try configuration.map { try JSONEncoder().encode($0) })
+    }
 }
 
 // MARK: - Responses
@@ -42,27 +43,18 @@ nonisolated struct RouteTrafficEntry: Codable, Sendable, Identifiable, Hashable 
     var totalBytes: Int64 { bytesIn + bytesOut }
 }
 
-/// Point-in-time tunnel telemetry snapshot. Byte counters are cumulative
-/// **payload** bytes since tunnel start (no IP/transport headers), split per route.
 nonisolated struct StatsResponse: Codable, Sendable {
     var bytesIn: Int64
     var bytesOut: Int64
-    /// Per-route payload split, sorted by total bytes descending.
     var routes: [RouteTrafficEntry]
     var tcpConnectionCount: Int
     var udpConnectionCount: Int
     var memoryBytes: UInt64
-    /// Cumulative seconds this session has been awake (excludes device sleep).
     var wakeSeconds: TimeInterval
-    /// Cumulative seconds this session has spent in device sleep.
     var sleepSeconds: TimeInterval
-    /// Most recent first-hop TCP dial time in ms; nil until a dial this session.
     var dialMs: Int?
-    /// Most recent proxy handshake time (TCP-connected → tunnel ready) in ms.
     var handshakeMs: Int?
-    /// Session-average first-hop TCP dial time in ms; nil until a dial this session.
     var avgDialMs: Int?
-    /// Session-average proxy handshake time in ms.
     var avgHandshakeMs: Int?
 
     init(
@@ -92,9 +84,7 @@ nonisolated struct StatsResponse: Codable, Sendable {
         self.avgDialMs = avgDialMs
         self.avgHandshakeMs = avgHandshakeMs
     }
-
-    // Tolerant decoder: missing keys default to zero/nil so app and extension
-    // can briefly skew versions across an update.
+    
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         bytesIn = try c.decode(Int64.self, forKey: .bytesIn)
@@ -120,6 +110,10 @@ nonisolated struct RequestsResponse: Codable, Sendable {
     var requests: [TunnelRequestEntry]
 }
 
+nonisolated struct ActivityResponse: Codable, Sendable {
+    var entries: [TunnelActivityEntry]
+}
+
 nonisolated struct LatencyTestResponse: Codable, Sendable {
     enum Kind: String, Codable, Sendable {
         case success
@@ -131,7 +125,6 @@ nonisolated struct LatencyTestResponse: Codable, Sendable {
 }
 
 nonisolated extension LatencyTestResponse {
-    /// `.testing` collapses to `.failed`; it's a UI-only state that shouldn't appear over the wire.
     init(_ result: LatencyResult) {
         switch result {
         case .success(let ms): self.init(result: .success, ms: ms)
@@ -171,8 +164,8 @@ nonisolated struct TunnelRequestEntry: Codable, Sendable, Hashable {
     var host: String
     var port: UInt16
     var routeTarget: RouteTarget
-    var viaDefault: Bool
     var ruleSetName: String? = nil
+    var defaultRouteTarget: RouteTarget? = nil
 }
 
 nonisolated enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {
@@ -195,4 +188,29 @@ nonisolated struct TurnStatsResponse: Codable, Sendable {
         self.hosts = hosts
         self.autoDecision = autoDecision
     }
+}
+
+nonisolated struct TunnelActivityEntry: Codable, Sendable, Hashable {
+    var id: UUID
+    var host: String
+    var port: UInt16
+    var routeTarget: RouteTarget
+    var defaultRouteTarget: RouteTarget
+    var ruleSetName: String?
+    var state: TunnelActivityState
+    var startedAt: TimeInterval
+    var endedAt: TimeInterval?
+    var bytesIn: Int64
+    var bytesOut: Int64
+}
+
+nonisolated enum TunnelActivityState: String, Codable, Sendable, Hashable {
+    case connecting
+    case established
+    case closed
+}
+
+nonisolated enum TunnelActivityProtocol: String, Codable, Sendable, Hashable {
+    case tcp
+    case udp
 }

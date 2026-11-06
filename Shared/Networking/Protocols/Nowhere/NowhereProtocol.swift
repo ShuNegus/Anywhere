@@ -9,15 +9,15 @@ import Foundation
 import CryptoKit
 import Darwin
 
-/// Nowhere's compact application protocol. All multibyte integers use network byte order.
 nonisolated enum NowhereProtocol {
     static let closeErrCodeOK: UInt64 = 0x100
-    static let defaultALPN = "now/1"
-    static let authFrameSize = 32
-    static let flowHeaderSize = 5
+    static let applicationProtocol = "nw3"
+    static let authExporterLabel = "EXPORTER-Nowhere-nw3-Auth"
+    static let authFrameSize = 16
     static let flowResultSize = 1
-    static let udpHeaderSize = 5
-    static let udpFragmentHeaderSize = 13
+    static let udpHeaderSize = 4
+    static let udpFragmentHeaderSize = 12
+    static let maximumFlowID: UInt32 = 0x3fff_ffff
     static let maxUDPPacketSize = Int(UInt16.max)
     static let maxDomainLength = 253
 
@@ -28,12 +28,6 @@ nonisolated enum NowhereProtocol {
         case quic = 0x02
     }
 
-    enum FlowRole: UInt8 {
-        case duplex = 0
-        case open = 1
-        case attach = 2
-    }
-
     enum FlowKind: UInt8 {
         case tcp = 0
         case udp = 1
@@ -41,61 +35,14 @@ nonisolated enum NowhereProtocol {
 
     enum FlowRejectCode: UInt8, Equatable, CaseIterable {
         case invalidRequest = 1
-        case metadataConflict = 2
-        case pairTimeout = 3
-        case flowLimit = 4
-        case dialFailed = 5
-        case sessionReplaced = 6
-        case internalError = 7
-
-        var description: String {
-            switch self {
-            case .invalidRequest: return "invalid request"
-            case .metadataConflict: return "metadata conflict"
-            case .pairTimeout: return "pair timeout"
-            case .flowLimit: return "flow limit"
-            case .dialFailed: return "dial failed"
-            case .sessionReplaced: return "session replaced"
-            case .internalError: return "internal error"
-            }
-        }
+        case flowLimit = 2
+        case dialFailed = 3
+        case internalError = 4
     }
 
     enum FlowResult: Equatable {
         case ready
         case reject(FlowRejectCode)
-    }
-
-    struct FlowHeader: Equatable {
-        let role: FlowRole
-        let flowID: UInt32
-        let kind: FlowKind
-        let uplink: NowhereNetwork
-        let downlink: NowhereNetwork
-
-        var carriesTarget: Bool { role != .attach }
-
-        func validate(on carrier: NowhereNetwork? = nil) throws {
-            guard flowID != 0 else {
-                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid zero flow ID"))
-            }
-            switch role {
-            case .duplex:
-                guard uplink == downlink else {
-                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Duplex carrier mismatch"))
-                }
-            case .open, .attach:
-                guard uplink != downlink else {
-                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Split carriers must differ"))
-                }
-            }
-            if let carrier {
-                let expected = role == .attach ? downlink : uplink
-                guard carrier == expected else {
-                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Flow carrier mismatch"))
-                }
-            }
-        }
     }
 
     enum Target: Equatable {
@@ -202,37 +149,26 @@ nonisolated enum NowhereProtocol {
 
     // MARK: - Authentication
 
-    static func deriveAuthKey(sharedKey: String) throws -> AuthKey {
-        let keyBytes = Data(sharedKey.utf8)
-        guard !keyBytes.isEmpty else { throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Missing Nowhere shared key")) }
-        guard keyBytes.count <= UInt8.max else {
-            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Nowhere shared key exceeds 255 bytes"))
-        }
-        let salt = Data(SHA256.hash(data: Data("nowhere/now/1/auth-root".utf8)))
-        let authRoot = hmacSHA256(key: salt, message: keyBytes)
-        var info = Data("authentication".utf8)
+    static func deriveAuthKey(sharedKey: String) -> AuthKey {
+        let salt = Data(SHA256.hash(data: Data("nowhere/nw3/auth-root".utf8)))
+        let root = hmacSHA256(key: salt, message: Data(sharedKey.utf8))
+        var info = Data("vector-authentication".utf8)
         info.append(0x01)
-        return hmacSHA256(key: authRoot, message: info)
+        return hmacSHA256(key: root, message: info)
     }
 
     static func makeAuthFrame(
         authKey: AuthKey,
         transport: AuthTransport,
-        exporter: Data,
-        sessionID: Data
+        exporter: Data
     ) throws -> Data {
-        guard authKey.count == 32, exporter.count == 32, sessionID.count == 16 else {
+        guard authKey.count == 32, exporter.count == 32 else {
             throw AnywhereError.proxy(.nowhere, .authenticationRejected(status: nil, detail: "Invalid authentication material"))
         }
-        var message = Data(capacity: 49)
+        var message = Data(capacity: 33)
         message.append(transport.rawValue)
         message.append(exporter)
-        message.append(sessionID)
-        let tag = hmacSHA256(key: authKey, message: message)
-        var frame = Data(capacity: authFrameSize)
-        frame.append(sessionID)
-        frame.append(tag.prefix(16))
-        return frame
+        return Data(hmacSHA256(key: authKey, message: message).prefix(authFrameSize))
     }
 
     private static func hmacSHA256(key: Data, message: Data) -> Data {
@@ -241,54 +177,22 @@ nonisolated enum NowhereProtocol {
 
     // MARK: - Flow, target, and result
 
-    static func encodeFlowHeader(_ header: FlowHeader) throws -> Data {
-        try header.validate()
-        var output = Data(capacity: flowHeaderSize)
-        var flags = header.role.rawValue | (header.kind.rawValue << 2)
-        if header.uplink == .udp { flags |= 1 << 3 }
-        if header.downlink == .udp { flags |= 1 << 4 }
-        output.append(flags)
-        output.appendUInt32(header.flowID)
+    static func encodeFlowRequest(kind: FlowKind, target: Target) -> Data {
+        var output = Data(capacity: 1 + target.encodedLength)
+        output.append(kind.rawValue)
+        target.appendEncoded(to: &output)
         return output
     }
 
-    static func decodeFlowHeader(_ data: Data) -> FlowHeader? {
-        guard data.count == flowHeaderSize else { return nil }
-        let flags = data.byte(at: 0)
-        guard flags & 0xe0 == 0,
-              let role = FlowRole(rawValue: flags & 0x03) else { return nil }
-        let header = FlowHeader(
-            role: role,
-            flowID: data.uint32(at: 1),
-            kind: (flags & 0x04) == 0 ? .tcp : .udp,
-            uplink: (flags & 0x08) == 0 ? .tcp : .udp,
-            downlink: (flags & 0x10) == 0 ? .tcp : .udp
-        )
-        return (try? header.validate()) == nil ? nil : header
-    }
-
-    static func encodeFlowRequest(
-        header: FlowHeader,
-        target: Target?,
-        initialData: Data? = nil
-    ) throws -> Data {
-        try header.validate()
-        guard header.carriesTarget == (target != nil) else {
-            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Flow target does not match role"))
+    static func udpFlowID(streamID: Int64) throws -> UInt32 {
+        guard streamID >= 0, streamID & 3 == 0 else {
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid business stream direction"))
         }
-        let initialCount = initialData?.count ?? 0
-        var output = Data(capacity: flowHeaderSize + (target?.encodedLength ?? 0) + initialCount)
-        output.append(try encodeFlowHeader(header))
-        target?.appendEncoded(to: &output)
-        if let initialData, !initialData.isEmpty { output.append(initialData) }
-        return output
-    }
-
-    static func encodeFlowResult(_ result: FlowResult) -> Data {
-        switch result {
-        case .ready: return Data([0])
-        case .reject(let code): return Data([code.rawValue])
+        let id = (UInt64(streamID) >> 2) + 1
+        guard id <= UInt64(maximumFlowID) else {
+            throw AnywhereError.proxy(.nowhere, .streamIDsExhausted)
         }
+        return UInt32(id)
     }
 
     static func decodeFlowResult(_ data: Data, offset: Int = 0) -> FlowResult? {
@@ -301,30 +205,19 @@ nonisolated enum NowhereProtocol {
 
     // MARK: - QUIC DATAGRAM
 
-    static func encodeUDPControl(type: UDPType, flowID: UInt32) throws -> Data {
-        guard type == .close, flowID != 0 else {
-            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid UDP CLOSE frame"))
-        }
-        var output = Data(capacity: udpHeaderSize)
-        output.append(type.rawValue)
-        output.appendUInt32(flowID)
-        return output
-    }
-
     static func encodeUDPDataFragments(
         flowID: UInt32,
         packetID: UInt32,
         payload: Data,
         maxDatagramSize: Int
     ) throws -> [Data] {
-        guard flowID != 0 else { throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid flow ID")) }
+        guard (1...maximumFlowID).contains(flowID) else { throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid flow ID")) }
         guard payload.count <= maxUDPPacketSize else { throw AnywhereError.proxy(.nowhere, .packetTooLarge) }
         guard maxDatagramSize >= udpHeaderSize else {
             throw AnywhereError.proxy(.nowhere, .datagramTooLarge(maxFrame: maxDatagramSize, headerSize: udpHeaderSize))
         }
         if payload.count <= maxDatagramSize - udpHeaderSize {
             var frame = Data(capacity: udpHeaderSize + payload.count)
-            frame.append(UDPType.data.rawValue)
             frame.appendUInt32(flowID)
             frame.append(payload)
             return [frame]
@@ -343,8 +236,7 @@ nonisolated enum NowhereProtocol {
             let start = index * payloadCapacity
             let end = min(payload.count, start + payloadCapacity)
             var frame = Data(capacity: udpFragmentHeaderSize + end - start)
-            frame.append(UDPType.fragment.rawValue)
-            frame.appendUInt32(flowID)
+            frame.appendUInt32(UInt32(UDPType.fragment.rawValue) << 30 | flowID)
             frame.appendUInt32(packetID)
             frame.append(UInt8(index))
             frame.append(UInt8(count))
@@ -368,10 +260,10 @@ nonisolated enum NowhereProtocol {
                               totalLength: UInt16(payload.count), payload: payload)
         case .fragment:
             guard data.count > udpFragmentHeaderSize else { return nil }
-            let packetID = data.uint32(at: 5)
-            let index = data.byte(at: 9)
-            let count = data.byte(at: 10)
-            let total = data.uint16(at: 11)
+            let packetID = data.uint32(at: 4)
+            let index = data.byte(at: 8)
+            let count = data.byte(at: 9)
+            let total = data.uint16(at: 10)
             let payload = Data(data.dropFirst(udpFragmentHeaderSize))
             guard packetID != 0, count >= 2, index < count, total != 0,
                   Int(total) >= Int(count), !payload.isEmpty,
@@ -387,14 +279,11 @@ nonisolated enum NowhereProtocol {
         }
     }
 
-    /// Validates only the common header so unknown or pre-READY routes can be dropped
-    /// before the callback-backed payload is copied.
     static func decodeUDPEnvelope(_ data: Data) -> (type: UDPType, flowID: UInt32)? {
         guard data.count >= udpHeaderSize else { return nil }
-        let flags = data.byte(at: 0)
-        guard flags & 0xfc == 0,
-              let type = UDPType(rawValue: flags & 0x03) else { return nil }
-        let flowID = data.uint32(at: 1)
+        let value = data.uint32(at: 0)
+        guard let type = UDPType(rawValue: UInt8(value >> 30)) else { return nil }
+        let flowID = value & maximumFlowID
         guard flowID != 0 else { return nil }
         return (type, flowID)
     }
@@ -410,10 +299,11 @@ nonisolated enum NowhereProtocol {
     }
 
     static func decodeUDPStreamPacket(_ data: Data, offset: Int = 0) -> (payload: Data, consumed: Int)? {
-        guard offset >= 0, offset + 2 <= data.count else { return nil }
+        guard offset >= 0, offset <= data.count, data.count - offset >= 2 else { return nil }
         let length = Int(data.uint16(at: offset))
-        guard offset + 2 + length <= data.count else { return nil }
-        return (Data(data[(offset + 2)..<(offset + 2 + length)]), 2 + length)
+        guard length <= data.count - offset - 2 else { return nil }
+        let start = data.startIndex + offset + 2
+        return (Data(data[start..<(start + length)]), 2 + length)
     }
 }
 

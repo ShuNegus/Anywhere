@@ -7,65 +7,133 @@
 
 import Foundation
 import Synchronization
+import AnywhereIP
 
 nonisolated private let logger = AnywhereLogger(category: "UDPPlane")
 
 nonisolated enum UDPPlaneCommand {
-    case setMultiplexerPool(VLESSVisionUDPMultiplexerPool?)
-    case reclaim(replacementMultiplexerPool: VLESSVisionUDPMultiplexerPool?)
+    case setMultiplexerPool((any UDPMultiplexerPool)?)
+    case revalidateQUIC
+    case reclaim
 }
 
 actor UDPPlane {
-    
     private unowned let stack: TunnelStack
-    
+
     // MARK: Registry / session state
-    
+
     private var flows: [TunnelStack.UDPFlowKey: UDPFlow] = [:] {
         didSet { FlowGauge.publishUDPTable(flows.count) }
     }
+
+    private var cleanupDeadline: TimeInterval?
     
+    nonisolated private let bufferLedger = UDPBufferLedger(budget: TunnelConstants.udpGlobalBufferBudget)
+
+    private var udpPressureLog = PressureEventThrottle(message: "[UDP] Flow table full")
+
     private struct PendingDatagrams {
-        var datagrams: [UDPPacket.Inbound] = []
+        var datagrams: [InboundDatagram] = []
         var byteCount = 0
     }
     private var pendingResolutions: [TunnelStack.UDPFlowKey: PendingDatagrams] = [:]
-    
+
+    private struct PendingSniff {
+        var sniffer: QUICClientHelloSniffer
+        var datagrams: [InboundDatagram] = []
+        var byteCount = 0
+        let generation: UInt64
+    }
+    private var pendingSniffs: [TunnelStack.UDPFlowKey: PendingSniff] = [:]
+    private var sniffGeneration: UInt64 = 0
+    private var pendingSniffCapWarned = false
+
+    private struct QUICBlock {
+        enum Cause {
+            case policy
+            case mitm(host: String)
+            case proxied(RouteTarget)
+            case rejected
+        }
+        let cause: Cause
+        var deadline: TimeInterval
+    }
+    private var quicBlocks: [TunnelStack.UDPFlowKey: QUICBlock] = [:]
+
+    private enum SniffStage {
+        case pending
+        case done(serverName: String?)
+    }
+
     private var ssSessions: [UUID: ShadowsocksUDPSession] = [:]
-    
-    private var multiplexerPoolStorage: VLESSVisionUDPMultiplexerPool?
+
+    private var multiplexerPoolStorage: (any UDPMultiplexerPool)?
 
     private var pendingResolutionCapWarned = false
-    
+
     init(stack: TunnelStack) {
         self.stack = stack
     }
-    
+
     // MARK: - Multiplexer pool
-    
-    var multiplexerPool: VLESSVisionUDPMultiplexerPool? { multiplexerPoolStorage }
-    
+
+    var multiplexerPool: (any UDPMultiplexerPool)? { multiplexerPoolStorage }
+
     func apply(_ command: UDPPlaneCommand) {
         switch command {
         case .setMultiplexerPool(let pool):
             multiplexerPoolStorage = pool
-        case .reclaim(let replacement):
-            reclaim(replacementMultiplexerPool: replacement)
+        case .revalidateQUIC:
+            revalidateQUIC()
+        case .reclaim:
+            reclaim()
         }
     }
-    
+
     // MARK: - Intake
-    
-    func feed(_ packets: [Data]) {
-        for packet in packets {
-            if let datagram = UDPPacket.parse(packet) {
-                handleInboundUDP(datagram)
-            }
-        }
+
+    private struct FlowBatch {
+        let flow: UDPFlow
+        var payloads: [Data]
     }
-    
+
+    func feed(_ datagrams: [InboundDatagram]) async {
+        let udpConfig = stack.udpConfig()
+        var batches: [FlowBatch] = []
+        for datagram in datagrams {
+            guard stack.publishedPhase.load(ordering: .relaxed) == .running else { break }
+            if let flow = openFlow(for: datagram, udpConfig: udpConfig) {
+                if let index = batches.firstIndex(where: { $0.flow === flow }) {
+                    batches[index].payloads.append(datagram.payload)
+                } else {
+                    batches.append(FlowBatch(flow: flow, payloads: [datagram.payload]))
+                }
+                continue
+            }
+            await deliver(&batches)
+            await handleInboundUDP(datagram)
+        }
+        await deliver(&batches)
+    }
+
+    private func openFlow(for datagram: InboundDatagram, udpConfig: TunnelStack.UDPConfig) -> UDPFlow? {
+        let destination = datagram.destination
+        if destination.port == 53 || udpConfig.blockUDP { return nil }
+        if destination.port == 443 && udpConfig.quicPolicy.blocksAllQUIC { return nil }
+        if udpConfig.blockWebRTC && TunnelStack.isSTUNMessage(datagram.payload) { return nil }
+        guard let flow = flows[TunnelStack.UDPFlowKey(datagram)], !flow.isClosed else { return nil }
+        return flow
+    }
+
+    private func deliver(_ batches: inout [FlowBatch]) async {
+        for batch in batches {
+            await batch.flow.handleReceivedData(batch.payloads)
+        }
+        batches.removeAll(keepingCapacity: true)
+    }
+
     private func deferUntilResolved(
-        _ datagram: UDPPacket.Inbound,
+        _ datagram: InboundDatagram,
         flowKey: TunnelStack.UDPFlowKey,
         domain: String
     ) -> Bool {
@@ -77,114 +145,100 @@ actor UDPPlane {
             pendingResolutions[flowKey] = pending
             return true
         }
-        
+
         guard pendingResolutions.count < TunnelLimits.udpMaxPendingResolutions else {
             if !pendingResolutionCapWarned {
                 pendingResolutionCapWarned = true
-                logger.warning("[UDP] pending-resolution table full (\(TunnelLimits.udpMaxPendingResolutions)); new flows dial on the default outbound")
+                logger.warning("[UDP] Pending-resolution table full")
             }
             return false
         }
-        
+
         pendingResolutions[flowKey] = PendingDatagrams(datagrams: [datagram],
                                                        byteCount: datagram.payload.count)
         Task { [weak self] in
-            _ = await RuleResolver.shared.resolveIPv4(for: domain)
+            _ = await DNSResolver.localRequests.resolveHost(domain)
             await self?.resumeAfterResolution(flowKey: flowKey)
         }
         return true
     }
-    
-    private func resumeAfterResolution(flowKey: TunnelStack.UDPFlowKey) {
+
+    private func resumeAfterResolution(flowKey: TunnelStack.UDPFlowKey) async {
         guard let pending = pendingResolutions.removeValue(forKey: flowKey) else { return }
         if pendingResolutionCapWarned, pendingResolutions.count <= TunnelLimits.udpMaxPendingResolutions / 2 {
             pendingResolutionCapWarned = false
-            logger.info("[UDP] pending-resolution table drained; waiting on IP-rule lookups again")
         }
         for datagram in pending.datagrams {
-            handleInboundUDP(datagram, awaitedResolution: true)
+            guard stack.publishedPhase.load(ordering: .relaxed) == .running else { return }
+            await handleInboundUDP(datagram, awaitedResolution: true)
         }
     }
-    
-    private func handleInboundUDP(_ datagram: UDPPacket.Inbound, awaitedResolution: Bool = false) {
+
+    private func handleInboundUDP(
+        _ datagram: InboundDatagram,
+        awaitedResolution: Bool = false,
+        sniff: SniffStage = .pending
+    ) async {
         let payload = datagram.payload
-        let isIPv6 = datagram.isIPv6
-        
+        let dstAddress = datagram.destination.address
+        let dstPort = datagram.destination.port
+
         let udpConfig = stack.udpConfig()
-        
-        // DNS interception: fake-IP for our own resolver; queries to any other
-        // resolver are proxied to the real server.
-        if datagram.dstPort == 53 {
-            let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
+
+        if dstPort == 53 {
             if let destination = TunnelStack.dnsDestination(
-                for: dstIPString, exempting: udpConfig.interceptExemptDNSServers
+                for: dstAddress.description, exempting: udpConfig.interceptExemptDNSServers
             ) {
-                if handleDNSQuery(datagram, destination: destination) {
-                    return  // Fake response sent, no flow needed
+                if await handleDNSQuery(datagram, destination: destination, udpConfig: udpConfig) {
+                    return
                 }
-                // `.publicResolver` non-A/AAAA — fall through, proxy MX/SRV/TXT to real server
             }
-            // Non-intercepted DNS server — fall through to ordinary UDP flow
         }
-        
-        // Block UDP: reject every datagram except DNS (port 53).
-        if udpConfig.blockUDP && datagram.dstPort != 53 {
+
+        if udpConfig.blockUDP && dstPort != 53 {
             stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         }
-        
-        // QUIC (Blocked mode): drop UDP/443 with ICMP port-unreachable so
-        // HTTP/3 clients fail fast and fall back to HTTP/2. Automatic mode is
-        // decided post-resolution below (needs the routing result).
-        if datagram.dstPort == 443 && udpConfig.quicPolicy.blocksAllQUIC {
-            stack.sendICMPPortUnreachable(rejecting: datagram)
+
+        let isQUIC = Self.isQUIC(payload, port: dstPort)
+        let flowKey = TunnelStack.UDPFlowKey(datagram)
+
+        if isQUIC && udpConfig.quicPolicy.blocksAllQUIC {
+            blockQUIC(datagram, flowKey: flowKey, cause: .policy)
             return
         }
-        
-        // WebRTC: reject STUN so ICE gathering fails fast. STUN rides arbitrary
-        // negotiated ports, so classify by payload; runs before the flow lookup
-        // so a candidate never opens a flow.
+
         if udpConfig.blockWebRTC && TunnelStack.isSTUNMessage(payload) {
             stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         }
-        
-        // Fast path: deliver to an existing flow. The flow holds its resolved
-        // domain from creation, so it survives fake-IP pool eviction.
-        let flowKey = TunnelStack.UDPFlowKey(
-            srcIP: datagram.srcIP, srcPort: datagram.srcPort,
-            dstIP: datagram.dstIP, dstPort: datagram.dstPort,
-            isIPv6: isIPv6
-        )
+
         if let flow = flows[flowKey] {
-            Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
+            if !flow.isClosed {
+                await flow.handleReceivedData([payload])
+                return
+            }
+            flows.removeValue(forKey: flowKey)
+        }
+
+        if replyToBlockedQUIC(datagram, flowKey: flowKey) {
             return
         }
-        
-        if stack.connectionRouter.isRejectMarkedDestination(ipBytes: datagram.dstIP, isIPv6: isIPv6) {
+
+        if stack.isRejectMarked(dstAddress) {
             return
         }
 
         guard let defaultConfiguration = udpConfig.configuration else { return }
-        let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
-        let srcHost = TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: isIPv6)
-        let srcIPData = datagram.srcIPData
-        let dstIPData = datagram.dstIPData
-        
-        let decision = stack.connectionRouter.decision(forIP: dstIPString, port: datagram.dstPort, proto: "UDP")
-        
-        if !awaitedResolution, decision.ipRuleLookupPending,
-           deferUntilResolved(datagram, flowKey: flowKey, domain: decision.host) {
-            return
-        }
-        
+
+        let decision = stack.connectionRouter.decision(forIP: dstAddress.description)
+
         let dstHost = decision.host
-        let dstIsDomain = decision.hostIsResolvedDomain
-        
+
         var flowConfiguration = defaultConfiguration
-        var routeTarget = udpConfig.defaultRouteTarget
+        var routeTarget: RouteTarget = .default
         var ruleSetName: String? = nil
-        
+
         switch decision.action {
         case .route(let target, let configuration, let matchedRuleSet):
             routeTarget = target
@@ -192,52 +246,263 @@ actor UDPPlane {
             if let configuration {
                 flowConfiguration = configuration
             }
-        case .routeViaDefault:
-            break
         case .reject(let matchedRuleSet):
-            stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
+            stack.requestLog.record(protocol: .udp, host: dstHost, port: dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
             return
         case .unreachable:
             stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         }
-        
-        // QUIC (Automatic mode): drop UDP/443 that is proxied or MITM-listed,
-        // forcing fallback to TCP where those paths work. `mitmListed` is an
-        // autoclosure — the trie is consulted only when it can change the answer.
-        let isProxied = routeTarget.configurationID != nil
-        if datagram.dstPort == 443,
-           udpConfig.quicPolicy.blocksResolvedQUIC(
-            isProxied: isProxied,
-            mitmListed: dstIsDomain && udpConfig.mitmEnabled && stack.mitmPolicy.matches(dstHost)
-           ) {
-            logger.debug("[UDP] QUIC blocked (automatic): \(dstHost):443 reason=\(isProxied ? "proxied" : "mitm")")
-            stack.sendICMPPortUnreachable(rejecting: datagram)
+
+        var sniffedServerName: String?
+        switch sniff {
+        case .done(let serverName):
+            sniffedServerName = serverName
+        case .pending:
+            if !decision.hostIsResolvedDomain {
+                switch await sniffQUIC(datagram, flowKey: flowKey) {
+                case .consumed:
+                    return
+                case .finished(let serverName):
+                    sniffedServerName = serverName
+                }
+            }
+        }
+
+        if let sniffedServerName,
+           let action = stack.connectionRouter.action(forSniffedHost: sniffedServerName) {
+            switch action {
+            case .route(let target, let configuration, let matchedRuleSet):
+                routeTarget = target
+                ruleSetName = matchedRuleSet
+                flowConfiguration = configuration ?? defaultConfiguration
+            case .reject(let matchedRuleSet):
+                recordQUICBlock(flowKey, cause: .rejected)
+                stack.requestLog.record(protocol: .udp, host: sniffedServerName, port: dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
+                return
+            case .unreachable:
+                stack.sendICMPPortUnreachable(rejecting: datagram)
+                return
+            }
+        }
+
+        let policyHost = sniffedServerName ?? dstHost
+
+        if isQUIC, blocksQUIC(to: policyHost, udpConfig: udpConfig) {
+            blockQUIC(datagram, flowKey: flowKey, cause: .mitm(host: policyHost))
             return
         }
-        
-        stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: decision.viaDefault, ruleSetName: ruleSetName)
-        
+
+        if !awaitedResolution, decision.ipRuleLookupPending,
+           deferUntilResolved(datagram, flowKey: flowKey, domain: dstHost) {
+            return
+        }
+
+        if isQUIC, blocksQUIC(routedTo: routeTarget, udpConfig: udpConfig) {
+            blockQUIC(datagram, flowKey: flowKey, cause: .proxied(routeTarget))
+            return
+        }
+
+        guard makeRoomForNewFlow() else { return }
+
+        stack.requestLog.record(protocol: .udp, host: policyHost, port: dstPort, routeTarget: routeTarget, ruleSetName: ruleSetName)
+
         let flow = UDPFlow(
             stack: stack,
             plane: self,
+            ledger: bufferLedger,
             flowKey: flowKey,
-            srcHost: srcHost,
-            srcPort: datagram.srcPort,
             dstHost: dstHost,
-            dstPort: datagram.dstPort,
-            srcIPData: srcIPData,
-            dstIPData: dstIPData,
-            isIPv6: isIPv6,
+            sniffedHost: sniffedServerName,
+            isQUIC: isQUIC,
             configuration: flowConfiguration,
-            routeTarget: routeTarget
+            routeTarget: routeTarget,
+            ruleSetName: ruleSetName
         )
-        flushAllFlowsIfAtCap()
-        flows[flowKey] = flow
-        Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
+        insert(flow)
+        await flow.handleReceivedData([payload])
+    }
+
+    // MARK: - QUIC policy
+
+    private func blocksQUIC(to host: String, udpConfig: TunnelStack.UDPConfig) -> Bool {
+        udpConfig.quicPolicy.blocksQUIC(
+            mitmListed: udpConfig.mitmEnabled && stack.mitmPolicy.matches(host)
+        )
+    }
+
+    private func blocksQUIC(routedTo routeTarget: RouteTarget, udpConfig: TunnelStack.UDPConfig) -> Bool {
+        udpConfig.quicPolicy.blocksQUIC(
+            isProxied: routeTarget.resolved(against: udpConfig.defaultRouteTarget).configurationID != nil
+        )
+    }
+
+    private func revalidateQUIC() {
+        let udpConfig = stack.udpConfig()
+        for (key, block) in quicBlocks where !stillBlocks(block.cause, udpConfig: udpConfig) {
+            quicBlocks.removeValue(forKey: key)
+        }
+        for (key, flow) in flows where flow.isQUIC {
+            let host = flow.sniffedHost ?? flow.dstHost
+            let cause: QUICBlock.Cause
+            if udpConfig.quicPolicy.blocksAllQUIC {
+                cause = .policy
+            } else if blocksQUIC(to: host, udpConfig: udpConfig) {
+                cause = .mitm(host: host)
+            } else if blocksQUIC(routedTo: flow.routeTarget, udpConfig: udpConfig) {
+                cause = .proxied(flow.routeTarget)
+            } else {
+                continue
+            }
+            flows.removeValue(forKey: key)
+            recordQUICBlock(key, cause: cause)
+            Task { await flow.close() }
+        }
+    }
+
+    private func stillBlocks(_ cause: QUICBlock.Cause, udpConfig: TunnelStack.UDPConfig) -> Bool {
+        switch cause {
+        case .policy: return udpConfig.quicPolicy.blocksAllQUIC
+        case .mitm(let host): return blocksQUIC(to: host, udpConfig: udpConfig)
+        case .proxied(let routeTarget): return blocksQUIC(routedTo: routeTarget, udpConfig: udpConfig)
+        case .rejected: return true
+        }
+    }
+
+    private static func isQUIC(_ payload: Data, port: UInt16) -> Bool {
+        port == 443 || QUICClientHelloSniffer.looksLikeClientInitial(payload)
+    }
+
+    private func blockQUIC(_ datagram: InboundDatagram, flowKey: TunnelStack.UDPFlowKey, cause: QUICBlock.Cause) {
+        recordQUICBlock(flowKey, cause: cause)
+        stack.sendICMPPortUnreachable(rejecting: datagram)
+    }
+
+    private func recordQUICBlock(_ flowKey: TunnelStack.UDPFlowKey, cause: QUICBlock.Cause) {
+        if quicBlocks[flowKey] == nil, quicBlocks.count >= TunnelLimits.udpMaxQUICBlocks,
+           let oldest = quicBlocks.min(by: { $0.value.deadline < $1.value.deadline })?.key {
+            quicBlocks.removeValue(forKey: oldest)
+        }
+        let deadline = MonotonicClock.now + TunnelConstants.udpQUICBlockIdleTimeout
+        quicBlocks[flowKey] = QUICBlock(cause: cause, deadline: deadline)
+        if cleanupDeadline.map({ deadline < $0 }) ?? true {
+            stack.scheduleUDPCleanup(at: deadline)
+        }
+    }
+
+    private func replyToBlockedQUIC(_ datagram: InboundDatagram, flowKey: TunnelStack.UDPFlowKey) -> Bool {
+        guard var block = quicBlocks[flowKey] else { return false }
+        let now = MonotonicClock.now
+        guard now <= block.deadline else {
+            quicBlocks.removeValue(forKey: flowKey)
+            return false
+        }
+        block.deadline = now + TunnelConstants.udpQUICBlockIdleTimeout
+        quicBlocks[flowKey] = block
+        if case .rejected = block.cause { return true }
+        stack.sendICMPPortUnreachable(rejecting: datagram)
+        return true
+    }
+
+    // MARK: - QUIC SNI sniffing
+
+    private enum SniffOutcome {
+        case consumed
+        case finished(serverName: String?)
+    }
+
+    private func sniffQUIC(_ datagram: InboundDatagram, flowKey: TunnelStack.UDPFlowKey) async -> SniffOutcome {
+        var pending: PendingSniff
+        if let held = pendingSniffs.removeValue(forKey: flowKey) {
+            pending = held
+        } else {
+            guard QUICClientHelloSniffer.looksLikeClientInitial(datagram.payload) else {
+                return .finished(serverName: nil)
+            }
+            guard pendingSniffs.count < TunnelLimits.udpMaxPendingSniffs else {
+                if !pendingSniffCapWarned {
+                    pendingSniffCapWarned = true
+                    logger.warning("[UDP] Pending-sniff table full")
+                }
+                return .finished(serverName: nil)
+            }
+            sniffGeneration += 1
+            pending = PendingSniff(
+                sniffer: QUICClientHelloSniffer(
+                    bufferLimit: TunnelConstants.quicSnifferBufferLimit,
+                    datagramLimit: TunnelConstants.quicSnifferDatagramLimit
+                ),
+                generation: sniffGeneration
+            )
+        }
+
+        var state = pending.sniffer.feed(datagram.payload)
+        if state == .needMore, pending.byteCount + datagram.payload.count > TunnelConstants.udpPendingSniffMaxBytes {
+            state = .unavailable
+        }
+
+        switch state {
+        case .needMore:
+            pending.datagrams.append(datagram)
+            pending.byteCount += datagram.payload.count
+            let isFirst = pending.datagrams.count == 1
+            pendingSniffs[flowKey] = pending
+            if isFirst {
+                let generation = pending.generation
+                Task { [weak self] in
+                    try? await Task.sleep(seconds: TunnelConstants.sniffDeadline, precision: .prompt)
+                    await self?.sniffDeadlineFired(flowKey: flowKey, generation: generation)
+                }
+            }
+            return .consumed
+        case .found(let serverName):
+            notePendingSniffDrained()
+            return await releaseHeldDatagrams(pending.datagrams, then: datagram, serverName: serverName)
+        case .notQUIC, .unavailable:
+            notePendingSniffDrained()
+            return await releaseHeldDatagrams(pending.datagrams, then: datagram, serverName: nil)
+        }
+    }
+
+    private func releaseHeldDatagrams(
+        _ held: [InboundDatagram],
+        then datagram: InboundDatagram,
+        serverName: String?
+    ) async -> SniffOutcome {
+        guard !held.isEmpty else {
+            return .finished(serverName: serverName)
+        }
+        for datagram in held + [datagram] {
+            guard stack.publishedPhase.load(ordering: .relaxed) == .running else { break }
+            await handleInboundUDP(datagram, sniff: .done(serverName: serverName))
+        }
+        return .consumed
+    }
+
+    private func sniffDeadlineFired(flowKey: TunnelStack.UDPFlowKey, generation: UInt64) async {
+        guard let pending = pendingSniffs[flowKey], pending.generation == generation else { return }
+        pendingSniffs.removeValue(forKey: flowKey)
+        notePendingSniffDrained()
+        for datagram in pending.datagrams {
+            guard stack.publishedPhase.load(ordering: .relaxed) == .running else { return }
+            await handleInboundUDP(datagram, sniff: .done(serverName: nil))
+        }
+    }
+
+    private func notePendingSniffDrained() {
+        if pendingSniffCapWarned, pendingSniffs.count <= TunnelLimits.udpMaxPendingSniffs / 2 {
+            pendingSniffCapWarned = false
+        }
     }
 
     // MARK: - Flow registry
+
+    private func insert(_ flow: UDPFlow) {
+        flows[flow.flowKey] = flow
+        if cleanupDeadline.map({ flow.idleDeadline < $0 }) ?? true {
+            stack.scheduleUDPCleanup(at: flow.idleDeadline)
+        }
+    }
 
     func remove(_ flow: UDPFlow) {
         if flows[flow.flowKey] === flow {
@@ -245,47 +510,84 @@ actor UDPPlane {
         }
     }
     
-    private func flushAllFlowsIfAtCap() {
-        guard flows.count >= TunnelLimits.udpMaxFlows else { return }
-        logger.warning("[UDP] Flow cap reached (\(flows.count)/\(TunnelLimits.udpMaxFlows)); silently flushing all UDP flows, clients will retry")
-        let all = Array(flows.values)
-        flows.removeAll()
-        for flow in all {
+    func evictForBufferPressure(_ victims: [UDPBufferLedger.Victim]) {
+        for victim in victims {
+            guard let flow = flows[victim.handle], ObjectIdentifier(flow) == victim.id else { continue }
+            flows.removeValue(forKey: victim.handle)
+            logger.warning("[UDP] Uplink buffer full")
             Task { await flow.close() }
         }
-        pendingResolutions.removeAll()
-        pendingResolutionCapWarned = false
-        purgeShadowsocksUDPSessions()
+    }
+    
+    private func makeRoomForNewFlow() -> Bool {
+        guard flows.count >= TunnelLimits.udpMaxFlows else { return true }
+        let now = MonotonicClock.now
+        var unassured: (key: TunnelStack.UDPFlowKey, idleFor: TimeInterval)?
+        var assured: (key: TunnelStack.UDPFlowKey, idleFor: TimeInterval)?
+        for (key, flow) in flows {
+            if flow.isClosed {
+                flows.removeValue(forKey: key)
+                return true
+            }
+            let snapshot = flow.pressureSnapshot(now: now)
+            if !snapshot.isAssured {
+                if snapshot.idleFor > (unassured?.idleFor ?? -1) { unassured = (key, snapshot.idleFor) }
+            } else if snapshot.idleFor >= TunnelConstants.pressureIdleTimeout,
+                      snapshot.idleFor > (assured?.idleFor ?? -1) {
+                assured = (key, snapshot.idleFor)
+            }
+        }
+        guard let victim = unassured ?? assured, let flow = flows.removeValue(forKey: victim.key) else {
+            udpPressureLog.noteDropped(now: now, logger: logger)
+            return false
+        }
+        Task { await flow.close() }
+        return true
     }
 
     // MARK: - Cleanup
 
-    func cleanup() {
+    func cleanup() -> TimeInterval? {
         let now = MonotonicClock.now
-        for (key, flow) in flows where now > flow.idleDeadline {
-            Task { await flow.close() }
-            flows.removeValue(forKey: key)
+        var next: TimeInterval?
+        for (key, flow) in flows {
+            let deadline = flow.idleDeadline
+            if now > deadline {
+                Task { await flow.close() }
+                flows.removeValue(forKey: key)
+            } else if next.map({ deadline < $0 }) ?? true {
+                next = deadline
+            }
         }
+        for (key, block) in quicBlocks {
+            if now > block.deadline {
+                quicBlocks.removeValue(forKey: key)
+            } else if next.map({ block.deadline < $0 }) ?? true {
+                next = block.deadline
+            }
+        }
+        cleanupDeadline = next
+        return next
     }
-    
+
     // MARK: - Shadowsocks UDP sessions
-    
+
     func shadowsocksSession(for configuration: ProxyConfiguration) -> Result<ShadowsocksUDPSession, AnywhereError> {
         if let existing = ssSessions[configuration.id], existing.isUsable {
             return .success(existing)
         }
         ssSessions.removeValue(forKey: configuration.id)
-        
-        guard case .shadowsocks(let password, let method) = configuration.outbound else {
+
+        guard case .shadowsocks(let shadowsocks) = configuration.outbound else {
             return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Shadowsocks password not set")))
         }
-        guard let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(AnywhereError.proxy(.shadowsocks, .cipher(.unsupportedMethod(method))))
+        guard let cipher = shadowsocks.cipher else {
+            return .failure(AnywhereError.proxy(.shadowsocks, .cipher(.unsupportedMethod(shadowsocks.method))))
         }
-        
+
         let mode: ShadowsocksUDPSession.Mode
         if cipher.isSS2022 {
-            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
+            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: shadowsocks.password, keySize: cipher.keySize) else {
                 return .failure(AnywhereError.proxy(.shadowsocks, .cipher(.invalidKey)))
             }
             if cipher == .blake3chacha20poly1305 {
@@ -294,10 +596,10 @@ actor UDPPlane {
                 mode = .ss2022AES(cipher: cipher, pskList: pskList)
             }
         } else {
-            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
+            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: shadowsocks.password, keySize: cipher.keySize)
             mode = .legacy(cipher: cipher, masterKey: masterKey)
         }
-        
+
         let session = ShadowsocksUDPSession(
             mode: mode,
             serverHost: configuration.serverAddress,
@@ -306,37 +608,37 @@ actor UDPPlane {
         ssSessions[configuration.id] = session
         return .success(session)
     }
-    
+
     private func purgeShadowsocksUDPSessions() {
         let all = Array(ssSessions.values)
         ssSessions.removeAll()
         for session in all { session.cancel() }
     }
-    
-    // MARK: - DNS interception (fake-IP)
-    
-    private func handleDNSQuery(_ datagram: UDPPacket.Inbound, destination: TunnelStack.DNSDestination) -> Bool {
+
+    // MARK: - DNS interception (synthetic address)
+
+    private func handleDNSQuery(
+        _ datagram: InboundDatagram,
+        destination: TunnelStack.DNSDestination,
+        udpConfig: TunnelStack.UDPConfig
+    ) async -> Bool {
         let payload = datagram.payload
         guard let parsed = payload.withUnsafeBytes({ ptr -> (domain: String, qtype: UInt16)? in
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
             return DNSPacket.parseQuery(UnsafeBufferPointer(start: base, count: ptr.count))
         }) else { return false }
-        
+
         let domain = parsed.domain.lowercased()
         let qtype = parsed.qtype
-        
-        // Block DDR (RFC 9462) — otherwise the system auto-upgrades to DoH/DoT
-        // and bypasses the port-53 interception this tunnel relies on.
+
         if domain == "_dns.resolver.arpa" {
             return sendNODATA(answering: datagram, qtype: qtype)
         }
-        
-        // NODATA for SVCB/HTTPS (qtype 65, RFC 9460). NODATA forces the
-        // fallback to A/AAAA, which we fake-IP and route.
+
         if qtype == 65 {
             return sendNODATA(answering: datagram, qtype: qtype)
         }
-        
+
         let (ruleMatch, rulesVersion) = stack.connectionRouter.dnsVerdict(forDomain: domain)
         if let ruleMatch, case .reject = ruleMatch.action {
             if stack.connectionRouter.shouldLogDNSReject(domain: domain) {
@@ -347,7 +649,6 @@ actor UDPPlane {
                     routeTarget: .reject,
                     ruleSetName: ruleMatch.ruleSetName
                 )
-                logger.debug("[DNS] Rejected by domain rule: \(domain)")
             }
             guard qtype == 1 || qtype == 28 else {
                 return sendNODATA(answering: datagram, qtype: qtype)
@@ -355,79 +656,87 @@ actor UDPPlane {
             let zeroIP = [UInt8](repeating: 0, count: qtype == 1 ? 4 : 16)
             return sendAddressAnswer(
                 answering: datagram,
-                ip: zeroIP,
+                ips: [zeroIP],
                 qtype: qtype,
                 ttl: TunnelConstants.dnsBlockedAnswerTTL
             )
         }
 
-        guard qtype == 1 || qtype == 28 else {
+        if qtype == 28 {
+            return sendNODATA(answering: datagram, qtype: qtype)
+        }
+
+        guard qtype == 1 else {
             if destination == .anywhereResolver {
-                if forwardToUpstreamResolver(datagram, domain: domain, qtype: qtype) {
+                if await forwardToUpstreamResolver(datagram) {
                     return true
                 }
                 return sendNODATA(answering: datagram, qtype: qtype)
             }
             return false
         }
-        
-        let offset = stack.fakeIPPool.allocate(domain: domain, verdict: ruleMatch, verdictVersion: rulesVersion)
 
-        if qtype == 1 {
-            let ipv4 = FakeIPPool.ipv4Bytes(offset: offset)
-            return sendAddressAnswer(
-                answering: datagram,
-                ip: [ipv4.0, ipv4.1, ipv4.2, ipv4.3],
-                qtype: qtype,
-                ttl: TunnelConstants.dnsFakeIPAnswerTTL
-            )
+        if udpConfig.syntheticAddressExcludedDomains.contains(domain) {
+            if let mapped = DNSHosts.shared.addresses(for: domain, family: .ipv4) {
+                return sendAddressAnswer(
+                    answering: datagram,
+                    ips: mapped.compactMap(Self.ipv4Bytes),
+                    qtype: qtype,
+                    ttl: TunnelConstants.dnsHostMappingAnswerTTL
+                )
+            }
+            if destination == .anywhereResolver {
+                if await forwardToUpstreamResolver(datagram) {
+                    return true
+                }
+                return sendNODATA(answering: datagram, qtype: qtype)
+            }
+            return false
         }
-        guard stack.udpConfig().advertiseIPv6ToApps else {
-            return sendNODATA(answering: datagram, qtype: qtype)
-        }
+
+        let offset = stack.syntheticAddressPool.allocate(domain: domain, verdict: ruleMatch, verdictVersion: rulesVersion)
+        let ipv4 = SyntheticAddressPool.ipv4Bytes(offset: offset)
         return sendAddressAnswer(
             answering: datagram,
-            ip: FakeIPPool.ipv6Bytes(offset: offset),
+            ips: [[ipv4.0, ipv4.1, ipv4.2, ipv4.3]],
             qtype: qtype,
-            ttl: TunnelConstants.dnsFakeIPAnswerTTL
+            ttl: TunnelConstants.dnsSyntheticAddressAnswerTTL
         )
     }
-    
-    private func forwardToUpstreamResolver(_ datagram: UDPPacket.Inbound, domain: String, qtype: UInt16) -> Bool {
+
+    private func forwardToUpstreamResolver(_ datagram: InboundDatagram) async -> Bool {
         let udpConfig = stack.udpConfig()
         guard let defaultConfiguration = udpConfig.configuration else { return false }
-        
+
         let upstream = DNSUpstream.forwardingServers(
             preferring: AWCore.getFallbackDNSUpstream(), includeIPv6: false
-        ).first ?? DNSUpstream.defaultPlainServer
+        ).first ?? DNSUpstream.defaultUDPServer
         let payload = datagram.payload
-        
-        let flowKey = TunnelStack.UDPFlowKey(
-            srcIP: datagram.srcIP, srcPort: datagram.srcPort,
-            dstIP: datagram.dstIP, dstPort: datagram.dstPort,
-            isIPv6: datagram.isIPv6
-        )
+        let dstPort = datagram.destination.port
+
+        let flowKey = TunnelStack.UDPFlowKey(datagram)
         if let existing = flows[flowKey] {
-            Task { await existing.handleReceivedData(payload, payloadLength: payload.count) }
-            return true
+            if !existing.isClosed {
+                await existing.handleReceivedData([payload])
+                return true
+            }
+            flows.removeValue(forKey: flowKey)
         }
-        
-        let decision = stack.connectionRouter.decision(forIP: upstream, port: datagram.dstPort, proto: "UDP")
-        
+
+        let decision = stack.connectionRouter.decision(forIP: upstream)
+
         var flowConfiguration = defaultConfiguration
-        var routeTarget = udpConfig.defaultRouteTarget
+        var routeTarget: RouteTarget = .default
         var ruleSetName: String? = nil
-        
+
         switch decision.action {
         case .route(let target, let ruleConfiguration, let matchedRuleSet):
             routeTarget = target
             ruleSetName = matchedRuleSet
             if let ruleConfiguration { flowConfiguration = ruleConfiguration }
-        case .routeViaDefault:
-            break
         case .reject(let matchedRuleSet):
             stack.requestLog.record(
-                protocol: .udp, host: upstream, port: datagram.dstPort,
+                protocol: .udp, host: upstream, port: dstPort,
                 routeTarget: .reject,
                 ruleSetName: matchedRuleSet
             )
@@ -435,57 +744,47 @@ actor UDPPlane {
         case .unreachable:
             return false
         }
-        
+
+        guard makeRoomForNewFlow() else { return true }
+
         stack.requestLog.record(
-            protocol: .udp, host: upstream, port: datagram.dstPort,
-            routeTarget: routeTarget, viaDefault: decision.viaDefault,
-            ruleSetName: ruleSetName
+            protocol: .udp, host: upstream, port: dstPort,
+            routeTarget: routeTarget, ruleSetName: ruleSetName
         )
-        
+
         let flow = UDPFlow(
             stack: stack,
             plane: self,
+            ledger: bufferLedger,
             flowKey: flowKey,
-            srcHost: TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: datagram.isIPv6),
-            srcPort: datagram.srcPort,
-            dstHost: upstream,                  // outbound → real upstream resolver
-            dstPort: datagram.dstPort,
-            srcIPData: datagram.srcIPData,
-            dstIPData: datagram.dstIPData,      // reply source → the Anywhere resolver address
-            isIPv6: datagram.isIPv6,
+            dstHost: upstream,
             configuration: flowConfiguration,
-            routeTarget: routeTarget
+            routeTarget: routeTarget,
+            ruleSetName: ruleSetName
         )
-        flushAllFlowsIfAtCap()
-        flows[flowKey] = flow
-        logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(datagram.dstPort) via \(flowConfiguration.name)")
-        Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
+        insert(flow)
+        await flow.handleReceivedData([payload])
         return true
     }
-    
-    private func sendNODATA(answering datagram: UDPPacket.Inbound, qtype: UInt16) -> Bool {
+
+    private func sendNODATA(answering datagram: InboundDatagram, qtype: UInt16) -> Bool {
         guard let responseData = datagram.payload.withUnsafeBytes({ ptr -> Data? in
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
             return DNSPacket.generateResponse(
                 query: UnsafeBufferPointer(start: base, count: ptr.count),
-                answerIP: nil,
+                answerIPs: [],
                 qtype: qtype
             )
         }) else { return false }
 
-        stack.writeOutboundUDP(
-            srcIP: datagram.dstIPData, srcPort: datagram.dstPort,
-            dstIP: datagram.srcIPData, dstPort: datagram.srcPort,
-            isIPv6: datagram.isIPv6,
-            payload: responseData
-        )
+        stack.writeOutboundUDP(responseData, from: datagram.destination, to: datagram.source)
 
         return true
     }
 
     private func sendAddressAnswer(
-        answering datagram: UDPPacket.Inbound,
-        ip: [UInt8],
+        answering datagram: InboundDatagram,
+        ips: [[UInt8]],
         qtype: UInt16,
         ttl: UInt32
     ) -> Bool {
@@ -493,30 +792,34 @@ actor UDPPlane {
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
             return DNSPacket.generateResponse(
                 query: UnsafeBufferPointer(start: base, count: ptr.count),
-                answerIP: ip,
+                answerIPs: ips,
                 qtype: qtype,
                 ttl: ttl
             )
         }) else { return false }
 
-        stack.writeOutboundUDP(
-            srcIP: datagram.dstIPData, srcPort: datagram.dstPort,
-            dstIP: datagram.srcIPData, dstPort: datagram.srcPort,
-            isIPv6: datagram.isIPv6,
-            payload: responseData
-        )
+        stack.writeOutboundUDP(responseData, from: datagram.destination, to: datagram.source)
 
         return true
     }
-    
+
+    private static func ipv4Bytes(_ address: String) -> [UInt8]? {
+        var raw = in_addr()
+        guard inet_pton(AF_INET, address, &raw) == 1 else { return nil }
+        return withUnsafeBytes(of: raw) { Array($0) }
+    }
+
     // MARK: - Reclaim
-    
-    private func reclaim(replacementMultiplexerPool: VLESSVisionUDPMultiplexerPool?) {
+
+    private func reclaim() {
         multiplexerPoolStorage?.closeAll()
-        multiplexerPoolStorage = replacementMultiplexerPool
+        multiplexerPoolStorage = nil
         purgeShadowsocksUDPSessions()
         pendingResolutions.removeAll()
         pendingResolutionCapWarned = false
+        pendingSniffs.removeAll()
+        pendingSniffCapWarned = false
+        quicBlocks.removeAll()
         let all = Array(flows.values)
         flows.removeAll()
         for flow in all {

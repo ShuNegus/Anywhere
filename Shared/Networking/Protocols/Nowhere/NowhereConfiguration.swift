@@ -6,168 +6,100 @@
 //
 
 import Foundation
-import Security
-import Synchronization
 
-nonisolated enum NowhereNetwork: String, Codable, CaseIterable {
-    case udp
+nonisolated enum NowhereNetwork: String, Codable, CaseIterable, Sendable {
     case tcp
+    case udp
 }
 
-nonisolated enum NowherePool {
-    static let validRange = 0...9
-    static let sliderRange = 1...9
-    static let enabledDefault = 5
+nonisolated enum NowhereMorphPrelude: String, Codable, CaseIterable, Sendable {
+    case fade
+    case full8
+    case low7
+
+    var displayName: String {
+        switch self {
+        case .fade: String(localized: "Fading Random")
+        case .full8: String(localized: "8-bit Random")
+        case .low7: String(localized: "7-bit Random")
+        }
+    }
 }
 
-nonisolated struct NowhereTransportIdentityKey: Hashable {
-    let configurationID: UUID
+nonisolated struct NowhereConfiguration: Codable, Hashable, Sendable {
+    let key: String
+    let network: NowhereNetwork
+    let morph: Bool
+    let morphPrelude: NowhereMorphPrelude
+
+    init(
+        key: String,
+        network: NowhereNetwork = .tcp,
+        morph: Bool = true,
+        morphPrelude: NowhereMorphPrelude = .fade
+    ) {
+        self.key = key
+        self.network = network
+        self.morph = morph
+        self.morphPrelude = morphPrelude
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key, network, morph, morphPrelude
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            key: try container.decode(String.self, forKey: .key),
+            network: try container.decodeIfPresent(NowhereNetwork.self, forKey: .network) ?? .tcp,
+            morph: try container.decodeIfPresent(Bool.self, forKey: .morph) ?? true,
+            morphPrelude: try container.decodeIfPresent(NowhereMorphPrelude.self, forKey: .morphPrelude) ?? .fade
+        )
+    }
+
+    static func tlsConfiguration(for host: String) -> TLSConfiguration {
+        TLSConfiguration(
+            serverName: host,
+            alpn: [NowhereProtocol.applicationProtocol],
+            minVersion: .tls13,
+            maxVersion: .tls13
+        )
+    }
+}
+
+nonisolated struct NowhereRuntimeConfiguration: Hashable, Sendable {
     let proxyHost: String
+    let connectHost: String
     let proxyPort: UInt16
     let key: String
-    let uplink: NowhereNetwork
-    let downlink: NowhereNetwork
-    let tls: TLSConfiguration
-}
-
-nonisolated struct NowhereConfiguration: Hashable {
-    let proxyHost: String
-    let proxyPort: UInt16
-    let key: String
-    let uplink: NowhereNetwork
-    let downlink: NowhereNetwork
-    let pool: Int
-    let sessionID: Data
-    let tls: TLSConfiguration
-    let alpn: String
+    let network: NowhereNetwork
+    let morph: Bool
+    let morphPrelude: NowhereMorphPrelude
     let authKey: NowhereProtocol.AuthKey
+    let morphKeys: NowhereMorph.Keys?
 
     init(
         proxyHost: String,
+        connectHost: String,
         proxyPort: UInt16,
-        key: String,
-        uplink: NowhereNetwork,
-        downlink: NowhereNetwork,
-        pool: Int,
-        sessionID: Data,
-        tls: TLSConfiguration
+        configuration: NowhereConfiguration
     ) throws {
-        let supportsPool = uplink == .tcp && downlink == .tcp
-        guard (!supportsPool && pool == 0)
-                || (supportsPool && NowherePool.validRange.contains(pool)) else {
-            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere pool value"))
-        }
-        guard sessionID.count == 16 else {
-            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere session ID"))
-        }
-        let alpn = tls.alpn?.first ?? NowhereProtocol.defaultALPN
-        guard !alpn.isEmpty, alpn.utf8.count <= UInt8.max else {
-            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere ALPN"))
+        guard proxyPort != 0 else {
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere port"))
         }
         self.proxyHost = proxyHost
+        self.connectHost = connectHost
         self.proxyPort = proxyPort
-        self.key = key
-        self.uplink = uplink
-        self.downlink = downlink
-        self.pool = pool
-        self.sessionID = sessionID
-        self.tls = tls
-        self.alpn = alpn
-        self.authKey = try NowhereProtocol.deriveAuthKey(sharedKey: key)
-    }
-}
-
-nonisolated final class NowhereFlowIDLease: Sendable {
-    let flowID: UInt32
-    private let releaseImpl: @Sendable (UInt32) -> Void
-    private let released = Mutex(false)
-
-    init(flowID: UInt32, release: @escaping @Sendable (UInt32) -> Void) {
-        self.flowID = flowID
-        self.releaseImpl = release
+        key = configuration.key
+        network = configuration.network
+        morph = configuration.morph
+        morphPrelude = configuration.morphPrelude
+        authKey = NowhereProtocol.deriveAuthKey(sharedKey: configuration.key)
+        morphKeys = configuration.morph ? NowhereMorph.deriveKeys(sharedKey: configuration.key) : nil
     }
 
-    func release() {
-        let shouldRelease = released.withLock { released in
-            guard !released else { return false }
-            released = true
-            return true
-        }
-        if shouldRelease { releaseImpl(flowID) }
-    }
-
-    deinit { release() }
-}
-
-nonisolated final class NowhereTransportIdentityRegistry: Sendable {
-    static let shared = NowhereTransportIdentityRegistry()
-
-    private struct State {
-        let sessionID: Data
-        var nextFlowID: UInt32
-        var activeFlowIDs: Set<UInt32>
-    }
-
-    private let states = Mutex<[NowhereTransportIdentityKey: State]>([:])
-
-    init() {}
-
-    func identity(for identityKey: NowhereTransportIdentityKey) throws -> Data {
-        try states.withLock { states in
-            if let state = states[identityKey] { return state.sessionID }
-            var bytes = Data(count: 16)
-            let status = bytes.withUnsafeMutableBytes { raw -> Int32 in
-                guard let base = raw.baseAddress else { return errSecAllocate }
-                return SecRandomCopyBytes(kSecRandomDefault, 16, base)
-            }
-            guard status == errSecSuccess else {
-                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Failed to generate session ID"))
-            }
-            states[identityKey] = State(sessionID: bytes, nextFlowID: 1, activeFlowIDs: [])
-            return bytes
-        }
-    }
-
-    func leaseFlowID(
-        for identityKey: NowhereTransportIdentityKey,
-        sessionID expectedSessionID: Data
-    ) throws -> NowhereFlowIDLease {
-        let flowID = try states.withLock { states -> UInt32 in
-            guard var state = states[identityKey], state.sessionID == expectedSessionID else {
-                throw AnywhereError.proxy(.nowhere, .streamClosed)
-            }
-            var candidate = max(state.nextFlowID, 1)
-            for _ in 0...state.activeFlowIDs.count {
-                if candidate != 0, !state.activeFlowIDs.contains(candidate) {
-                    state.activeFlowIDs.insert(candidate)
-                    state.nextFlowID = candidate &+ 1
-                    if state.nextFlowID == 0 { state.nextFlowID = 1 }
-                    states[identityKey] = state
-                    return candidate
-                }
-                candidate &+= 1
-                if candidate == 0 { candidate = 1 }
-            }
-            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Nowhere flow ID space exhausted"))
-        }
-        return NowhereFlowIDLease(flowID: flowID) { [weak self] released in
-            self?.releaseFlowID(released, for: identityKey, sessionID: expectedSessionID)
-        }
-    }
-
-    private func releaseFlowID(
-        _ flowID: UInt32,
-        for identityKey: NowhereTransportIdentityKey,
-        sessionID expectedSessionID: Data
-    ) {
-        states.withLock { states in
-            guard var state = states[identityKey], state.sessionID == expectedSessionID else { return }
-            state.activeFlowIDs.remove(flowID)
-            states[identityKey] = state
-        }
-    }
-
-    func reset() {
-        states.withLock { $0.removeAll(keepingCapacity: false) }
+    var tlsConfiguration: TLSConfiguration {
+        NowhereConfiguration.tlsConfiguration(for: proxyHost)
     }
 }

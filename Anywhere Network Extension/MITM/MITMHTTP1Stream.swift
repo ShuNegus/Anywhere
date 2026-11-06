@@ -24,207 +24,121 @@ nonisolated protocol MITMHTTP1StreamDelegate: AnyObject {
 }
 
 actor MITMHTTP1Stream {
-
     nonisolated var unownedExecutor: UnownedSerialExecutor {
-        lwipBridge.executor.asUnownedSerialExecutor()
+        sessionContext.executor.asUnownedSerialExecutor()
     }
 
-    /// Cap on bytes buffered awaiting the CRLF CRLF head terminator (Apache's
-    /// 64 KiB default); on exceed the stream downgrades to passthrough.
     private static let maxHeadBytes: Int = 64 * 1024
 
-    /// Cap on a chunk-size or trailer line awaiting its CRLF — an unterminated
-    /// line is a remote memory DoS; on exceed the framing is treated as malformed.
     fileprivate static let maxChunkLineBytes: Int = 16 * 1024
 
-    /// Cap on recorded original chunk sizes (`ChunkedReader.sizes`), which only drive cosmetic
-    /// re-chunking on the decompression-failure passthrough — millions of tiny chunks would
-    /// otherwise grow the array to tens of MB. Past the cap the tail folds into the final chunk.
     fileprivate static let maxTrackedChunkSizes: Int = 8192
 
-    /// Memory cap on `Anywhere.respond` bodies; oversized bodies are truncated
-    /// rather than rejected — a partial mock beats a dropped one.
     private static let maxSynthesizedResponseBodyBytes: Int = MITMBodyCodec.maxBufferedBodyBytes
 
     private let host: String
-    /// Scheme for the absolute request URL (rule gating and script `request.url`):
-    /// "https" for a TLS leg, "http" for a cleartext leg.
+    private var logPrefix: String { "[MITM] \(host): HTTP/1 \(direction == .httpRequest ? "request" : "response")" }
     private let scheme: String
-    /// Nonisolated so the ``MITMHTTP1StreamDelegate`` can dispatch by direction without re-entering
-    /// this stream's isolation.
-    let phase: MITMPhase
+    let direction: MITMPhase
 
-    /// The h2 client stream this leg serves when it is a per-stream h1-upstream response in the
-    /// h2→h1 bridge; nil for the session's two inner legs. Lets the delegate scope a framing-violation
-    /// close to just this stream instead of the whole multiplexed connection. Nonisolated `let`.
     let bridgeClientStreamID: UInt32?
-    /// Phase-filtered rules for this host, resolved once at init (one trie walk).
     private let rules: [CompiledMITMRule]
-    /// Response-phase rules for this host; the request stream consults them to gate the
-    /// `Accept-Encoding` clamp. Empty on a response stream.
     private let responseBodyGateRules: [CompiledMITMRule]
-    /// Rule-set ID for the matched host (`Anywhere.store` scope key); nil when no set matches.
     private let ruleSetID: UUID?
-    /// Forced `Host:` once a transparent rewrite commits to a replacement
-    /// authority. Sticky: the connection has one upstream leg, so later requests
-    /// route there too. Request phase only.
     private var effectiveAuthority: String?
 
-    /// Replacement upstream from a transparent rewrite; read by the session's deferred-dial pump
-    /// (on the shared lwIP executor) via the `nonisolated` ``resolvedUpstream`` accessor below.
-    /// Request phase only.
     private var resolvedUpstreamValue: (host: String, port: UInt16?)?
 
-    /// ``MITMMessageRewriter`` requirement: the session reads it synchronously on the shared lwIP
-    /// executor, so it re-enters isolation via `assumeIsolated`.
     nonisolated var resolvedUpstream: (host: String, port: UInt16?)? {
         assumeIsolated { $0.resolvedUpstreamValue }
     }
 
-    /// The request URL as first seen (pre-rewrite), for `ctx.originalUrl` and the request-log
-    /// record the response phase reads. Set when the head is parsed, before `applyRewrite`; valid
-    /// through the request's buffered/streaming resume since heads process strictly in order on an
-    /// h1 connection. Request phase only; nil for a malformed request line.
     private var currentRequestOriginalURL: String?
 
-    /// Session coordinator for framing-violation and upgrade upcalls. `phase` (a nonisolated `let`
-    /// above) lets it react per direction without a separate handler per stream.
     weak var delegate: MITMHTTP1StreamDelegate?
-    /// Lazy JS runtime, shared across both directions.
-    private let scriptEngineProvider: MITMScriptEngine.Provider
-    /// Request stream records method/URL; response stream pops them for script ctx.
+
     private let requestLog: MITMRequestLog
 
-    /// The lwIP concurrency boundary: all stream state is confined to its serial executor's queue,
-    /// and every queue hop and continuation seam routes through the bridge.
-    private let lwipBridge: LWIPConcurrencyBridge
+    private let sessionContext: SessionExecutionContext
 
     init(
         host: String,
         scheme: String = "https",
-        phase: MITMPhase,
+        direction: MITMPhase,
         policy: MITMRewritePolicy,
         effectiveAuthority: String?,
-        scriptEngineProvider: MITMScriptEngine.Provider,
         requestLog: MITMRequestLog,
-        lwipBridge: LWIPConcurrencyBridge,
+        sessionContext: SessionExecutionContext,
         bridgeClientStreamID: UInt32? = nil
     ) {
         self.host = host
         self.scheme = scheme
-        self.phase = phase
+        self.direction = direction
         self.bridgeClientStreamID = bridgeClientStreamID
         let matchedSet = policy.set(for: host)
-        self.rules = matchedSet?.rules.filter { $0.phase == phase } ?? []
-        self.responseBodyGateRules = phase == .httpRequest
-            ? (matchedSet?.rules.filter { $0.phase == .httpResponse } ?? [])
+        let urlPrefix = MITMGateRegex.urlPrefix(scheme: scheme, host: host)
+        let reachableRules = matchedSet?.rules.filter { $0.gate.mayMatch(urlPrefix: urlPrefix) } ?? []
+        self.rules = reachableRules.filter { $0.phase == direction }
+        self.responseBodyGateRules = direction == .httpRequest
+            ? reachableRules.filter { $0.phase == .httpResponse }
             : []
         self.ruleSetID = matchedSet?.id
         self.effectiveAuthority = effectiveAuthority
-        self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
-        self.lwipBridge = lwipBridge
+        self.sessionContext = sessionContext
     }
 
     // MARK: - State
 
-    /// Head withheld until the body completes so the final Content-Length /
-    /// Content-Encoding can be computed.
     private struct PendingHead {
         let startLine: String
         let headers: [Header]
-        /// Decompression plan; identity after decompressing, so `Content-Encoding` is dropped on emit.
         let codec: MITMBodyCodec.Plan
-        /// Originating request for response-phase ctx. Nil on request phase.
         let originatingRequest: MITMRequestLog.Record?
     }
-    
+
     private struct StreamingState: Sendable {
         let headers: [Header]
         let originatingRequest: MITMRequestLog.Record?
         let startLine: String
         var frameIndex: Int = 0
-        /// Held until we know whether a next chunk exists (sets `isLast`).
         var pendingChunk: Data? = nil
-        /// CRLF scan resume offset (avoids O(n²) re-scanning); reset after each line.
         var lineScanCursor: Int = 0
         let cursor: MITMScriptTransform.FrameCursor
     }
 
-    /// Continuation captured before a script hop, applied when the hop resumes.
     private enum StreamingPostFrame {
-        /// Normal mid-stream boundary: hold `nextPending` and continue at `inner`.
         case hold(nextPending: Data?, inner: StreamingChunkedInner)
-        /// Final chunk emitted: emit `0\r\n` and drain trailers.
         case finalThenTrailer
-        /// Per-chunk cap overflow: bypass the script and forward the remaining
-        /// `left` bytes of this chunk verbatim.
-        case bypassRemainder(left: Int, accumulator: Data)
+        case bypassRemainder(left: Int)
     }
 
     private enum StreamingChunkedInner {
         case sizeLine
-        case chunkData(remaining: Int, accumulator: Data)
+        case chunkData(remaining: Int)
         case dataCRLF
-        /// After the zero-size line: drain trailer lines until the empty-line terminator.
         case trailerOrEnd
     }
 
-    /// Body-processing state machine. Actor-isolated (behind ``mode``); never crosses an isolation
-    /// boundary, so it needn't be `Sendable` even though some payloads (readers, cursors) aren't —
-    /// the only mode *deferred* across a script hop is the payload-free ``ResumeMode``.
     private enum Mode {
-        /// Accumulating the next head in `rxBuffer` until CRLF CRLF.
         case awaitingHead
-
-        /// Head emitted; forwarding body bytes verbatim.
         case forwardingLength(remaining: Int)
         case forwardingChunked(reader: ChunkedReader)
-
-        /// Bridge (IR) only: forward a read-until-close response body as IR data until EOF — there's
-        /// no h1 framing to emit, and the consumer frames it as HTTP/2 DATA.
         case bridgeForwardUntilClose
-
-        /// Buffering body for rewrite; head withheld until body completes.
-        case rewritingLength(pending: PendingHead, expected: Int, accumulator: Data)
-        case rewritingChunked(pending: PendingHead, accumulator: Data, reader: ChunkedReader)
-
-        /// Buffering a read-until-close body (identity-coded only); `finish()`
-        /// runs the script chain at EOF. On cap overflow falls back to passthrough.
-        case rewritingUntilClose(pending: PendingHead, accumulator: Data)
-
-        /// Draining a chunked request body without forwarding it, after a
-        /// synthesized 302 / reject answered the request locally.
+        case rewritingLength(pending: PendingHead, expected: Int)
+        case rewritingChunked(pending: PendingHead, reader: ChunkedReader)
+        case rewritingUntilClose(pending: PendingHead)
         case discardingChunked(reader: ChunkedReader)
-
-        /// Discarding a Content-Length request body after a synthesized 302 / reject.
         case discardingLength(remaining: Int)
-
-        /// Terminal blackhole when `.discardingChunked` loses the message boundary;
-        /// `.passthrough` would leak bytes upstream or desync the next response.
         case draining
-
-        /// Per-chunk streaming-script mode; head already emitted.
         case streamingChunked(streaming: StreamingState, inner: StreamingChunkedInner)
-
-        /// Permanent passthrough: protocol upgrades, CONNECT tunnels, or framing errors.
         case passthrough
-
-        /// Script hop outstanding; drive loop halted until the engine result
-        /// resumes on the lwIP queue.
         case awaitingScript
-
-        /// Gate-verdict resolution outstanding (regex bridge hop); drive loop halted with the
-        /// head bytes still buffered — the resumed pass re-parses and resolves synchronously
-        /// from ``pendingGateTables``.
         case awaitingGates
     }
 
     private var mode: Mode = .awaitingHead
 
-    /// The mode to restore once a buffered-script hop resolves. Only the two payload-free terminal
-    /// modes are ever deferred across the hop, so this is trivially `Sendable` and can ride the
-    /// `Task`/`enqueue` closures that carry the resume back onto the lwIP queue — unlike ``Mode``.
     private enum ResumeMode: Sendable {
         case awaitingHead
         case passthrough
@@ -237,123 +151,121 @@ actor MITMHTTP1Stream {
         }
     }
 
-    /// Rewrite-rule selection for one request head, derived from the pre-rewrite verdicts.
-    /// Pure selection — committing its state effects happens in `consumeHead`.
     private enum RewriteSelection {
-        /// No rewrite rule fires; the start line is unchanged.
         case none
-        /// First matching transparent rewrite: the rewritten start line + replacement upstream.
         case transparent(line: String, replacement: ReplacementURL)
-        /// First matching 302 / reject sub-mode: answer locally.
         case synthesize(MITMScriptEngine.SynthesizedResponse)
     }
 
-    /// Gate verdicts (and the rewrite selection derived from them) for the head currently at
-    /// the front of `rxBuffer`, carried across `.awaitingGates` parks so the retried drive
-    /// pass resolves synchronously. Every entry is keyed by the URL it was resolved against,
-    /// so a stale entry can never leak onto the next head. Cleared when the head commits.
     private struct PendingGateTables {
-        /// This stream's rules @ the pre-rewrite gating URL (rewrite-rule selection).
         var rewriteTable: MITMGateVerdictTable?
         var rewriteSelection: (url: String?, selection: RewriteSelection)?
-        /// This stream's rules @ the post-rewrite gating URL (header rules, body-mode
-        /// selection, script preflight).
         var ruleTable: MITMGateVerdictTable?
-        /// Response-phase rules @ the post-rewrite gating URL (request phase only: gates the
-        /// Accept-Encoding clamp).
         var responseGateTable: MITMGateVerdictTable?
     }
 
     private var pendingGateTables = PendingGateTables()
 
-    /// Everything head processing needs past the async gate seam, resolved before any state
-    /// mutation so a park can retry the pass cleanly.
     private struct HeadGates {
         let rewriteSelection: RewriteSelection
         let ruleTable: MITMGateVerdictTable
         let responseGateTable: MITMGateVerdictTable
     }
 
-    /// When set (the h2→h1 bridge's per-stream response stream), the response path delivers IR to
-    /// this sink instead of producing HTTP/1.1 bytes. nil ⇒ byte output (the main h1↔h1 path).
-    /// Response phase only; set once before the first `transform`.
     weak var responseIRSink: MITMHTTP1ResponseIRSink?
 
-    /// In-flight continuation, retained while a script hop is outstanding; resumed exactly once with
-    /// the rewritten bytes (or empty on teardown).
     private var parkedContinuation: CheckedContinuation<Data, Never>?
 
-    /// Bytes emitted before the script hop; the resume prepends them so output
-    /// stays in wire order.
+    private var pendingHop: Task<Void, Never>?
+
     private var pendingPreParkOutput = Data()
 
-    /// Set on teardown; resumes that fire after this bail immediately.
-    private var torn = false
+    private enum Phase: PhaseTransitionable {
+        case open, torn
 
-    /// Set when `forcePassthrough()` arrives while a script hop is parked; honored at resume.
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.open, .torn):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private var phase: Phase = .open
+
+    @discardableResult
+    private func transition(to new: Phase) -> Bool {
+        Phase.transition(&phase, to: new)
+    }
+
     private var forcePassthroughPending = false
-    private var rxBuffer = MITMByteBuffer()
+    private var receiveBuffer = MITMByteBuffer()
 
-    /// Prefix of `rxBuffer` already scanned for CRLF CRLF (O(n) total, not O(n²)).
+    private var bodyAccumulator = Data()
+    private var chunkAccumulator = Data()
+
+    private func takeBodyAccumulator() -> Data {
+        defer { bodyAccumulator = Data() }
+        return bodyAccumulator
+    }
+
+    private func takeChunkAccumulator() -> Data {
+        defer { chunkAccumulator = Data() }
+        return chunkAccumulator
+    }
+
     private var headScanned: Int = 0
 
-    /// Client-bound synth bytes from `Anywhere.respond(...)`; drained by the
-    /// session pump. Request phase only.
+    private var verbatimHead: (startLine: String, headers: [Header], bytes: Data)?
+
     private var pendingClientBytes = Data()
 
-    /// Synth bytes held until the current response finishes streaming. Response phase only.
-    private var pendingSynthAfterCurrentResponse = Data()
+    private var pendingSynthesizedAfterCurrentResponse = Data()
 
-    /// True when the stream is between messages (awaiting a head, nothing buffered/parked/pending).
-    /// Checked on the *response* stream to know an h1 upstream leg is fully idle and can be safely
-    /// closed to reconnect to a different transparent-rewrite target. Any in-progress state reads false.
+    private var hasRewriteRule: Bool {
+        rules.contains { rule in
+            if case .rewrite = rule.operation { return true }
+            return false
+        }
+    }
+
     var isBetweenMessages: Bool {
         guard case .awaitingHead = mode else { return false }
-        return rxBuffer.isEmpty
+        return receiveBuffer.isEmpty
             && parkedContinuation == nil
             && !forcePassthroughPending
-            && pendingSynthAfterCurrentResponse.isEmpty
+            && pendingSynthesizedAfterCurrentResponse.isEmpty
     }
 
     // MARK: - Public API
 
-    /// Hops onto the lwIP queue, runs `body`, and resumes with its result — the async seam between the
-    /// session pump (pure async/await) and this stream's lwIP-queue-confined state machine. The
-    /// continuation itself lives in ``LWIPConcurrencyBridge``.
-    private func onLwip<T>(_ body: @escaping () -> T) async -> T {
-        await lwipBridge.run(body)
-    }
-
-    /// Parked counterpart: hands the continuation to `body` on the lwIP queue; `body` resumes it inline
-    /// or stashes it (`parkedContinuation`) for a later script hop to resolve.
-    private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await lwipBridge.runParked(body)
-    }
-
-    /// Feeds `data` through the rewrite pipeline, returning the rewritten bytes. Suspends across a
-    /// parked script hop; the state machine is lwIP-queue-confined, so this self-hops onto that queue.
     func transform(_ data: Data) async -> Data {
-        await onLwipParked { (continuation: CheckedContinuation<Data, Never>) in
-            self.transformOnQueue(data, continuation: continuation)
-        }
+        await withCheckedContinuation { transformOnQueue(data, continuation: $0) }
     }
 
-    /// Runs the drive pass on the lwIP queue; resumes `continuation` inline, or parks it for a script hop.
     private func transformOnQueue(_ data: Data, continuation: CheckedContinuation<Data, Never>) {
         guard parkedContinuation == nil else { return failClosedReentry(continuation) }
+        if phase == .torn {
+            continuation.resume(returning: Data())
+            return
+        }
         if case .passthrough = mode {
             continuation.resume(returning: data)
             return
         }
-        rxBuffer.append(data)
         parkedContinuation = continuation
         var output = Data()
+        var unread = forwardLengthDirectly(data, into: &output)
+        guard phase != .torn else { return }
+        unread = forwardChunkedDirectly(unread, into: &output)
+        guard phase != .torn else { return }
+        if !unread.isEmpty { receiveBuffer.append(unread) }
         while drive(into: &output) { }
         finishDrivePass(output)
     }
 
-    /// Resumes the stashed continuation, or holds `output` while a script hop or gate
-    /// resolution is outstanding.
     private func finishDrivePass(_ output: Data) {
         switch mode {
         case .awaitingScript, .awaitingGates:
@@ -367,75 +279,68 @@ actor MITMHTTP1Stream {
         continuation?.resume(returning: output)
     }
 
-    /// Marks the stream torn down; later script resumes bail immediately. Idempotent. Resumes any
-    /// parked continuation (with empty bytes) so its awaiting caller never leaks.
     func markTorn() {
-        torn = true
+        guard transition(to: .torn) else { return }
+        pendingHop?.cancel()
+        pendingHop = nil
         let continuation = parkedContinuation
         parkedContinuation = nil
         pendingPreParkOutput = Data()
-        // Release buffers eagerly rather than pinning them until the session lets go.
         mode = .passthrough
-        rxBuffer = MITMByteBuffer()
+        receiveBuffer = MITMByteBuffer()
+        bodyAccumulator = Data()
+        chunkAccumulator = Data()
+        verbatimHead = nil
         pendingGateTables = PendingGateTables()
+        forcePassthroughPending = false
+        pendingClientBytes.removeAll(keepingCapacity: false)
+        pendingSynthesizedAfterCurrentResponse.removeAll(keepingCapacity: false)
         continuation?.resume(returning: Data())
     }
 
-    /// Forces permanent passthrough and returns buffered bytes for forwarding;
-    /// defers via `forcePassthroughPending` (returning empty) if a script hop is parked.
     func forcePassthrough() -> Data {
         guard parkedContinuation == nil else {
             forcePassthroughPending = true
             return Data()
         }
         if case .passthrough = mode { return Data() }
-        let buffered = rxBuffer.prefix(rxBuffer.count)
-        rxBuffer.removeAll(keepingCapacity: false)
+        let buffered = receiveBuffer.prefix(receiveBuffer.count)
+        receiveBuffer.removeAll(keepingCapacity: false)
         headScanned = 0
         mode = .passthrough
         return buffered
     }
 
-    /// Honors a deferred `forcePassthrough` at resume time; returns true when
-    /// fired, in which case the resume must do nothing further.
     private func resumeIntoForcedPassthroughIfNeeded() -> Bool {
         guard forcePassthroughPending else { return false }
         forcePassthroughPending = false
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
-        resumed.append(rxBuffer.prefix(rxBuffer.count))
-        rxBuffer.removeAll(keepingCapacity: false)
+        receiveBuffer.appendPrefix(receiveBuffer.count, to: &resumed)
+        receiveBuffer.removeAll(keepingCapacity: false)
         headScanned = 0
         mode = .passthrough
         finishDrivePass(resumed)
         return true
     }
 
-    /// Re-entry while parked would stomp the stashed continuation and hang the
-    /// connection; resume the new continuation empty and keep the stashed one.
     private func failClosedReentry(_ continuation: CheckedContinuation<Data, Never>) {
-        logger.error("HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked continuation (one-read-in-flight invariant violated)")
+        logger.error("\(logPrefix): Reentrant transform")
         continuation.resume(returning: Data())
     }
 
-    /// Drains client-bound bytes queued by `Anywhere.respond(...)`. ``MITMMessageRewriter``
-    /// requirement; a `nonisolated` shim re-entering isolation, as the session calls it synchronously
-    /// on the shared lwIP executor.
     nonisolated func drainPendingClientBytes() -> Data {
         assumeIsolated { $0.drainPendingClientBytesOnQueue() }
     }
+
     private func drainPendingClientBytesOnQueue() -> Data {
         let bytes = pendingClientBytes
         pendingClientBytes.removeAll(keepingCapacity: false)
         return bytes
     }
 
-    /// Called on upstream EOF: flushes a `.rewritingUntilClose` body through the script chain,
-    /// returning the flushed bytes (empty in all other modes). Self-hops onto the lwIP queue.
     func finish() async -> Data {
-        await onLwipParked { (continuation: CheckedContinuation<Data, Never>) in
-            self.finishOnQueue(continuation: continuation)
-        }
+        await withCheckedContinuation { finishOnQueue(continuation: $0) }
     }
 
     private func finishOnQueue(continuation: CheckedContinuation<Data, Never>) {
@@ -448,20 +353,18 @@ actor MITMHTTP1Stream {
                 continuation.resume(returning: Data())
                 return
             case .forwardingLength, .forwardingChunked, .rewritingLength, .rewritingChunked:
-                // EOF arrived mid-body (a truncated upstream response) → reset the bridged stream
-                // rather than leave the client waiting for a body that won't finish.
                 responseIRSink?.http1ResponseReset()
                 mode = .draining
                 continuation.resume(returning: Data())
                 return
             case .rewritingUntilClose:
-                break // fall through: run the buffered script chain at EOF; the resume delivers IR.
+                break
             default:
                 continuation.resume(returning: Data())
                 return
             }
         }
-        guard case .rewritingUntilClose(let pending, let accumulator) = mode else {
+        guard case .rewritingUntilClose(let pending) = mode else {
             continuation.resume(returning: Data())
             return
         }
@@ -469,7 +372,7 @@ actor MITMHTTP1Stream {
         var output = Data()
         let parked = applyScriptsAndEmit(
             pending: pending,
-            rawBody: accumulator,
+            rawBody: takeBodyAccumulator(),
             originalSizes: nil,
             resumeMode: .passthrough,
             into: &output
@@ -481,33 +384,30 @@ actor MITMHTTP1Stream {
         finishDrivePass(output)
     }
 
-    /// Emits synth-after bytes exactly at the response body boundary — early
-    /// corrupts framing, late races the next upstream head.
-    private func flushSynthAfterResponse(into output: inout Data) {
-        if !pendingSynthAfterCurrentResponse.isEmpty {
-            output.append(pendingSynthAfterCurrentResponse)
-            pendingSynthAfterCurrentResponse.removeAll(keepingCapacity: false)
+    private func flushSynthesizedAfterResponse(into output: inout Data) {
+        if direction == .httpResponse {
+            pendingSynthesizedAfterCurrentResponse.append(requestLog.closeHTTP1Response())
+        }
+        if !pendingSynthesizedAfterCurrentResponse.isEmpty {
+            output.append(pendingSynthesizedAfterCurrentResponse)
+            pendingSynthesizedAfterCurrentResponse.removeAll(keepingCapacity: false)
         }
     }
 
     // MARK: - Driver
 
-    /// Returns true when state advanced and the loop should run again.
     private func drive(into output: inout Data) -> Bool {
         switch mode {
         case .passthrough:
-            // Bridge: a passthrough downgrade (malformed framing, upgrade, non-HTTP, oversize head)
-            // can't map onto one HTTP/2 stream — reset it instead of leaking raw bytes the IR
-            // consumer can't frame. The main path forwards verbatim.
             if bridgeResetIfNeeded() { return false }
-            output.append(rxBuffer.prefix(rxBuffer.count))
-            rxBuffer.removeAll(keepingCapacity: false)
+            receiveBuffer.appendPrefix(receiveBuffer.count, to: &output)
+            receiveBuffer.removeAll(keepingCapacity: false)
             return false
 
         case .bridgeForwardUntilClose:
-            guard !rxBuffer.isEmpty else { return false }
-            _ = emitBridgeBody(Data(rxBuffer.prefix(rxBuffer.count)), endStream: false)
-            rxBuffer.removeAll(keepingCapacity: false)
+            guard !receiveBuffer.isEmpty else { return false }
+            _ = emitBridgeBody(Data(receiveBuffer.prefix(receiveBuffer.count)), endStream: false)
+            receiveBuffer.removeAll(keepingCapacity: false)
             return false
 
         case .awaitingScript, .awaitingGates:
@@ -523,17 +423,14 @@ actor MITMHTTP1Stream {
             mode = .forwardingChunked(reader: reader)
             return forwardChunked(reader: &reader, into: &output)
 
-        case .rewritingLength(let pending, let expected, var accumulator):
-            mode = .rewritingLength(pending: pending, expected: expected, accumulator: accumulator)
-            return rewriteLength(pending: pending, expected: expected, accumulator: &accumulator, into: &output)
+        case .rewritingLength(let pending, let expected):
+            return rewriteLength(pending: pending, expected: expected, into: &output)
 
-        case .rewritingChunked(let pending, var accumulator, var reader):
-            mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
-            return rewriteChunked(pending: pending, accumulator: &accumulator, reader: &reader, into: &output)
+        case .rewritingChunked(let pending, let reader):
+            return rewriteChunked(pending: pending, reader: reader, into: &output)
 
-        case .rewritingUntilClose(let pending, var accumulator):
-            mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
-            return rewriteUntilClose(pending: pending, accumulator: &accumulator, into: &output)
+        case .rewritingUntilClose(let pending):
+            return rewriteUntilClose(pending: pending, into: &output)
 
         case .discardingChunked(var reader):
             mode = .discardingChunked(reader: reader)
@@ -543,7 +440,7 @@ actor MITMHTTP1Stream {
             return discardLength(remaining: remaining)
 
         case .draining:
-            rxBuffer.removeAll(keepingCapacity: false)
+            receiveBuffer.removeAll(keepingCapacity: false)
             return false
 
         case .streamingChunked(var streaming, let inner):
@@ -554,73 +451,61 @@ actor MITMHTTP1Stream {
 
     // MARK: - Head consumption
 
-    /// Scans for CRLF CRLF, parses the head, applies rewrites, and enters the
-    /// appropriate body mode.
     private func consumeHead(into output: inout Data) -> Bool {
-        // RFC 9112 §2.2: a recipient may ignore empty line(s) before the start line. Consume and
-        // forward leading CRLF(s) verbatim, then parse the real start line. Without this a request
-        // starting with a blank line falls through to `.forward`, desyncing the request/response FIFO
-        // across a keep-alive connection. (Bridge path drops `output`, also correct.)
-        while rxBuffer.count >= 2, rxBuffer[0] == 0x0D, rxBuffer[1] == 0x0A {
-            output.append(0x0D); output.append(0x0A)
-            rxBuffer.removeFirst(2)
+        while receiveBuffer.count >= 2, receiveBuffer[0] == 0x0D, receiveBuffer[1] == 0x0A {
+            output.append(contentsOf: [0x0D, 0x0A])
+            receiveBuffer.removeFirst(2)
             headScanned = 0
         }
-        let crlfcrlf = Data([0x0D, 0x0A, 0x0D, 0x0A])
-        // Overlap the scanned prefix by 3 bytes so a straddling CRLF CRLF is found.
-        let searchFrom = max(0, headScanned - (crlfcrlf.count - 1))
-        guard let terminator = rxBuffer.range(of: crlfcrlf, from: searchFrom) else {
-            if rxBuffer.count > Self.maxHeadBytes {
-                logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; closing the connection without forwarding")
-                rxBuffer.removeAll(keepingCapacity: false)
+        let headTerminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        let searchFrom = max(0, headScanned - (headTerminator.count - 1))
+        guard let terminator = receiveBuffer.range(of: headTerminator, from: searchFrom) else {
+            if receiveBuffer.count > Self.maxHeadBytes {
+                logger.warning("\(logPrefix): Head too large")
+                receiveBuffer.removeAll(keepingCapacity: false)
                 headScanned = 0
                 mode = .draining
                 delegate?.http1StreamFatalClose(self)
                 return false
             }
-            headScanned = rxBuffer.count
+            headScanned = receiveBuffer.count
             return false
         }
         headScanned = 0
         let headEnd = terminator.upperBound
-        let headData = rxBuffer.subdata(in: 0..<headEnd)
+        guard headEnd <= Self.maxHeadBytes else {
+            logger.warning("\(logPrefix): Head too large")
+            receiveBuffer.removeAll(keepingCapacity: false)
+            mode = .draining
+            delegate?.http1StreamFatalClose(self)
+            return false
+        }
+        let headData = receiveBuffer.subdata(in: 0..<headEnd)
 
         let parsed: ParsedHead
         switch parseHead(headData) {
         case .ok(let parsedHead):
             parsed = parsedHead
+            verbatimHead = parsedHead.verbatim.map { (startLine: parsedHead.startLine, headers: parsedHead.headers, bytes: $0) }
         case .forward:
-            // Not HTTP/1.x, or a tolerable deviation: stop rewriting, forward verbatim.
-            rxBuffer.removeFirst(headEnd)
+            receiveBuffer.removeFirst(headEnd)
             mode = .passthrough
             output.append(headData)
             return true
         case .smuggling:
-            // A request-smuggling / header-injection framing violation (RFC 9112 §6). Fail closed:
-            // do not relay the offending bytes. The session closes the connection; `.draining`
-            // drops anything already buffered behind this head.
-            rxBuffer.removeFirst(headEnd)
-            logger.warning("HTTP/1 \(host): rejecting message with a framing/smuggling violation; closing the connection without forwarding")
+            receiveBuffer.removeFirst(headEnd)
+            logger.warning("\(logPrefix): Invalid message framing")
             mode = .draining
             delegate?.http1StreamFatalClose(self)
             return false
         }
 
-        // Gate verdicts must be in hand before any state mutation (FIFO pop, rewrite
-        // commitment, buffer consumption): a cache-miss verdict parks the drive
-        // (`.awaitingGates`) with the head bytes still buffered, and the resumed pass
-        // retries from this same clean boundary, resolving synchronously.
         guard let gates = ensureGateTables(parsed: parsed) else { return false }
-        rxBuffer.removeFirst(headEnd)
+        receiveBuffer.removeFirst(headEnd)
         pendingGateTables = PendingGateTables()
 
         let rewrittenStartLine: String
-        if phase == .httpRequest,
-           rules.contains(where: { if case .rewrite = $0.operation { return true }; return false }) {
-            // Each request re-resolves its own upstream. Clear any target a *previous* request on
-            // this keep-alive leg set, so a later request matching no transparent rewrite resolves
-            // to the original origin (and the session tears the leg down if it differs from the
-            // dialed host) rather than inheriting the prior request's target and `Host`.
+        if direction == .httpRequest, hasRewriteRule {
             effectiveAuthority = nil
             resolvedUpstreamValue = nil
         }
@@ -639,36 +524,29 @@ actor MITMHTTP1Stream {
             )
         }
 
-        // Capture the pre-rewrite request URL from the *original* start line.
-        if phase == .httpRequest {
+        if direction == .httpRequest {
             let originalParts = parsed.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             currentRequestOriginalURL = originalParts.count >= 2 ? "\(scheme)://\(host)\(String(originalParts[1]))" : nil
         }
 
-        // Pop the request record once per *final* response head so the FIFO never
-        // drifts; 1xx interims peek. Must precede header rules and `bodyFraming`.
         let originatingRequest: MITMRequestLog.Record?
-        if phase == .httpResponse {
+        if direction == .httpResponse {
             if isInterimResponseStartLine(rewrittenStartLine) {
                 originatingRequest = requestLog.peekHTTP1()
             } else {
                 let popped = requestLog.popHTTP1()
                 originatingRequest = popped
-                // Pipelined synth bytes emit only after this response finishes streaming.
-                if let popped, !popped.synthAfter.isEmpty {
-                    pendingSynthAfterCurrentResponse.append(popped.synthAfter)
+                if let popped, !popped.synthesizedAfter.isEmpty {
+                    pendingSynthesizedAfterCurrentResponse.append(popped.synthesizedAfter)
                 }
             }
         } else {
             originatingRequest = nil
         }
 
-        // Authority rewrite first so a headerReplace on Host can still override it.
         let withAuthority = applyAuthorityRewrite(parsed.headers)
         var rewrittenHeaders = applyHeaderRules(withAuthority, verdicts: gates.ruleTable)
-        // Clamp only when a response body rule will read the reply; a passthrough request keeps
-        // the client's `Accept-Encoding` so its negotiation matches a non-intercepted connection.
-        if phase == .httpRequest,
+        if direction == .httpRequest,
            MITMScriptTransform.hasBodyAccessingRule(in: responseBodyGateRules, verdicts: gates.responseGateTable) {
             rewrittenHeaders = rewrittenHeaders.map { entry in
                 ASCII.equalsIgnoringCase(entry.name, "accept-encoding")
@@ -684,46 +562,40 @@ actor MITMHTTP1Stream {
         )
 
         let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, verdicts: gates.ruleTable)
-        // Any rule needing the full decompressed body drives buffered mode.
         let buffersBody = scriptsApply
             || MITMScriptTransform.hasBodyReplaceRule(in: rules, verdicts: gates.ruleTable)
             || MITMScriptTransform.hasBodyJSONRule(in: rules, verdicts: gates.ruleTable)
 
         switch framing {
         case .switchingProtocols, .readUntilClose:
-            // Buffer a read-until-close body to EOF and re-emit with Content-Length
-            // when a buffered script applies and the body is identity-coded; else passthrough.
             if case .readUntilClose = framing, buffersBody,
                !MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: gates.ruleTable) {
                 let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-                let teContentCoded = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
-                if codec.supported, !codec.requiresDecompression, !teContentCoded {
+                let hasContentCodedTransferEncoding = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
+                if codec.isSupported, !codec.requiresDecompression, !hasContentCodedTransferEncoding {
                     warnIfBufferedScriptDeStreams(rewrittenHeaders)
-                    // Force Connection: close so success and overflow paths both frame correctly.
                     var headers = rewrittenHeaders.filter {
                         !ASCII.equalsIgnoringCase($0.name, "connection")
                     }
                     headers.append((name: "Connection", value: "close"))
+                    bodyAccumulator = Data()
                     mode = .rewritingUntilClose(
                         pending: PendingHead(
                             startLine: rewrittenStartLine,
                             headers: headers,
                             codec: codec,
                             originatingRequest: originatingRequest
-                        ),
-                        accumulator: Data()
+                        )
                     )
                     return true
                 }
-                if teContentCoded {
-                    logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
+                if hasContentCodedTransferEncoding {
+                    logger.warning("\(logPrefix): Unsupported Transfer-Encoding for rewrite")
                 }
             }
-            if phase == .httpRequest {
+            if direction == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
             }
-            // RFC 9112 §6.3 case 7: read-until-close. Force Connection: close so
-            // the receiver doesn't parse body bytes as the next response head.
             let finalHeaders: [Header]
             if case .readUntilClose = framing {
                 var headers = rewrittenHeaders.filter {
@@ -736,22 +608,16 @@ actor MITMHTTP1Stream {
             }
             if responseIRSink != nil {
                 if case .switchingProtocols = framing {
-                    // 101 / CONNECT-2xx can't bridge onto a single HTTP/2 stream — reset (the client
-                    // retries over HTTP/1.1, where the tunnel path applies).
                     _ = bridgeResetIfNeeded()
                     return false
                 }
-                // read-until-close: deliver the head, then stream the body as IR until EOF.
                 emitResponseHead(startLine: rewrittenStartLine, headers: finalHeaders, bodyFollows: true, into: &output)
                 mode = .bridgeForwardUntilClose
                 return true
             }
             output.append(serializeHead(startLine: rewrittenStartLine, headers: finalHeaders))
-            // Best-effort: synth bytes can't be cleanly framed once passthrough.
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .passthrough
-            // 101 / CONNECT-2xx: flip the request leg too, or WebSocket frames
-            // stall in the head parser.
             if case .switchingProtocols = framing {
                 delegate?.http1StreamDidUpgrade(self)
             }
@@ -762,8 +628,6 @@ actor MITMHTTP1Stream {
 
         switch framing {
         case .none:
-            // Skip scripts on 1xx interim responses (RFC 9110 §15.2); the
-            // matching final response runs them itself.
             let runScripts = scriptsApply && !isInterimResponseStartLine(rewrittenStartLine)
             if runScripts {
                 let message = buildMessage(
@@ -775,14 +639,11 @@ actor MITMHTTP1Stream {
                 let fallback = rewrittenStartLine
                 let originatingMethod = originatingRequest?.method
                 mode = .awaitingScript
-                // Run the script off-queue; hop back to the lwIP queue to resume the drive pass.
                 let rules = self.rules
-                let engineProvider = self.scriptEngineProvider
-                Task { [weak self] in
-                    let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
+                pendingHop = Task { [weak self] in
+                    let outcome = await MITMScriptTransform.apply(message, rules: rules)
                     guard let self else { return }
-                    self.lwipBridge.enqueue {
-                        // Runs on the lwIP queue — this actor's executor — so enter isolation.
+                    self.sessionContext.enqueue {
                         self.assumeIsolated {
                             $0.resumeHeadNoBody(
                                 outcome: outcome,
@@ -792,14 +653,11 @@ actor MITMHTTP1Stream {
                         }
                     }
                 }
-                return false // parked
+                return false
             }
-            if phase == .httpRequest {
+            if direction == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
             }
-            // Interim 1xx (e.g. 103 Early Hints): forward it to the client leg as its own interim
-            // head — no body, doesn't end the stream (RFC 9113 §8.1) — then await the final response
-            // (the request-log record was peeked, so it stays queued for that pop).
             if let sink = responseIRSink, isInterimResponseStartLine(rewrittenStartLine) {
                 sink.http1ResponseInterim(
                     status: responseStatusCode(from: rewrittenStartLine) ?? 0,
@@ -809,8 +667,7 @@ actor MITMHTTP1Stream {
                 return true
             }
             emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: false, into: &output)
-            // Head-only response: this is the synth-after boundary.
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .contentLength(let length):
@@ -837,24 +694,16 @@ actor MITMHTTP1Stream {
         }
     }
 
-    /// Resolves everything head processing needs from the gate regexes — synchronously when
-    /// every verdict answers from a literal gate or the memo cache, otherwise parking the
-    /// drive (`.awaitingGates`) while the regex bridge resolves the misses. nil = parked; the
-    /// head bytes stay in `rxBuffer` and the resumed pass retries from the same clean boundary.
     private func ensureGateTables(parsed: ParsedHead) -> HeadGates? {
         if rules.isEmpty && responseBodyGateRules.isEmpty {
             return HeadGates(rewriteSelection: .none, ruleTable: .empty, responseGateTable: .empty)
         }
-        // Pre-rewrite gating URL. Requests gate rewrite rules on the original target; responses
-        // never rewrite and gate everything on the originating request's URL — *peeked*, the
-        // commit pop happens after this resolution point.
         let rewriteURL = requestURLForGating(
             startLine: parsed.startLine,
-            originatingRequest: phase == .httpResponse ? requestLog.peekHTTP1() : nil
+            originatingRequest: direction == .httpResponse ? requestLog.peekHTTP1() : nil
         )
         guard let rewriteTable = obtainTable(\.rewriteTable, rules: rules, url: rewriteURL) else { return nil }
 
-        // Cache the selection alongside its URL so a second park doesn't re-log its diagnostics.
         let selection: RewriteSelection
         if let cached = pendingGateTables.rewriteSelection, cached.url == rewriteURL {
             selection = cached.selection
@@ -870,7 +719,6 @@ actor MITMHTTP1Stream {
         case .transparent(let line, _):
             postURL = requestURLForGating(startLine: line, originatingRequest: nil)
         case .synthesize:
-            // The synth path answers locally; nothing downstream consults a gate.
             return HeadGates(rewriteSelection: selection, ruleTable: .empty, responseGateTable: .empty)
         }
         let ruleTable: MITMGateVerdictTable
@@ -880,7 +728,7 @@ actor MITMHTTP1Stream {
             guard let resolved = obtainTable(\.ruleTable, rules: rules, url: postURL) else { return nil }
             ruleTable = resolved
         }
-        guard phase == .httpRequest, !responseBodyGateRules.isEmpty else {
+        guard direction == .httpRequest, !responseBodyGateRules.isEmpty else {
             return HeadGates(rewriteSelection: selection, ruleTable: ruleTable, responseGateTable: .empty)
         }
         guard let responseGateTable = obtainTable(\.responseGateTable, rules: responseBodyGateRules, url: postURL)
@@ -888,8 +736,6 @@ actor MITMHTTP1Stream {
         return HeadGates(rewriteSelection: selection, ruleTable: ruleTable, responseGateTable: responseGateTable)
     }
 
-    /// Slot-cached or synchronously peeked verdicts, or nil after parking the drive and
-    /// spawning the async resolution (whose resume re-runs the pass).
     private func obtainTable(
         _ slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?> & Sendable,
         rules: [CompiledMITMRule],
@@ -903,25 +749,21 @@ actor MITMHTTP1Stream {
             return peeked
         }
         mode = .awaitingGates
-        // Resolve off-queue on the regex bridge; hop back to the lwIP queue to resume the pass.
-        Task { [weak self] in
+        pendingHop = Task { [weak self] in
             let table = await MITMGateVerdictTable.resolve(rules: rules, url: url)
             guard let self else { return }
-            self.lwipBridge.enqueue {
-                // Runs on the lwIP queue — this actor's executor — so enter isolation.
+            self.sessionContext.enqueue {
                 self.assumeIsolated { $0.resumeGateResolution(slot: slot, table: table) }
             }
         }
         return nil
     }
 
-    /// Resume for a parked gate resolution: stores the table and re-runs the drive pass — the
-    /// retried `consumeHead` now resolves this table synchronously from the slot.
     private func resumeGateResolution(
         slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?> & Sendable,
         table: MITMGateVerdictTable
     ) {
-        guard !torn else { return }
+        guard phase != .torn else { return }
         pendingGateTables[keyPath: slot] = table
         guard case .awaitingGates = mode else { return }
         if resumeIntoForcedPassthroughIfNeeded() { return }
@@ -941,21 +783,17 @@ actor MITMHTTP1Stream {
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
-        // Any Transfer-Encoding here is rule-injected (parseHead rejects inbound TE+CL); strip it
-        // so the emitted head can't carry the TE+CL smuggling pair (RFC 9112 §6.3.3).
         let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "transfer-encoding") }
-        // Stream scripts can't modify a length-prefixed body; warn and fall through.
         if MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: verdicts) {
-            logger.warning("HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
+            logger.warning("[MITM] \(host): streamScript unsupported for Content-Length body")
         }
 
-        // Opt out of buffering up front when length exceeds the cap — keeps
-        // large downloads out of the accumulator.
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-        let canRewrite = buffersBody && codec.supported && length <= MITMBodyCodec.maxBufferedBodyBytes
+        let canRewrite = buffersBody && codec.isSupported && length <= MITMBodyCodec.maxBufferedBodyBytes
 
         if canRewrite {
             let headers = handleExpectContinue(startLine: rewrittenStartLine, headers: rewrittenHeaders)
+            bodyAccumulator = Data()
             mode = .rewritingLength(
                 pending: PendingHead(
                     startLine: rewrittenStartLine,
@@ -963,15 +801,14 @@ actor MITMHTTP1Stream {
                     codec: codec,
                     originatingRequest: originatingRequest
                 ),
-                expected: length,
-                accumulator: Data()
+                expected: length
             )
             return true
         }
         if buffersBody, length > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("HTTP/1 \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
+            logger.warning("[MITM] \(host): Body too large for rewrite")
         }
-        if phase == .httpRequest {
+        if direction == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
         }
         emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
@@ -987,25 +824,18 @@ actor MITMHTTP1Stream {
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
-        // A rule can inject Content-Length onto a chunked message (post-rule headers aren't
-        // re-validated); strip it so the emitted head can't carry the TE+CL smuggling pair
-        // (RFC 9112 §6.3.3).
         let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "content-length") }
-        // Streaming script wins over buffered script; emit head immediately
-        // (stream scripts can't mutate head fields).
         if MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: verdicts) {
             if responseIRSink != nil {
-                // The bridge can't run a streaming response script across the h2→h1 boundary;
-                // forward the body unscripted as IR rather than stall.
-                logger.warning("HTTP/1 \(host): response stream-script unsupported on the bridge; forwarding unscripted")
+                logger.warning("[MITM] \(host): streamScript unsupported on bridged response")
                 emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
                 mode = .forwardingChunked(reader: ChunkedReader())
                 return true
             }
             if buffersBody {
-                logger.warning("HTTP/1 \(host): Stream Script wins over buffered body rule")
+                logger.warning("[MITM] \(host): Body rule conflicts with streamScript")
             }
-            if phase == .httpRequest {
+            if direction == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
             }
             output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
@@ -1020,10 +850,11 @@ actor MITMHTTP1Stream {
         }
 
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-        let teContentCoded = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
-        if buffersBody, codec.supported, !teContentCoded {
+        let hasContentCodedTransferEncoding = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
+        if buffersBody, codec.isSupported, !hasContentCodedTransferEncoding {
             warnIfBufferedScriptDeStreams(rewrittenHeaders)
             let headers = handleExpectContinue(startLine: rewrittenStartLine, headers: rewrittenHeaders)
+            bodyAccumulator = Data()
             mode = .rewritingChunked(
                 pending: PendingHead(
                     startLine: rewrittenStartLine,
@@ -1031,15 +862,14 @@ actor MITMHTTP1Stream {
                     codec: codec,
                     originatingRequest: originatingRequest
                 ),
-                accumulator: Data(),
                 reader: ChunkedReader()
             )
             return true
         }
-        if buffersBody, teContentCoded {
-            logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
+        if buffersBody, hasContentCodedTransferEncoding {
+            logger.warning("\(logPrefix): Unsupported Transfer-Encoding for rewrite")
         }
-        if phase == .httpRequest {
+        if direction == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
         }
         emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
@@ -1047,10 +877,8 @@ actor MITMHTTP1Stream {
         return true
     }
 
-    /// `Expect: 100-continue` while the head is withheld: the upstream can't send
-    /// the 100 yet, so synthesize it and strip `Expect` to avoid a duplicate.
     private func handleExpectContinue(startLine: String, headers: [Header]) -> [Header] {
-        guard phase == .httpRequest, startLine.hasSuffix(" HTTP/1.1") else { return headers }
+        guard direction == .httpRequest, startLine.hasSuffix(" HTTP/1.1") else { return headers }
         let expectsContinue = headers.contains { entry in
             ASCII.equalsIgnoringCase(entry.name, "expect")
                 && ASCII.equalsIgnoringCase(
@@ -1059,39 +887,89 @@ actor MITMHTTP1Stream {
                 )
         }
         guard expectsContinue else { return headers }
-        pendingClientBytes.append(serializeHead(startLine: "HTTP/1.1 100 Continue", headers: []))
+        let interim = serializeHead(startLine: "HTTP/1.1 100 Continue", headers: [])
+        if requestLog.isHTTP1QueueEmpty {
+            pendingClientBytes.append(interim)
+        } else {
+            requestLog.attachSynthesizedAfterLastHTTP1(interim)
+        }
         return headers.filter { !ASCII.equalsIgnoringCase($0.name, "expect") }
     }
 
     // MARK: - Body forwarding (no rewrite)
 
     private func forwardLength(remaining: Int, into output: inout Data) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let take = min(remaining, rxBuffer.count)
-        let slice = Data(rxBuffer.prefix(take))
-        rxBuffer.removeFirst(take)
+        guard !receiveBuffer.isEmpty else { return false }
+        let take = min(remaining, receiveBuffer.count)
         let left = remaining - take
-        if !emitBridgeBody(slice, endStream: left == 0) {
-            output.append(slice)
+        if responseIRSink != nil {
+            let slice = receiveBuffer.prefix(take)
+            receiveBuffer.removeFirst(take)
+            _ = emitBridgeBody(slice, endStream: left == 0)
+        } else {
+            receiveBuffer.appendPrefix(take, to: &output)
+            receiveBuffer.removeFirst(take)
         }
+        finishForwardedLength(left: left, into: &output)
+        return true
+    }
+
+    private func forwardLengthDirectly(_ data: Data, into output: inout Data) -> Data {
+        guard receiveBuffer.isEmpty, !data.isEmpty, case .forwardingLength(let remaining) = mode else { return data }
+        let take = min(remaining, data.count)
+        let left = remaining - take
+        let body = data.prefix(take)
+        if !emitBridgeBody(body, endStream: left == 0) {
+            if output.isEmpty { output = body } else { output.append(body) }
+        }
+        finishForwardedLength(left: left, into: &output)
+        return take == data.count ? Data() : data.suffix(from: data.startIndex + take)
+    }
+
+    private func finishForwardedLength(left: Int, into output: inout Data) {
         if left == 0 {
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .awaitingHead
         } else {
             mode = .forwardingLength(remaining: left)
         }
-        return true
     }
 
     private func forwardChunked(reader: inout ChunkedReader, into output: inout Data) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
+        guard !receiveBuffer.isEmpty else { return false }
         let result: ChunkedReader.ForwardResult
         if let sink = responseIRSink {
-            // Bridge: deliver decoded chunk payloads as IR — no h1 re-framing.
-            result = reader.consumeForwardIR(&rxBuffer) { sink.http1ResponseBody($0, endStream: false) }
+            var slices: [Data] = []
+            result = reader.consumeForwardIR(&receiveBuffer) { slices.append($0) }
+            for slice in slices {
+                sink.http1ResponseBody(slice, endStream: false)
+                if phase == .torn { return false }
+            }
         } else {
-            result = reader.consumeForward(&rxBuffer, into: &output)
+            result = reader.consumeForward(&receiveBuffer, into: &output)
         }
+        return finishForwardedChunked(result, reader: reader, into: &output)
+    }
+
+    private func forwardChunkedDirectly(_ data: Data, into output: inout Data) -> Data {
+        guard receiveBuffer.isEmpty, !data.isEmpty, case .forwardingChunked(let reader) = mode else { return data }
+        let sink = responseIRSink
+        var bodyRanges: [Range<Data.Index>] = []
+        let scan = reader.scanForward(data, onData: sink == nil ? nil : { bodyRanges.append($0) })
+        if let sink {
+            for range in bodyRanges where !range.isEmpty {
+                sink.http1ResponseBody(data.subdata(in: range), endStream: false)
+                if phase == .torn { return Data() }
+            }
+        } else if scan.consumed > 0 {
+            let forwarded = data.prefix(scan.consumed)
+            if output.isEmpty { output = forwarded } else { output.append(forwarded) }
+        }
+        _ = finishForwardedChunked(scan.result, reader: reader, into: &output)
+        return scan.consumed == data.count ? Data() : data.suffix(from: data.startIndex + scan.consumed)
+    }
+
+    private func finishForwardedChunked(_ result: ChunkedReader.ForwardResult, reader: ChunkedReader, into output: inout Data) -> Bool {
         switch result {
         case .needMore:
             mode = .forwardingChunked(reader: reader)
@@ -1101,17 +979,13 @@ actor MITMHTTP1Stream {
                 mode = .awaitingHead
                 return true
             }
-            flushSynthAfterResponse(into: &output)
+            flushSynthesizedAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .malformed:
-            // Chunked framing broke mid-body. Bridge: reset the stream. Main path: the head is
-            // already on the wire, so we can't answer an error — synthesizing a `0\r\n\r\n`
-            // terminator + passthrough would frame a truncated body as complete and then desync the
-            // peer onto the next message. Fail closed (close both legs).
             if bridgeResetIfNeeded() { return false }
-            logger.warning("HTTP/1 \(host): chunked framing broke mid-body; closing the connection rather than truncating + desyncing")
-            rxBuffer.removeAll(keepingCapacity: false)
+            logger.warning("\(logPrefix): Malformed chunked body")
+            receiveBuffer.removeAll(keepingCapacity: false)
             mode = .draining
             delegate?.http1StreamHardClose(self)
             return true
@@ -1123,97 +997,79 @@ actor MITMHTTP1Stream {
     private func rewriteLength(
         pending: PendingHead,
         expected: Int,
-        accumulator: inout Data,
         into output: inout Data
     ) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let needed = expected - accumulator.count
-        let take = min(needed, rxBuffer.count)
-        accumulator.append(rxBuffer.prefix(take))
-        rxBuffer.removeFirst(take)
-        if accumulator.count == expected {
-            // Parked: the resume finishes; a decompression-fail passthrough doesn't park.
+        guard !receiveBuffer.isEmpty else { return false }
+        let needed = expected - bodyAccumulator.count
+        let take = min(needed, receiveBuffer.count)
+        receiveBuffer.appendPrefix(take, to: &bodyAccumulator)
+        receiveBuffer.removeFirst(take)
+        if bodyAccumulator.count == expected {
             let parked = applyScriptsAndEmit(
                 pending: pending,
-                rawBody: accumulator,
+                rawBody: takeBodyAccumulator(),
                 originalSizes: nil,
                 resumeMode: .awaitingHead,
                 into: &output
             )
             return !parked
         }
-        mode = .rewritingLength(pending: pending, expected: expected, accumulator: accumulator)
         return false
     }
 
     private func rewriteChunked(
         pending: PendingHead,
-        accumulator: inout Data,
-        reader: inout ChunkedReader,
+        reader: ChunkedReader,
         into output: inout Data
     ) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let result = reader.consumeBuffered(&rxBuffer, into: &accumulator)
+        guard !receiveBuffer.isEmpty else { return false }
+        let result = reader.consumeBuffered(&receiveBuffer, into: &bodyAccumulator)
         switch result {
         case .needMore:
-            // No up-front length. On cap overflow we can neither buffer the whole body nor cleanly
-            // stream the remainder un-rewritten (the head is withheld and decode-while-buffering has
-            // already consumed the original chunk framing). Emitting the partial buffer with an exact
-            // Content-Length would frame a silently-truncated body as complete, which a client trusts.
-            // Fail closed instead (502 on the response phase, then close).
-            if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                logger.warning("HTTP/1 \(host): chunked body exceeded \(MITMBodyCodec.maxBufferedBodyBytes) B buffer cap; failing closed rather than truncating to a fake-complete length")
+            if bodyAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+                logger.warning("[MITM] \(host): Body too large for rewrite")
                 mode = .draining
                 delegate?.http1StreamFatalClose(self)
                 return false
             }
-            mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
             return false
         case .complete(let originalSizes):
             let parked = applyScriptsAndEmit(
                 pending: pending,
-                rawBody: accumulator,
+                rawBody: takeBodyAccumulator(),
                 originalSizes: originalSizes,
                 resumeMode: .awaitingHead,
                 into: &output
             )
             return !parked
         case .malformed:
-            // Head still withheld (buffering to rewrite). Bridge: reset the client stream. Main
-            // path: fail closed (502 / close) rather than passthrough, which would emit raw body
-            // bytes with no response head and desync the peer.
             if bridgeResetIfNeeded() { return false }
-            logger.warning("HTTP/1 \(host): chunked framing broke while buffering for a rewrite; failing closed")
+            logger.warning("\(logPrefix): Malformed chunked body")
             mode = .draining
             delegate?.http1StreamFatalClose(self)
             return true
         }
     }
 
-    /// Accumulates a read-until-close body; `finish()` runs the script chain at EOF.
-    /// On cap overflow emits the unmodified head + buffered bytes and goes passthrough.
     private func rewriteUntilClose(
         pending: PendingHead,
-        accumulator: inout Data,
         into output: inout Data
     ) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        accumulator.append(rxBuffer.prefix(rxBuffer.count))
-        rxBuffer.removeAll(keepingCapacity: false)
-        if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding verbatim")
+        guard !receiveBuffer.isEmpty else { return false }
+        receiveBuffer.appendPrefix(receiveBuffer.count, to: &bodyAccumulator)
+        receiveBuffer.removeAll(keepingCapacity: false)
+        if bodyAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+            logger.warning("[MITM] \(host): Body too large for rewrite")
             if bridgeResetIfNeeded() { return false }
             output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
-            output.append(accumulator)
-            flushSynthAfterResponse(into: &output)
+            output.append(takeBodyAccumulator())
+            flushSynthesizedAfterResponse(into: &output)
             mode = .passthrough
             return true
         }
-        mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
         return false
     }
 
-    /// Drives the per-chunk streaming-script loop with a one-chunk lookahead for `isLast`.
     private func driveStreamingChunked(
         streaming: inout StreamingState,
         inner startInner: StreamingChunkedInner,
@@ -1223,36 +1079,29 @@ actor MITMHTTP1Stream {
         while true {
             switch currentInner {
             case .sizeLine:
-                guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
-                    if rxBuffer.count > Self.maxChunkLineBytes {
-                        // Unterminated size line: malformed, or the buffer grows unbounded. The head
-                        // is already on the wire, so fail closed (close both legs) rather than
-                        // synthesize a terminator that frames the body as complete and desyncs.
-                        logger.warning("HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
-                        rxBuffer.removeAll(keepingCapacity: false)
+                guard let lineEnd = receiveBuffer.firstCRLF(from: streaming.lineScanCursor) else {
+                    if receiveBuffer.count > Self.maxChunkLineBytes {
+                        logger.warning("\(logPrefix): Malformed chunked body")
+                        receiveBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
                         delegate?.http1StreamHardClose(self)
                         return true
                     }
-                    streaming.lineScanCursor = max(0, rxBuffer.count - 1)
+                    streaming.lineScanCursor = max(0, receiveBuffer.count - 1)
                     mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
                     return false
                 }
-                let line = rxBuffer.subdata(in: 0..<lineEnd)
-                rxBuffer.removeFirst(lineEnd + 2)
+                let parsedSize = receiveBuffer.withUnsafeBytes(in: 0..<lineEnd, Self.parseHexSize)
+                receiveBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
-                guard let size = Self.parseHexSize(line) else {
-                    // Malformed chunk-size line: the head already went out as chunked, so fail closed
-                    // (close both legs) rather than synthesize a terminator that frames a truncated
-                    // body as complete and then feeds garbage as the next response.
-                    logger.warning("HTTP/1 \(host): malformed chunk-size line; closing the connection")
-                    rxBuffer.removeAll(keepingCapacity: false)
+                guard let size = parsedSize else {
+                    logger.warning("\(logPrefix): Malformed chunked body")
+                    receiveBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
                     delegate?.http1StreamHardClose(self)
                     return true
                 }
                 if size == 0 {
-                    // End of body: emit the held chunk with isLast=true, then drain trailers.
                     let finalChunk = streaming.pendingChunk ?? Data()
                     streaming.pendingChunk = nil
                     if emitOrParkStreamingFrame(
@@ -1262,113 +1111,95 @@ actor MITMHTTP1Stream {
                         postFrame: .finalThenTrailer,
                         into: &output
                     ) {
-                        return false // parked
+                        return false
                     }
                     output.append(contentsOf: "0\r\n".utf8)
                     currentInner = .trailerOrEnd
                 } else {
-                    currentInner = .chunkData(remaining: size, accumulator: Data())
+                    chunkAccumulator = Data()
+                    currentInner = .chunkData(remaining: size)
                 }
-            case .chunkData(let remaining, var accumulator):
-                guard !rxBuffer.isEmpty else {
-                    mode = .streamingChunked(
-                        streaming: streaming,
-                        inner: .chunkData(remaining: remaining, accumulator: accumulator)
-                    )
+            case .chunkData(let remaining):
+                guard !receiveBuffer.isEmpty else {
+                    mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: remaining))
                     return false
                 }
-                let take = min(remaining, rxBuffer.count)
-                accumulator.append(rxBuffer.prefix(take))
-                rxBuffer.removeFirst(take)
+                let take = min(remaining, receiveBuffer.count)
+                receiveBuffer.appendPrefix(take, to: &chunkAccumulator)
+                receiveBuffer.removeFirst(take)
                 let left = remaining - take
-                // A declared chunk size can be Int.max; on overflow flush the held
-                // chunk, bypass the script, and emit the remainder verbatim.
-                if left != 0, accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                    logger.warning("HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding remainder verbatim")
+                if left != 0, chunkAccumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+                    logger.warning("[MITM] \(host): Chunk too large for rewrite")
                     if let held = streaming.pendingChunk {
                         streaming.pendingChunk = nil
                         if emitOrParkStreamingFrame(
                             streaming: &streaming,
                             chunk: held,
                             isLast: false,
-                            postFrame: .bypassRemainder(left: left, accumulator: accumulator),
+                            postFrame: .bypassRemainder(left: left),
                             into: &output
                         ) {
-                            return false // parked
+                            return false
                         }
                     }
-                    streaming.cursor.mutable.withLock { $0.bypass = true }
-                    appendChunk(accumulator, into: &output)
-                    mode = .streamingChunked(
-                        streaming: streaming,
-                        inner: .chunkData(remaining: left, accumulator: Data())
-                    )
+                    streaming.cursor.mutable.withLock { $0.isBypassed = true }
+                    appendChunk(takeChunkAccumulator(), into: &output)
+                    mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: left))
                     return false
                 }
                 if left == 0 {
-                    // Chunk complete: flush the held chunk (isLast=false) and hold this one.
+                    let completed = takeChunkAccumulator()
                     if let held = streaming.pendingChunk {
                         if emitOrParkStreamingFrame(
                             streaming: &streaming,
                             chunk: held,
                             isLast: false,
-                            postFrame: .hold(nextPending: accumulator, inner: .dataCRLF),
+                            postFrame: .hold(nextPending: completed, inner: .dataCRLF),
                             into: &output
                         ) {
-                            return false // parked
+                            return false
                         }
                     }
-                    streaming.pendingChunk = accumulator
+                    streaming.pendingChunk = completed
                     currentInner = .dataCRLF
                 } else {
-                    mode = .streamingChunked(
-                        streaming: streaming,
-                        inner: .chunkData(remaining: left, accumulator: accumulator)
-                    )
+                    mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: left))
                     return false
                 }
             case .dataCRLF:
-                guard rxBuffer.count >= 2 else {
+                guard receiveBuffer.count >= 2 else {
                     mode = .streamingChunked(streaming: streaming, inner: .dataCRLF)
                     return false
                 }
-                guard rxBuffer[0] == 0x0D,
-                      rxBuffer[1] == 0x0A
+                guard receiveBuffer[0] == 0x0D,
+                      receiveBuffer[1] == 0x0A
                 else {
-                    // Missing inter-chunk CRLF: framing is broken and the head is on the wire.
-                    // Fail closed (close both legs) rather than truncate-and-desync.
-                    logger.warning("HTTP/1 \(host): missing CRLF after chunk data; closing the connection")
-                    rxBuffer.removeAll(keepingCapacity: false)
+                    logger.warning("\(logPrefix): Malformed chunked body")
+                    receiveBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
                     delegate?.http1StreamHardClose(self)
                     return true
                 }
-                rxBuffer.removeFirst(2)
+                receiveBuffer.removeFirst(2)
                 currentInner = .sizeLine
             case .trailerOrEnd:
-                // RFC 9112 §7.1.2: forward trailer lines verbatim until the empty-line terminator.
-                guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
-                    if rxBuffer.count > Self.maxChunkLineBytes {
-                        // Oversized/garbage trailer, final CRLF unseen: framing is broken. `0\r\n` is
-                        // already emitted but not the closing `\r\n`, so the peer sees an unterminated
-                        // body — close both legs rather than paper over it and desync onto garbage.
-                        logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
-                        rxBuffer.removeAll(keepingCapacity: false)
+                guard let lineEnd = receiveBuffer.firstCRLF(from: streaming.lineScanCursor) else {
+                    if receiveBuffer.count > Self.maxChunkLineBytes {
+                        logger.warning("\(logPrefix): Malformed chunked body")
+                        receiveBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
                         delegate?.http1StreamHardClose(self)
                         return true
                     }
-                    streaming.lineScanCursor = max(0, rxBuffer.count - 1)
+                    streaming.lineScanCursor = max(0, receiveBuffer.count - 1)
                     mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
                     return false
                 }
-                let line = rxBuffer.subdata(in: 0..<lineEnd)
-                rxBuffer.removeFirst(lineEnd + 2)
+                receiveBuffer.appendPrefix(lineEnd + 2, to: &output)
+                receiveBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
-                output.append(line)
-                output.append(0x0D); output.append(0x0A)
-                if line.isEmpty {
-                    flushSynthAfterResponse(into: &output)
+                if lineEnd == 0 {
+                    flushSynthesizedAfterResponse(into: &output)
                     mode = .awaitingHead
                     return true
                 }
@@ -1376,8 +1207,6 @@ actor MITMHTTP1Stream {
         }
     }
 
-    /// Runs the streaming-script chain on `chunk`; returns true when parked.
-    /// Empty results are dropped (the zero-size line is reserved for the terminator).
     private func emitOrParkStreamingFrame(
         streaming: inout StreamingState,
         chunk: Data,
@@ -1385,7 +1214,7 @@ actor MITMHTTP1Stream {
         postFrame: StreamingPostFrame,
         into output: inout Data
     ) -> Bool {
-        if streaming.cursor.mutable.withLock({ $0.bypass }) {
+        if streaming.cursor.mutable.withLock({ $0.isBypassed }) {
             streaming.frameIndex += 1
             if !chunk.isEmpty {
                 appendChunk(chunk, into: &output)
@@ -1393,45 +1222,39 @@ actor MITMHTTP1Stream {
             return false
         }
         let frameContext = MITMScriptEngine.FrameContext(
-            phase: phase,
+            phase: direction,
             method: streamingMethod(streaming),
             url: streamingURL(streaming),
-            originalUrl: streamingOriginalURL(streaming),
+            originalURL: streamingOriginalURL(streaming),
             status: streamingStatus(streaming),
             headers: streaming.headers,
             frameIndex: streaming.frameIndex,
             isLast: isLast,
             ruleSetID: ruleSetID
         )
-        // cursor is shared by reference so engine mutations are visible on resume.
         let captured = streaming
         mode = .awaitingScript
-        let engineProvider = self.scriptEngineProvider
         let cursor = streaming.cursor
-        Task { [weak self] in
+        pendingHop = Task { [weak self] in
             let result = await MITMScriptTransform.applyFrame(
                 chunk,
                 frameContext: frameContext,
-                cursor: cursor,
-                engineProvider: engineProvider
+                cursor: cursor
             )
             guard let self else { return }
-            self.lwipBridge.enqueue {
-                // Runs on the lwIP queue — this actor's executor — so enter isolation.
+            self.sessionContext.enqueue {
                 self.assumeIsolated { $0.resumeStreamingFrame(result: result, streaming: captured, postFrame: postFrame) }
             }
         }
         return true
     }
 
-    /// Resume for a parked streaming frame: appends the result and applies the
-    /// captured continuation.
     private func resumeStreamingFrame(
         result: MITMScriptTransform.StreamFrameResult,
         streaming: StreamingState,
         postFrame: StreamingPostFrame
     ) {
-        guard !torn else { return }
+        guard phase != .torn else { return }
         if resumeIntoForcedPassthroughIfNeeded() { return }
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
@@ -1447,20 +1270,17 @@ actor MITMHTTP1Stream {
         case .finalThenTrailer:
             resumed.append(contentsOf: "0\r\n".utf8)
             mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
-        case .bypassRemainder(let left, let accumulator):
-            streaming.cursor.mutable.withLock { $0.bypass = true }
-            appendChunk(accumulator, into: &resumed)
-            mode = .streamingChunked(
-                streaming: streaming,
-                inner: .chunkData(remaining: left, accumulator: Data())
-            )
+        case .bypassRemainder(let left):
+            streaming.cursor.mutable.withLock { $0.isBypassed = true }
+            appendChunk(takeChunkAccumulator(), into: &resumed)
+            mode = .streamingChunked(streaming: streaming, inner: .chunkData(remaining: left))
         }
         while drive(into: &resumed) { }
         finishDrivePass(resumed)
     }
 
     private func streamingMethod(_ streaming: StreamingState) -> String? {
-        switch phase {
+        switch direction {
         case .httpRequest:
             let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             return parts.first.map(String.init)
@@ -1470,7 +1290,7 @@ actor MITMHTTP1Stream {
     }
 
     private func streamingURL(_ streaming: StreamingState) -> String? {
-        switch phase {
+        switch direction {
         case .httpRequest:
             let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             guard parts.count >= 2 else { return nil }
@@ -1481,48 +1301,54 @@ actor MITMHTTP1Stream {
     }
 
     private func streamingOriginalURL(_ streaming: StreamingState) -> String? {
-        switch phase {
+        switch direction {
         case .httpRequest:
             return currentRequestOriginalURL
         case .httpResponse:
-            return streaming.originatingRequest?.originalUrl
+            return streaming.originatingRequest?.originalURL
         }
     }
 
     private func streamingStatus(_ streaming: StreamingState) -> Int? {
-        guard phase == .httpResponse else { return nil }
+        guard direction == .httpResponse else { return nil }
         let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else { return nil }
         return HTTPHeader.parseStatusCode(parts[1])
     }
 
-    /// Parses the hex chunk-size, ignoring any extensions after `;`.
-    fileprivate static func parseHexSize(_ data: Data) -> Int? {
-        // latin-1 never fails (a non-ASCII byte in a chunk extension shouldn't kill a valid body);
-        // the hex chunk-size itself is still validated as ASCII hex digits below.
-        guard let raw = String(data: data, encoding: .isoLatin1) else { return nil }
-        let head = raw.split(separator: ";", maxSplits: 1).first.map(String.init) ?? raw
-        let trimmed = head.trimmingCharacters(in: CharacterSet.whitespaces)
-        // RFC 9112 §7.1: unsigned hex only. `Int(_:radix:)` accepts `-`/`+`,
-        // and a hostile `-1` would trap in MITMByteBuffer's range math.
-        guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isHexDigit && $0.isASCII }),
-              let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
+    fileprivate static func parseHexSize(_ line: UnsafeRawBufferPointer) -> Int? {
+        var end = line.firstIndex(of: 0x3B) ?? line.count
+        var start = 0
+        while start < end, line[start] == 0x20 || line[start] == 0x09 { start += 1 }
+        while end > start, line[end - 1] == 0x20 || line[end - 1] == 0x09 { end -= 1 }
+        guard start < end else { return nil }
+        var size = 0
+        for byte in line[start..<end] {
+            let digit: Int
+            switch byte {
+            case 0x30...0x39: digit = Int(byte - 0x30)
+            case 0x41...0x46: digit = Int(byte - 0x37)
+            case 0x61...0x66: digit = Int(byte - 0x57)
+            default: return nil
+            }
+            guard size <= Int.max >> 4 else { return nil }
+            size = size << 4 | digit
+        }
         return size
     }
 
-    /// Drops a Content-Length body, keeping the connection framed for keep-alive.
     private func discardLength(remaining: Int) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let take = min(remaining, rxBuffer.count)
-        rxBuffer.removeFirst(take)
+        guard !receiveBuffer.isEmpty else { return false }
+        let take = min(remaining, receiveBuffer.count)
+        receiveBuffer.removeFirst(take)
         let left = remaining - take
         mode = left == 0 ? .awaitingHead : .discardingLength(remaining: left)
         return true
     }
 
     private func discardChunked(reader: inout ChunkedReader) -> Bool {
-        guard !rxBuffer.isEmpty else { return false }
-        let result = reader.consumeForwardIR(&rxBuffer) { _ in }
+        guard !receiveBuffer.isEmpty else { return false }
+        let result = reader.consumeForwardIR(&receiveBuffer, deliver: nil)
         switch result {
         case .needMore:
             mode = .discardingChunked(reader: reader)
@@ -1531,8 +1357,6 @@ actor MITMHTTP1Stream {
             mode = .awaitingHead
             return true
         case .malformed:
-            // Boundary lost; passthrough would leak post-synth bytes upstream
-            // or desync the receiver, so blackhole instead.
             mode = .draining
             return true
         }
@@ -1540,8 +1364,6 @@ actor MITMHTTP1Stream {
 
     // MARK: - Script application + head rebuild
 
-    /// Decompresses the body and dispatches the script chain. Returns true when
-    /// parked; false on decompression failure (emits verbatim, sets `resumeMode`).
     @discardableResult
     private func applyScriptsAndEmit(
         pending: PendingHead,
@@ -1554,14 +1376,12 @@ actor MITMHTTP1Stream {
         if pending.codec.requiresDecompression {
             guard let decoded = MITMBodyCodec.decompress(rawBody, plan: pending.codec, host: host) else {
                 if responseIRSink != nil {
-                    // Couldn't decompress to run the rule — deliver the head with its Content-Encoding
-                    // intact plus the original (still-encoded) body; the client decodes it (rule skipped).
                     emitResponseHead(startLine: pending.startLine, headers: pending.headers, bodyFollows: !rawBody.isEmpty, into: &output)
                     if !rawBody.isEmpty { _ = emitBridgeBody(rawBody, endStream: true) }
                     mode = resumeMode.mode
                     return false
                 }
-                if phase == .httpRequest {
+                if direction == .httpRequest {
                     logRequest(startLine: pending.startLine)
                 }
                 output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
@@ -1570,7 +1390,7 @@ actor MITMHTTP1Stream {
                 } else {
                     output.append(rawBody)
                 }
-                flushSynthAfterResponse(into: &output)
+                flushSynthesizedAfterResponse(into: &output)
                 mode = resumeMode.mode
                 return false
             }
@@ -1585,73 +1405,78 @@ actor MITMHTTP1Stream {
             body: body,
             originatingRequest: pending.originatingRequest
         )
-        _ = originalSizes // chunked re-encoding is unused once we collapse to Content-Length
+        let encodedOriginal = pending.codec.requiresDecompression ? (raw: rawBody, decoded: body) : nil
         mode = .awaitingScript
         let rules = self.rules
-        let engineProvider = self.scriptEngineProvider
-        Task { [weak self] in
-            let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
+        pendingHop = Task { [weak self] in
+            let outcome = await MITMScriptTransform.apply(message, rules: rules)
             guard let self else { return }
-            self.lwipBridge.enqueue {
-                // Runs on the lwIP queue — this actor's executor — so enter isolation.
-                self.assumeIsolated { $0.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode) }
+            self.sessionContext.enqueue {
+                self.assumeIsolated {
+                    $0.resumeBufferedBody(outcome: outcome, pending: pending, encodedOriginal: encodedOriginal, resumeMode: resumeMode)
+                }
             }
         }
         return true
     }
 
-    /// Resume for the buffered script path: emits the rebuilt head + body
-    /// (or queues a synth response) and resumes the pass.
     private func resumeBufferedBody(
         outcome: MITMScriptTransform.Outcome,
         pending: PendingHead,
+        encodedOriginal: (raw: Data, decoded: Data)?,
         resumeMode: ResumeMode
     ) {
-        guard !torn else { return }
+        guard phase != .torn else { return }
         if resumeIntoForcedPassthroughIfNeeded() { return }
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
         switch outcome {
         case .message(let result):
             let finalStartLine = rebuildStartLine(from: result, fallback: pending.startLine)
-            var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: pending.codec.requiresDecompression)
-            // Collapse to a single Content-Length unit (original may have been chunked).
-            finalHeaders.append((name: "Content-Length", value: String(result.body.count)))
-            if phase == .httpRequest {
+            let keptRaw = encodedOriginal.flatMap { original -> Data? in
+                let unchanged = result.body == original.decoded
+                    && combinedHeaderValue(result.headers, name: "content-encoding")
+                        == combinedHeaderValue(pending.headers, name: "content-encoding")
+                return unchanged ? original.raw : nil
+            }
+            let body = keptRaw ?? result.body
+            var finalHeaders = strippedFramingHeaders(
+                result.headers,
+                dropContentEncoding: pending.codec.requiresDecompression && keptRaw == nil
+            )
+            finalHeaders.append((name: "Content-Length", value: String(body.count)))
+            if direction == .httpRequest {
                 logRequest(startLine: finalStartLine)
             }
             if responseIRSink != nil {
-                emitResponseHead(startLine: finalStartLine, headers: finalHeaders, bodyFollows: !result.body.isEmpty, into: &resumed)
-                if !result.body.isEmpty { _ = emitBridgeBody(result.body, endStream: true) }
+                emitResponseHead(startLine: finalStartLine, headers: finalHeaders, bodyFollows: !body.isEmpty, into: &resumed)
+                if !body.isEmpty { _ = emitBridgeBody(body, endStream: true) }
             } else {
                 resumed.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
-                if !result.body.isEmpty {
-                    resumed.append(result.body)
+                if !body.isEmpty {
+                    resumed.append(body)
                 }
             }
         case .synthesizedResponse(let response):
             if responseIRSink != nil {
-                // Response-phase Anywhere.respond shouldn't occur on the bridge; reset, don't mis-frame.
                 _ = bridgeResetIfNeeded()
                 finishDrivePass(resumed)
                 return
             }
             queueSynthesizedResponse(response)
         }
-        flushSynthAfterResponse(into: &resumed)
+        flushSynthesizedAfterResponse(into: &resumed)
         mode = resumeMode.mode
         while drive(into: &resumed) { }
         finishDrivePass(resumed)
     }
 
-    /// Resume for the no-body script path: emits the scripted head (or queues
-    /// a synth response) and resumes from `.awaitingHead`.
     private func resumeHeadNoBody(
         outcome: MITMScriptTransform.Outcome,
         fallbackStartLine: String,
         originatingMethod: String?
     ) {
-        guard !torn else { return }
+        guard phase != .torn else { return }
         if resumeIntoForcedPassthroughIfNeeded() { return }
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
@@ -1672,15 +1497,12 @@ actor MITMHTTP1Stream {
             }
             queueSynthesizedResponse(response)
         }
-        flushSynthAfterResponse(into: &resumed)
+        flushSynthesizedAfterResponse(into: &resumed)
         mode = .awaitingHead
         while drive(into: &resumed) { }
         finishDrivePass(resumed)
     }
 
-    /// Emits the rebuilt head after scripts ran with no body. No-body statuses
-    /// omit Content-Length (RFC 9110 §15.2/§15.3); HEAD responses keep the
-    /// server's framing headers verbatim.
     private func emitScriptedHead(
         fallbackStartLine: String,
         result: HTTPMessage,
@@ -1689,12 +1511,11 @@ actor MITMHTTP1Stream {
         into output: inout Data
     ) {
         let finalStartLine = rebuildStartLine(from: result, fallback: fallbackStartLine)
-        let isHeadResponse = phase == .httpResponse
+        let isHeadResponse = direction == .httpResponse
             && originatingMethod?.uppercased() == "HEAD"
 
         let finalHeaders: [Header]
         if isHeadResponse {
-            // Preserve server framing headers; the receiver knows not to read a body.
             finalHeaders = codecRequiresDecompression
                 ? result.headers.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
                 : result.headers
@@ -1708,7 +1529,7 @@ actor MITMHTTP1Stream {
             finalHeaders = stripped
         }
 
-        if phase == .httpRequest {
+        if direction == .httpRequest {
             logRequest(startLine: finalStartLine)
         }
         let hasBody = !result.body.isEmpty && !isHeadResponse
@@ -1717,21 +1538,16 @@ actor MITMHTTP1Stream {
             if hasBody { _ = emitBridgeBody(result.body, endStream: true) }
         } else {
             output.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
-            // RFC 9110 §15.2: HEAD responses must not carry a body.
             if hasBody {
                 output.append(result.body)
             }
         }
     }
 
-    /// Statuses that forbid a body (RFC 9110 §15): 1xx except 101, 204, 304.
     private func isNoBodyStatus(_ status: Int?) -> Bool {
         guard let status else { return false }
         switch status {
         case 204, 304:
-            // RFC 9112 §6.3's framing no-body set is 1xx/204/304 (plus HEAD and CONNECT-2xx). 205 is
-            // *not* in it: though it carries no content (RFC 9110 §15.3.6), `bodyFraming` honors an
-            // explicit Content-Length/Transfer-Encoding on a 205 before defaulting it to empty.
             return true
         default:
             return (100..<200).contains(status) && status != 101
@@ -1745,7 +1561,6 @@ actor MITMHTTP1Stream {
         return HTTPHeader.parseStatusCode(parts[1])
     }
 
-    /// Strips the framing headers we re-emit ourselves.
     private func strippedFramingHeaders(
         _ headers: [Header],
         dropContentEncoding: Bool
@@ -1764,7 +1579,6 @@ actor MITMHTTP1Stream {
 
     // MARK: - Re-chunking (chunked decompression-failure passthrough only)
 
-    /// Re-emits `body` as chunked with the original sizes; the last chunk absorbs any delta.
     private func rechunk(body: Data, originalSizes: [Int]) -> Data {
         var out = Data()
         var emitted = 0
@@ -1790,9 +1604,9 @@ actor MITMHTTP1Stream {
 
     private func appendChunk(_ data: Data, into out: inout Data) {
         out.append(contentsOf: String(data.count, radix: 16).utf8)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         out.append(data)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
     }
 
     // MARK: - Head parsing
@@ -1802,146 +1616,154 @@ actor MITMHTTP1Stream {
     private struct ParsedHead {
         let startLine: String
         let headers: [Header]
+        let verbatim: Data?
     }
 
-    /// Outcome of `parseHead`. The two decline reasons act differently: a non-HTTP / tolerable head
-    /// forwards verbatim (`.forward`), while a request-smuggling / injection framing violation fails
-    /// closed (`.smuggling`) instead of being relayed.
     private enum ParsedHeadResult {
         case ok(ParsedHead)
         case forward
         case smuggling
     }
 
-    /// HTTP OWS is exactly SP / HTAB (RFC 9110 §5.6.3). NOT `CharacterSet.whitespaces`, which also
-    /// contains U+00A0 and other Unicode Zs: on the ISO-8859-1 header decode a `0xA0` obs-text byte
-    /// becomes U+00A0, so `.whitespaces` would silently strip a legal field-value byte instead of
-    /// round-tripping it.
+    private enum FieldLine {
+        case span(Range<Int>)
+        case folded([UInt8])
+
+        func bytes(in head: UnsafeRawBufferPointer) -> [UInt8] {
+            switch self {
+            case .span(let range): return Array(head[range])
+            case .folded(let joined): return joined
+            }
+        }
+    }
+
     private static let fieldValueOWS = CharacterSet(charactersIn: " \t")
 
     private func parseHead(_ data: Data) -> ParsedHeadResult {
-        // ISO-8859-1, not ASCII: HTTP/1 header octets are a byte string (RFC 9110 §5.5 obs-text), and
-        // latin-1 maps every byte 1:1 so it never fails (ASCII would reject any byte > 0x7F, common in
-        // real Set-Cookie / Content-Disposition / Server fields). `serializeHead` re-emits these via
-        // `HTTPHeader.appendFieldBytes`, so the original octets round-trip exactly.
-        guard let raw = String(data: data, encoding: .isoLatin1) else { return .forward }
-        let lines = raw.components(separatedBy: "\r\n")
-        guard let startLine = lines.first, !startLine.isEmpty else { return .forward }
+        data.withUnsafeBytes { parseHead($0, verbatim: data) }
+    }
+
+    private func parseHead(_ bytes: UnsafeRawBufferPointer, verbatim: Data) -> ParsedHeadResult {
+        var lines: [Range<Int>] = []
+        var lineStart = 0
+        var index = 0
+        while index + 1 < bytes.count {
+            if bytes[index] == 0x0D, bytes[index + 1] == 0x0A {
+                lines.append(lineStart..<index)
+                index += 2
+                lineStart = index
+            } else {
+                index += 1
+            }
+        }
+        lines.append(lineStart..<bytes.count)
+        guard let firstLine = lines.first, !firstLine.isEmpty else { return .forward }
+        let startLine = Self.latin1String(UnsafeRawBufferPointer(rebasing: bytes[firstLine]))
         guard isHTTPStartLine(startLine) else {
-            // Not a head Anywhere rewrites (some other `HTTP/<d>.<d>` version). Forward it verbatim if
-            // it still parses as a valid start-line grammar; fail closed only on a true non-HTTP or
-            // malformed-version/status head rather than laundering it through.
             return parsesStartLine(startLine) ? .forward : .smuggling
         }
-        // RFC 9112 §2.2: a lone CR/LF in the start line would split into a smuggled header on
-        // re-emission. NUL / other control / DEL bytes are not a line-splitting vector here, so they
-        // forward verbatim (rejecting them would diverge from the endpoint parser).
         if Self.containsCRorLF(startLine) { return .smuggling }
-        // Validate the start-line grammar (request-line: `method SP target SP version` tokenized on
-        // whitespace runs, so a target with SP yields ≠3 tokens and is rejected; status-line needs
-        // an HTTP/d.d version and integer status).
         guard parsesStartLine(startLine) else { return .smuggling }
-        // RFC 9110 §9.3.6: refuse CONNECT in transparent mode — inside an already-intercepted
-        // connection a tunnel request is a misconfiguration / smuggling attempt. Case-sensitive:
-        // lowercase `connect` is a different, unregistered method that forwards normally.
-        if phase == .httpRequest, isConnectRequestLine(startLine) { return .smuggling }
-        // RFC 9112 §5.2 / RFC 7230 §3.2.4: obs-fold is deprecated. Unfold it (append each
-        // continuation to the prior field value with a single SP) and validate the result, so a
-        // value split across a fold can't skip the CL/TE smuggling checks below.
-        var headerLines: [String] = []
+        if direction == .httpRequest, isConnectRequestLine(startLine) { return .smuggling }
+        var fieldLines: [FieldLine] = []
+        var sawFold = false
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
-            if let first = line.utf8.first, first == 0x20 || first == 0x09 {
-                guard !headerLines.isEmpty else { return .smuggling } // continuation with no field
-                let continuation = line.drop { $0 == " " || $0 == "\t" }
-                headerLines[headerLines.count - 1] += " " + String(continuation)
+            let first = bytes[line.lowerBound]
+            if first == 0x20 || first == 0x09 {
+                guard let previous = fieldLines.popLast() else { return .smuggling } // continuation with no field
+                var contentStart = line.lowerBound
+                while contentStart < line.upperBound, bytes[contentStart] == 0x20 || bytes[contentStart] == 0x09 {
+                    contentStart += 1
+                }
+                var joined = previous.bytes(in: bytes)
+                joined.append(0x20)
+                joined.append(contentsOf: bytes[contentStart..<line.upperBound])
+                fieldLines.append(.folded(joined))
+                sawFold = true
                 continue
             }
-            headerLines.append(line)
+            fieldLines.append(.span(line))
         }
         var headers: [Header] = []
+        headers.reserveCapacity(fieldLines.count)
         var contentLengthValues: [String] = []
         var transferEncodingValues: [String] = []
-        for line in headerLines {
-            // RFC 9112 §5.1 / RFC 9110 §5.6: a header field with no colon is malformed; fail closed
-            // rather than forwarding it.
-            guard let colon = line.firstIndex(of: ":") else { return .smuggling }
-            let name = String(line[..<colon])
-            let value = String(line[line.index(after: colon)...])
-                .trimmingCharacters(in: Self.fieldValueOWS)
-            // RFC 9110 §5.6.2: SP/CTL in a field-name is the classic obfuscated-TE smuggle.
+        for fieldLine in fieldLines {
+            let field: Header?
+            switch fieldLine {
+            case .span(let range):
+                field = Self.parseFieldLine(UnsafeRawBufferPointer(rebasing: bytes[range]))
+            case .folded(let joined):
+                field = joined.withUnsafeBytes { Self.parseFieldLine($0) }
+            }
+            guard let (name, value) = field else { return .smuggling }
             guard HTTPHeader.isValidName(name) else { return .smuggling }
-            // CR/LF in a field-value would split the line on re-emission (request/response splitting).
-            // NUL / other control bytes are not a splitting vector here and pass through verbatim.
             if Self.containsCRorLF(value) { return .smuggling }
             if ASCII.equalsIgnoringCase(name, "content-length") {
-                contentLengthValues.append(
-                    value.trimmingCharacters(in: CharacterSet.whitespaces)
-                )
+                contentLengthValues.append(value)
             } else if ASCII.equalsIgnoringCase(name, "transfer-encoding") {
                 transferEncodingValues.append(value)
             }
             headers.append((name: name, value: value))
         }
-        // Reject any Content-Length that isn't a clean decimal (`NaN`, `-1`, `007`, comma-joined
-        // `5, 5` are all framing-confusion vectors).
         if contentLengthValues.contains(where: { !Self.isCleanContentLength($0) }) {
             return .smuggling
         }
-        // RFC 9112 §6.3.5: more than one Content-Length field is rejected outright, even when the
-        // values are identical — a duplicate CL is a smuggling signal, not collapsed.
         if contentLengthValues.count > 1 {
             return .smuggling
         }
-        // Transfer-Encoding framing checks (RFC 9112 §6.1).
         if !transferEncodingValues.isEmpty {
-            // At most one Transfer-Encoding field line.
             if transferEncodingValues.count > 1 { return .smuggling }
-            // RFC 9112 §6.1: TE is HTTP/1.1-only. On HTTP/1.0 two hops disagree on framing (smuggle).
             guard startLineIsHTTP11(startLine) else { return .smuggling }
-            // A server MUST NOT send Transfer-Encoding on a 1xx or 204 response (RFC 9110 §6.1 / §15).
-            if phase == .httpResponse, let status = responseStatusCode(from: startLine),
+            if direction == .httpResponse, let status = responseStatusCode(from: startLine),
                (100..<200).contains(status) || status == 204 {
                 return .smuggling
             }
-            // Known-coding allow-list (chunked / compress / deflate / gzip [± chunked] / identity).
-            // Rejects unknown codings (`br`), `chunked, chunked`, chunked-not-final, and non-ASCII
-            // homoglyphs `.lowercased()` would fold into a valid coding.
-            guard let te = Self.normalizedTransferEncoding(transferEncodingValues[0]) else {
+            guard let transferEncoding = Self.normalizedTransferEncoding(transferEncodingValues[0]) else {
                 return .smuggling
             }
-            // On a request the final coding MUST be `chunked`; a non-chunked final coding is
-            // unframable (a response may carry one, framed by connection close → `.readUntilClose`).
-            if phase == .httpRequest, !te.hasSuffix("chunked") {
+            if direction == .httpRequest, !transferEncoding.hasSuffix("chunked") {
                 return .smuggling
             }
         }
-        // RFC 9112 §6.3.3: a message carrying BOTH Transfer-Encoding and Content-Length is rejected
-        // (request smuggling / response splitting), on requests and responses alike.
         if !transferEncodingValues.isEmpty && !contentLengthValues.isEmpty {
             return .smuggling
         }
-        return .ok(ParsedHead(startLine: startLine, headers: headers))
+        return .ok(ParsedHead(startLine: startLine, headers: headers, verbatim: sawFold ? nil : verbatim))
     }
 
-    /// A clean Content-Length: a lone `0` or a no-leading-zero decimal (`^(?:0|[1-9][0-9]*)$`).
-    /// Rejects `+5`, `-1`, `5 5`, `NaN`, comma-joined `5, 5`, and leading-zero `007` (an
-    /// octal/decimal split-interpretation smuggle). No upper bound; `bodyFraming` clamps an
-    /// over-`Int64` value to `Int.max`. Shared by `parseHead` and `bodyFraming` so they can't drift.
+    private static func parseFieldLine(_ line: UnsafeRawBufferPointer) -> Header? {
+        guard let colon = line.firstIndex(of: 0x3A) else { return nil }
+        var valueStart = colon + 1
+        var valueEnd = line.count
+        while valueStart < valueEnd, line[valueStart] == 0x20 || line[valueStart] == 0x09 { valueStart += 1 }
+        while valueEnd > valueStart, line[valueEnd - 1] == 0x20 || line[valueEnd - 1] == 0x09 { valueEnd -= 1 }
+        return (
+            name: latin1String(UnsafeRawBufferPointer(rebasing: line[..<colon])),
+            value: latin1String(UnsafeRawBufferPointer(rebasing: line[valueStart..<valueEnd]))
+        )
+    }
+
+    private static func latin1String(_ bytes: UnsafeRawBufferPointer) -> String {
+        if !bytes.contains(where: { $0 >= 0x80 }) {
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        var scalars = String.UnicodeScalarView()
+        for byte in bytes { scalars.append(Unicode.Scalar(byte)) }
+        return String(scalars)
+    }
+
     static func isCleanContentLength(_ trimmed: String) -> Bool {
         guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
         if trimmed.count > 1, trimmed.first == "0" { return false }
         return true
     }
 
-    /// True when the start line declares HTTP/1.1 — a request line ends with the version, a status
-    /// line begins with it. Transfer-Encoding is valid only for HTTP/1.1 (RFC 9112 §6.1).
     private func startLineIsHTTP11(_ startLine: String) -> Bool {
-        phase == .httpRequest ? startLine.hasSuffix(" HTTP/1.1") : startLine.hasPrefix("HTTP/1.1")
+        direction == .httpRequest ? startLine.hasSuffix(" HTTP/1.1") : startLine.hasPrefix("HTTP/1.1")
     }
 
-    /// True when `chunked` is the final Transfer-Encoding coding (RFC 9112 §6.1).
-    /// Shared by `parseHead` and `bodyFraming` so their decisions can't diverge.
     static func transferEncodingIsChunked(_ value: String) -> Bool {
         let last = value
             .split(separator: ",", omittingEmptySubsequences: false)
@@ -1950,9 +1772,6 @@ actor MITMHTTP1Stream {
         return last.map { ASCII.equalsIgnoringCase($0, "chunked") } == true
     }
 
-    /// True when Transfer-Encoding carries a content-coding (e.g. `gzip, chunked`, or bare `gzip`
-    /// framed by EOF). The buffered rewrite decodes only Content-Encoding layers and the chunked
-    /// framing, so such a body must forward verbatim or it would ship compressed but labeled identity.
     static func transferEncodingHasContentCoding(_ value: String?) -> Bool {
         guard let value else { return false }
         return value
@@ -1961,40 +1780,30 @@ actor MITMHTTP1Stream {
             .contains { !$0.isEmpty && $0 != "chunked" && $0 != "identity" }
     }
 
-    /// Returns the normalized Transfer-Encoding (lowercased, whitespace around commas removed) iff it is
-    /// ASCII and one of the allowed codings; nil otherwise. The ASCII guard defeats a non-ASCII homoglyph
-    /// `.lowercased()` would otherwise fold into a valid coding (e.g. a Kelvin-sign "K" in `chunKed`).
     static func normalizedTransferEncoding(_ value: String) -> String? {
         guard value.allSatisfy({ $0.isASCII }) else { return nil }
-        let te = value.lowercased()
+        let normalized = value.lowercased()
             .replacingOccurrences(of: "[\t ]*,[\t ]*", with: ",", options: .regularExpression)
         let allowed: Set<String> = [
             "chunked", "compress,chunked", "deflate,chunked", "gzip,chunked",
             "compress", "deflate", "gzip", "identity",
         ]
-        return allowed.contains(te) ? te : nil
+        return allowed.contains(normalized) ? normalized : nil
     }
 
-    /// A valid HTTP version token `^HTTP/\d\.\d$`: the literal `HTTP/`, one ASCII digit, `.`, one
-    /// ASCII digit — eight bytes exactly.
-    static func isHTTPVersionToken(_ s: Substring) -> Bool {
-        let bytes = Array(s.utf8)
+    static func isHTTPVersionToken(_ token: Substring) -> Bool {
+        let bytes = Array(token.utf8)
         return bytes.count == 8
             && bytes[0] == 0x48 && bytes[1] == 0x54 && bytes[2] == 0x54 && bytes[3] == 0x50 && bytes[4] == 0x2F
             && (0x30...0x39).contains(bytes[5]) && bytes[6] == 0x2E && (0x30...0x39).contains(bytes[7])
     }
 
-    /// Whether `startLine` parses as a valid HTTP/1 request- or status-line. The sole start-line
-    /// gate. Tokenizes on runs of ASCII whitespace (SP/TAB/VT/FF; CR/LF rejected upstream),
-    /// discarding empties, so multiple spaces or a tab collapse to one separator.
     private func parsesStartLine(_ startLine: String) -> Bool {
         let tokens = startLine.split(whereSeparator: {
             $0 == " " || $0 == "\t" || $0 == "\u{0B}" || $0 == "\u{0C}"
         })
-        switch phase {
+        switch direction {
         case .httpRequest:
-            // Exactly three whitespace-separated tokens, the third an HTTP/d.d version. A target
-            // containing SP/TAB splits into ≠3 tokens and is rejected.
             return tokens.count == 3 && Self.isHTTPVersionToken(tokens[2])
         case .httpResponse:
             guard tokens.count >= 2, Self.isHTTPVersionToken(tokens[0]) else { return false }
@@ -2002,8 +1811,6 @@ actor MITMHTTP1Stream {
         }
     }
 
-    /// True when the request-line's method token is exactly `CONNECT` (case-sensitive). The tokenizer
-    /// matches `parsesStartLine`, so the first token is the method on any line that parsed.
     private func isConnectRequestLine(_ startLine: String) -> Bool {
         let tokens = startLine.split(whereSeparator: {
             $0 == " " || $0 == "\t" || $0 == "\u{0B}" || $0 == "\u{0C}"
@@ -2011,11 +1818,8 @@ actor MITMHTTP1Stream {
         return tokens.first == "CONNECT"
     }
 
-    /// True when `s` contains CR or LF — the bytes that split an HTTP/1 line on re-emission (the
-    /// request-/response-splitting primitive). NUL / other control / DEL bytes are not a splitting
-    /// vector and forward verbatim.
-    private static func containsCRorLF(_ s: String) -> Bool {
-        for byte in s.utf8 {
+    private static func containsCRorLF(_ string: String) -> Bool {
+        for byte in string.utf8 {
             if byte == 0x0D || byte == 0x0A {
                 return true
             }
@@ -2025,8 +1829,6 @@ actor MITMHTTP1Stream {
 
     private func isHTTPStartLine(_ line: String) -> Bool {
         if line.hasPrefix("HTTP/1.") { return true }
-        // Method must be a valid RFC 9110 §9.1 token — the version suffix alone
-        // would accept "AB/CD / HTTP/1.1".
         guard line.hasSuffix(" HTTP/1.1") || line.hasSuffix(" HTTP/1.0") else {
             return false
         }
@@ -2035,7 +1837,6 @@ actor MITMHTTP1Stream {
         return Self.isValidMethodToken(method)
     }
 
-    /// 1xx interim response (not 101): the log record is peeked, not popped.
     private func isInterimResponseStartLine(_ startLine: String) -> Bool {
         guard startLine.hasPrefix("HTTP/1.") else { return false }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
@@ -2043,8 +1844,6 @@ actor MITMHTTP1Stream {
         return (100..<200).contains(status) && status != 101
     }
 
-    /// Emits the (rewritten) response head: HTTP/1.1 bytes on the main path, or IR to the bridge
-    /// sink. `bodyFollows` sets the IR END_STREAM flag (no body ⇒ the stream ends on the head).
     private func emitResponseHead(startLine: String, headers: [Header], bodyFollows: Bool, into output: inout Data) {
         if let sink = responseIRSink {
             sink.http1ResponseHead(status: responseStatusCode(from: startLine) ?? 0, headers: headers, endStream: !bodyFollows)
@@ -2053,66 +1852,60 @@ actor MITMHTTP1Stream {
         }
     }
 
-    /// IR-mode body emission for the bridge. Returns true when handled via IR (the caller must then
-    /// NOT append framed bytes); false on the main path, where the caller frames bytes as usual.
     private func emitBridgeBody(_ data: Data, endStream: Bool) -> Bool {
         guard let sink = responseIRSink else { return false }
         sink.http1ResponseBody(data, endStream: endStream)
         return true
     }
 
-    /// IR-mode reset for the bridge: surfaces a malformed / unbridgeable response and drains. Returns
-    /// true when handled via IR; the main (byte) path keeps its passthrough/terminator behavior.
     private func bridgeResetIfNeeded() -> Bool {
         guard let sink = responseIRSink else { return false }
         sink.http1ResponseReset()
         mode = .draining
-        rxBuffer.removeAll(keepingCapacity: false)
+        receiveBuffer.removeAll(keepingCapacity: false)
         return true
     }
 
     private func serializeHead(startLine: String, headers: [Header]) -> Data {
-        // Defense-in-depth: enforce the no-CR/LF invariant at the serialization boundary.
+        if let verbatim = verbatimHead,
+           verbatim.startLine == startLine,
+           verbatim.headers.elementsEqual(headers, by: { $0.name == $1.name && $0.value == $1.value }) {
+            verbatimHead = nil
+            return verbatim.bytes
+        }
         let safeHeaders = headers.filter { entry in
-            // CR/LF backstop: would split the field into a smuggled header on the wire (NUL is
-            // already screened upstream via `HTTPHeader.isValidValue`).
             guard !Self.containsCRorLF(entry.name),
                   !Self.containsCRorLF(entry.value) else {
-                logger.warning("HTTP/1 \(host): dropping header with CR/LF from serialized head: \(entry.name)")
+                logger.warning("\(logPrefix): Invalid header: \(HTTPHeader.escapedForLog(entry.name))")
                 return false
             }
             return true
         }
-        // Pre-size to avoid Data reallocation on heads with many headers.
         var size = startLine.utf8.count + 4
         for (name, value) in safeHeaders {
             size += name.utf8.count + 2 + value.utf8.count + 2
         }
         var out = Data(capacity: size)
-        // Emit as ISO-8859-1 bytes so a latin-1 header octet round-trips exactly (plain `.utf8`
-        // would re-encode a 0x80–0xFF octet as a 2-byte sequence, corrupting it).
         HTTPHeader.appendFieldBytes(startLine, to: &out)
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         for (name, value) in safeHeaders {
             HTTPHeader.appendFieldBytes(name, to: &out)
-            out.append(0x3A); out.append(0x20) // ':'  ' '
+            out.append(contentsOf: [0x3A, 0x20]) // ':'  ' '
             HTTPHeader.appendFieldBytes(value, to: &out)
-            out.append(0x0D); out.append(0x0A)
+            out.append(contentsOf: [0x0D, 0x0A])
         }
-        out.append(0x0D); out.append(0x0A)
+        out.append(contentsOf: [0x0D, 0x0A])
         return out
     }
 
-    /// Serializes an `Anywhere.respond(...)` payload as HTTP/1.1 and queues it,
-    /// sanitizing headers so script-injected CRLF can't split the response.
     private func queueSynthesizedResponse(_ response: MITMScriptEngine.SynthesizedResponse) {
         let reason = canonicalReasonPhrase(for: response.status)
         let startLine = "HTTP/1.1 \(response.status) \(reason)"
         var headers = response.sanitizedHeaders(lowercaseNames: false) { name in
-            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond dropping invalid header: \(name)")
+            logger.warning("[Script] Anywhere.respond: Invalid header: \(name)")
         }
-        let body = response.truncatedBody(cap: Self.maxSynthesizedResponseBodyBytes) { size in
-            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond body \(size) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
+        let body = response.truncatedBody(cap: Self.maxSynthesizedResponseBodyBytes) {
+            logger.warning("[Script] Anywhere.respond: Body too large")
         }
         headers = response.withDateStamp(headers, lowercaseName: false)
         headers.append((name: "Content-Length", value: String(body.count)))
@@ -2120,25 +1913,20 @@ actor MITMHTTP1Stream {
         if !body.isEmpty {
             bytes.append(body)
         }
-        // Pipeline order (RFC 9112 §9.3.2): if an earlier request still awaits its
-        // response, attach the synth bytes to the newest in-flight record.
         if requestLog.isHTTP1QueueEmpty {
             pendingClientBytes.append(bytes)
         } else {
-            requestLog.attachSynthAfterLastHTTP1(bytes)
+            requestLog.attachSynthesizedAfterLastHTTP1(bytes)
         }
     }
 
-    /// RFC 9110 §9.1: method is a `token`; blocks a script-supplied value from
-    /// smuggling a full request line.
-    private static func isValidMethodToken(_ s: String) -> Bool {
-        return HTTPHeader.isValidName(s)
+    private static func isValidMethodToken(_ token: String) -> Bool {
+        HTTPHeader.isValidName(token)
     }
 
-    /// RFC 9112 §3.2: rejects SP/CTL/DEL in script- or regex-produced request-targets.
-    private static func isValidRequestTarget(_ s: String) -> Bool {
-        guard !s.isEmpty else { return false }
-        for byte in s.utf8 {
+    private static func isValidRequestTarget(_ target: String) -> Bool {
+        guard !target.isEmpty else { return false }
+        for byte in target.utf8 {
             if byte < 0x21 || byte == 0x7F {
                 return false
             }
@@ -2162,8 +1950,7 @@ actor MITMHTTP1Stream {
         originatingMethod: String? = nil
     ) -> Framing {
         var responseStatus: Int?
-        if phase == .httpResponse {
-            // RFC 9110 §15.2: HEAD responses never carry a body regardless of Content-Length.
+        if direction == .httpResponse {
             if let method = originatingMethod,
                method.uppercased() == "HEAD" {
                 return .none
@@ -2171,20 +1958,14 @@ actor MITMHTTP1Stream {
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2, let status = HTTPHeader.parseStatusCode(parts[1]) {
                 responseStatus = status
-                // RFC 9110 §9.3.6: 2xx to CONNECT makes the connection an opaque
-                // tunnel; treat like 101.
                 if (200..<300).contains(status),
                    originatingMethod?.uppercased() == "CONNECT" {
                     return .switchingProtocols
                 }
                 if status == 101 { return .switchingProtocols }
-                // RFC 9110 §15: 1xx (except 101), 204, 304 carry no body regardless of CL/TE.
                 if isNoBodyStatus(status) { return .none }
             }
         }
-        // RFC 9112 §6.3: TE takes precedence over Content-Length. `parseHead` already rejected any
-        // incoming TE+CL combination, so this applies only to a post-rule header set (a rule could add
-        // one), which is not re-validated.
         var transferEncoding: String?
         var contentLength: String?
         for (name, value) in headers {
@@ -2194,43 +1975,33 @@ actor MITMHTTP1Stream {
                 contentLength = value
             }
         }
-        if let te = transferEncoding {
-            // RFC 9112 §6.1: `chunked` must be the final coding.
-            if Self.transferEncodingIsChunked(te) {
+        if let transferEncoding {
+            if Self.transferEncodingIsChunked(transferEncoding) {
                 return .chunked
             }
         }
         if let rawContentLength = contentLength {
-            let trimmed = rawContentLength.trimmingCharacters(in: CharacterSet.whitespaces)
+            let trimmed = rawContentLength.trimmingCharacters(in: Self.fieldValueOWS)
             if Self.isCleanContentLength(trimmed) {
-                // A clean CL that overflows Int64 (only a pathological >9-exabyte value) clamps to
-                // Int.max: forward the head and stream the body until the declared count or EOF. The
-                // clamp stays positive, so buffer math can't trap.
                 let length = Int(trimmed) ?? Int.max
                 return length == 0 ? .none : .contentLength(length)
             }
         }
-        // 205 Reset Content carries no content (RFC 9110 §15.3.6); with no explicit CL/TE above, frame
-        // it as empty rather than read-until-close — the latter would hang a keep-alive connection
-        // waiting for an EOF that never comes.
         if responseStatus == 205 { return .none }
-        return phase == .httpRequest ? .none : .readUntilClose
+        return direction == .httpRequest ? .none : .readUntilClose
     }
 
-    /// Warns when a buffered script de-streams a streaming response (SSE etc.). Advisory only.
     private func warnIfBufferedScriptDeStreams(_ headers: [Header]) {
         let contentType = HTTPHeader.firstValue(in: headers, named: "content-type")
-        guard phase == .httpResponse,
+        guard direction == .httpResponse,
               MITMScriptTransform.isStreamingMediaType(contentType) else { return }
-        logger.warning("\(host): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
+        logger.warning("[MITM] \(host): Buffered script on streaming response")
     }
 
-    /// All values for `name` joined by `", "` (RFC 9110 §5.3) — first-value-only
-    /// would let a second `Content-Encoding` slip past undecoded.
     private func combinedHeaderValue(_ headers: [Header], name: String) -> String? {
         var parts: [String] = []
-        for (n, v) in headers where ASCII.equalsIgnoringCase(n, name) {
-            parts.append(v)
+        for (fieldName, fieldValue) in headers where ASCII.equalsIgnoringCase(fieldName, name) {
+            parts.append(fieldValue)
         }
         if parts.isEmpty { return nil }
         if parts.count == 1 { return parts[0] }
@@ -2239,10 +2010,8 @@ actor MITMHTTP1Stream {
 
     // MARK: - Rule application (head-time)
 
-    /// Forces the `Host` header to `effectiveAuthority` when a transparent
-    /// rewrite has changed the upstream host.
     private func applyAuthorityRewrite(_ headers: [Header]) -> [Header] {
-        guard phase == .httpRequest, let authority = effectiveAuthority else {
+        guard direction == .httpRequest, let authority = effectiveAuthority else {
             return headers
         }
         var result = headers.filter { !ASCII.equalsIgnoringCase($0.name, "host") }
@@ -2250,14 +2019,9 @@ actor MITMHTTP1Stream {
         return result
     }
 
-    /// Selects the first matching `rewrite` rule from the pre-resolved gate verdicts, expanding
-    /// any capture template. Pure: the caller commits `effectiveAuthority`/`resolvedUpstream`.
     private func selectRewrite(_ startLine: String, verdicts: MITMGateVerdictTable) -> RewriteSelection {
-        guard phase == .httpRequest else { return .none }
-        guard rules.contains(where: {
-            if case .rewrite = $0.operation { return true }
-            return false
-        }) else { return .none }
+        guard direction == .httpRequest else { return .none }
+        guard hasRewriteRule else { return .none }
 
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count == 3 else { return .none }
@@ -2265,17 +2029,15 @@ actor MITMHTTP1Stream {
         let target = String(parts[1])
         let version = String(parts[2])
 
-        if target == "*" { return .none } // RFC 9112 §3.2.4 asterisk-form
+        if target == "*" { return .none }
 
         for (index, rule) in rules.enumerated() {
             guard case .rewrite = rule.operation else { continue }
-            // Resolves the gate verdict and expands any `$1`-style target template in one step.
             guard let resolved = rule.resolvedRewriteAction(verdicts: verdicts, at: index) else { continue }
             switch resolved {
             case .transparent(let replacement):
-                // Re-validate at use time as a backstop (validated at load/resolve time too).
                 guard Self.isValidRequestTarget(replacement.requestTarget) else {
-                    logger.warning("HTTP/1 \(host): rewrite produced an invalid request-target; skipping rule")
+                    logger.warning("[MITM] \(host): rewrite: Invalid request target")
                     continue
                 }
                 return .transparent(line: "\(method) \(replacement.requestTarget) \(version)",
@@ -2288,9 +2050,6 @@ actor MITMHTTP1Stream {
         return .none
     }
 
-    /// Short-circuits a 302 / reject request: queues the synth response and
-    /// discards the request body. Not logged — no upstream round-trip will pop
-    /// the record, so logging would desync the FIFO.
     private func synthesizeRequestResponse(
         _ response: MITMScriptEngine.SynthesizedResponse,
         requestHeaders: [Header],
@@ -2329,12 +2088,11 @@ actor MITMHTTP1Stream {
         return current
     }
 
-    /// URL used to gate rule matches; nil fails the gate closed.
     private func requestURLForGating(
         startLine: String,
         originatingRequest: MITMRequestLog.Record?
     ) -> String? {
-        switch phase {
+        switch direction {
         case .httpRequest:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             guard parts.count >= 2 else { return nil }
@@ -2355,16 +2113,16 @@ actor MITMHTTP1Stream {
     ) -> HTTPMessage {
         var method: String?
         var url: String?
-        var originalUrl: String?
+        var originalURL: String?
         var status: Int?
-        switch phase {
+        switch direction {
         case .httpRequest:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2 {
                 method = String(parts[0])
                 url = "\(scheme)://\(host)\(String(parts[1]))"
             }
-            originalUrl = currentRequestOriginalURL
+            originalURL = currentRequestOriginalURL
         case .httpResponse:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2, let code = HTTPHeader.parseStatusCode(parts[1]) {
@@ -2372,13 +2130,13 @@ actor MITMHTTP1Stream {
             }
             method = originatingRequest?.method
             url = originatingRequest?.url
-            originalUrl = originatingRequest?.originalUrl
+            originalURL = originatingRequest?.originalURL
         }
         return HTTPMessage(
-            phase: phase,
+            phase: direction,
             method: method,
             url: url,
-            originalUrl: originalUrl,
+            originalURL: originalURL,
             status: status,
             headers: headers,
             body: body,
@@ -2386,8 +2144,6 @@ actor MITMHTTP1Stream {
         )
     }
 
-    /// Rebuilds the start line from a script-mutated message, preserving the
-    /// original HTTP version; falls back to the original line on missing fields.
     private func rebuildStartLine(
         from message: HTTPMessage,
         fallback: String
@@ -2399,16 +2155,13 @@ actor MITMHTTP1Stream {
                 return fallback
             }
             guard Self.isValidMethodToken(method) else {
-                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid method '\(method)' from Script")
+                logger.warning("[Script] Invalid method: \(method)")
                 return fallback
             }
-            // For a relative script URL fall back to the original target
-            // (absolute-form is legal but confuses upstreams).
             let originalTarget = parts.count >= 2 ? String(parts[1]) : "/"
             let candidateTarget = pathAndQuery(fromURL: url) ?? originalTarget
-            // Guard against SP/CR/LF/CTL in a script-built URL splitting the start line.
             guard Self.isValidRequestTarget(candidateTarget) else {
-                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid request-target from Script")
+                logger.warning("[Script] Invalid request target")
                 return fallback
             }
             let version = parts.count >= 3 ? String(parts[2]) : "HTTP/1.1"
@@ -2421,7 +2174,6 @@ actor MITMHTTP1Stream {
         }
     }
 
-    /// Returns the path-and-query from an absolute URL, or nil for relative references.
     private func pathAndQuery(fromURL url: String) -> String? {
         guard let components = URLComponents(string: url) else { return nil }
         if components.scheme == nil && components.host == nil {
@@ -2434,7 +2186,6 @@ actor MITMHTTP1Stream {
         return target
     }
 
-    /// Canonical reason phrase, or `""` for unrecognised codes (clients ignore it, RFC 9112 §4).
     private func canonicalReasonPhrase(for status: Int) -> String {
         switch status {
         case 100: return "Continue"
@@ -2471,18 +2222,17 @@ actor MITMHTTP1Stream {
 
     // MARK: - Request log helpers
 
-    /// Records the request's method and URL for the response stream's script ctx.
     private func logRequest(startLine: String) {
-        guard phase == .httpRequest else { return }
+        guard direction == .httpRequest else { return }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else {
-            requestLog.recordHTTP1(method: nil, url: nil, originalUrl: nil)
+            requestLog.recordHTTP1(method: nil, url: nil, originalURL: nil)
             return
         }
         let method = String(parts[0])
         let target = String(parts[1])
         let url = "\(scheme)://\(host)\(target)"
-        requestLog.recordHTTP1(method: method, url: url, originalUrl: currentRequestOriginalURL)
+        requestLog.recordHTTP1(method: method, url: url, originalURL: currentRequestOriginalURL)
     }
 }
 
@@ -2522,12 +2272,10 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
-                // Validate before forwarding: the caller's synthesized `0\r\n\r\n`
-                // recovery only frames cleanly if the bad size line was never emitted.
-                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
-                output.append(line)
-                output.append(0x0D); output.append(0x0A)
+                guard let size = buffer.withUnsafeBytes(in: 0..<lineEnd, MITMHTTP1Stream.parseHexSize) else {
+                    return .malformed
+                }
+                buffer.appendPrefix(lineEnd + 2, to: &output)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
                 if size == 0 {
@@ -2537,7 +2285,7 @@ nonisolated private final class ChunkedReader {
                 }
             case .chunkData(let remaining, let originalSize):
                 let take = min(remaining, buffer.count)
-                output.append(buffer.prefix(take))
+                buffer.appendPrefix(take, to: &output)
                 buffer.removeFirst(take)
                 let left = remaining - take
                 if left == 0 {
@@ -2551,9 +2299,8 @@ nonisolated private final class ChunkedReader {
                 guard buffer[0] == 0x0D, buffer[1] == 0x0A else {
                     return .malformed
                 }
-                output.append(0x0D); output.append(0x0A)
+                output.append(contentsOf: [0x0D, 0x0A])
                 buffer.removeFirst(2)
-                // Forward mode never re-chunks; don't accumulate sizes.
                 state = .sizeLine
             case .trailerOrEnd:
                 guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
@@ -2561,12 +2308,10 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
-                output.append(line)
-                output.append(0x0D); output.append(0x0A)
+                buffer.appendPrefix(lineEnd + 2, to: &output)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                if line.isEmpty {
+                if lineEnd == 0 {
                     return .complete
                 }
             }
@@ -2574,10 +2319,63 @@ nonisolated private final class ChunkedReader {
         return .needMore
     }
 
-    /// Like `consumeForward`, but delivers each decoded chunk payload to `deliver` instead of
-    /// re-framing it as HTTP/1.1 (the bridge frames payloads as HTTP/2 DATA); trailer lines are
-    /// dropped. `state` / `scanCursor` are shared, so a reader is used in exactly one mode for life.
-    func consumeForwardIR(_ buffer: inout MITMByteBuffer, deliver: (Data) -> Void) -> ForwardResult {
+    func scanForward(_ data: Data, onData: ((Range<Data.Index>) -> Void)?) -> (consumed: Int, result: ForwardResult) {
+        let base = data.startIndex
+        let count = data.count
+        var cursor = 0
+        while cursor < count {
+            switch state {
+            case .sizeLine:
+                guard let lineEnd = Self.firstCRLF(in: data, from: cursor) else { return (cursor, .needMore) }
+                let size = data.withUnsafeBytes { bytes in
+                    MITMHTTP1Stream.parseHexSize(UnsafeRawBufferPointer(rebasing: bytes[cursor..<lineEnd]))
+                }
+                guard let size else { return (cursor, .malformed) }
+                cursor = lineEnd + 2
+                state = size == 0 ? .trailerOrEnd : .chunkData(remaining: size, originalSize: size)
+            case .chunkData(let remaining, let originalSize):
+                let take = min(remaining, count - cursor)
+                onData?((base + cursor)..<(base + cursor + take))
+                cursor += take
+                let left = remaining - take
+                if left == 0 {
+                    state = .dataCRLF(originalSize: originalSize)
+                } else {
+                    state = .chunkData(remaining: left, originalSize: originalSize)
+                    return (cursor, .needMore)
+                }
+            case .dataCRLF:
+                guard count - cursor >= 2 else { return (cursor, .needMore) }
+                guard data[base + cursor] == 0x0D, data[base + cursor + 1] == 0x0A else {
+                    return (cursor, .malformed)
+                }
+                cursor += 2
+                state = .sizeLine
+            case .trailerOrEnd:
+                guard let lineEnd = Self.firstCRLF(in: data, from: cursor) else { return (cursor, .needMore) }
+                let isEmptyLine = lineEnd == cursor
+                cursor = lineEnd + 2
+                if isEmptyLine { return (cursor, .complete) }
+            }
+        }
+        return (cursor, .needMore)
+    }
+
+    private static func firstCRLF(in data: Data, from start: Int) -> Int? {
+        data.withUnsafeBytes { bytes -> Int? in
+            guard let base = bytes.baseAddress, bytes.count >= 2 else { return nil }
+            var index = start
+            while index < bytes.count - 1 {
+                guard let found = memchr(base + index, 0x0D, bytes.count - 1 - index) else { return nil }
+                index = base.distance(to: UnsafeRawPointer(found))
+                if bytes[index + 1] == 0x0A { return index }
+                index += 1
+            }
+            return nil
+        }
+    }
+
+    func consumeForwardIR(_ buffer: inout MITMByteBuffer, deliver: ((Data) -> Void)?) -> ForwardResult {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
@@ -2586,14 +2384,15 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
-                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
+                guard let size = buffer.withUnsafeBytes(in: 0..<lineEnd, MITMHTTP1Stream.parseHexSize) else {
+                    return .malformed
+                }
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
                 state = size == 0 ? .trailerOrEnd : .chunkData(remaining: size, originalSize: size)
             case .chunkData(let remaining, let originalSize):
                 let take = min(remaining, buffer.count)
-                if take > 0 { deliver(Data(buffer.prefix(take))) }
+                if take > 0, let deliver { deliver(buffer.prefix(take)) }
                 buffer.removeFirst(take)
                 let left = remaining - take
                 if left == 0 {
@@ -2613,11 +2412,9 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                if line.isEmpty { return .complete }
-                // else: a trailer line — dropped.
+                if lineEnd == 0 { return .complete }
             }
         }
         return .needMore
@@ -2632,10 +2429,10 @@ nonisolated private final class ChunkedReader {
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
+                let parsedSize = buffer.withUnsafeBytes(in: 0..<lineEnd, MITMHTTP1Stream.parseHexSize)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
+                guard let size = parsedSize else { return .malformed }
                 if size == 0 {
                     state = .trailerOrEnd
                 } else {
@@ -2643,7 +2440,7 @@ nonisolated private final class ChunkedReader {
                 }
             case .chunkData(let remaining, let originalSize):
                 let take = min(remaining, buffer.count)
-                output.append(buffer.prefix(take))
+                buffer.appendPrefix(take, to: &output)
                 buffer.removeFirst(take)
                 let left = remaining - take
                 if left == 0 {
@@ -2661,16 +2458,14 @@ nonisolated private final class ChunkedReader {
                 if sizes.count < MITMHTTP1Stream.maxTrackedChunkSizes { sizes.append(originalSize) }
                 state = .sizeLine
             case .trailerOrEnd:
-                // Rewritten bodies use empty trailers; discard originals.
                 guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
                     if buffer.count > MITMHTTP1Stream.maxChunkLineBytes { return .malformed }
                     scanCursor = max(0, buffer.count - 1)
                     return .needMore
                 }
-                let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                if line.isEmpty {
+                if lineEnd == 0 {
                     return .complete(sizes: sizes)
                 }
             }
@@ -2682,12 +2477,9 @@ nonisolated private final class ChunkedReader {
 // MARK: - MITMMessageRewriter
 
 extension MITMHTTP1Stream: MITMMessageRewriter {
-
     func feed(_ data: Data) async -> Data {
         await transform(data)
     }
 
-    /// HTTP/1 has no flow-control windows; HTTP/2-only concept. `nonisolated` (no state) to satisfy
-    /// the synchronous ``MITMMessageRewriter`` requirement.
     nonisolated func drainPendingServerBytes() -> Data { Data() }
 }

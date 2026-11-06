@@ -8,12 +8,10 @@
 import Foundation
 
 extension ProxyClient {
-    func connectWithSOCKS5(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16
-    ) async throws -> ProxyConnection {
-        guard case .socks5(let username, let password) = configuration.outbound else {
+    func connectWithSOCKS5(_ request: ProxyRequest) async throws -> ProxyConnection {
+        let destinationHost = request.host
+        let destinationPort = request.port
+        guard case .socks5(let socks5) = configuration.outbound else {
             throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 outbound expected"))
         }
 
@@ -21,7 +19,7 @@ extension ProxyClient {
         if let tunnel = self.tunnel {
             transport = TunneledTransport(tunnel: tunnel)
         } else {
-            let tcp = TCPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
+            let tcp = TCPTransport(host: directDialHost, port: configuration.serverPort, resolution: .proxies)
             try await tcp.connect()
             transport = tcp
         }
@@ -29,12 +27,12 @@ extension ProxyClient {
         let buffer = SOCKS5AsyncBuffer(transport: transport)
         
         do {
-            if command == .udp {
+            if request.network == .udp {
                 let relay = try await SOCKS5Handshake.performUDPAssociate(
                     buffer: buffer,
                     transport: transport,
-                    username: username,
-                    password: password,
+                    username: socks5.username,
+                    password: socks5.password,
                     serverAddress: configuration.serverAddress
                 )
                 let relayConnection = try await openSOCKS5UDPRelay(
@@ -53,8 +51,8 @@ extension ProxyClient {
                     transport: transport,
                     destinationHost: destinationHost,
                     destinationPort: destinationPort,
-                    username: username,
-                    password: password
+                    username: socks5.username,
+                    password: socks5.password
                 )
                 let dataTransport: any ByteTransport
                 if let excess = buffer.remaining {
@@ -84,16 +82,16 @@ extension ProxyClient {
         }
 
         if !effectiveChain.isEmpty {
-            let hopCommands = try Self.computeChainHopCommands(
+            let hopNetworks = try Self.computeChainHopNetworks(
                 chain: effectiveChain, lastDeliver: .udp
             ).get()
             return try await buildChainTunnel(
                 chain: effectiveChain, index: 0, currentTunnel: nil,
-                hopCommands: hopCommands,
+                hopNetworks: hopNetworks,
                 finalDestination: (relayHost, relayPort)
             )
         } else {
-            let transport = UDPTransport(host: relayHost, port: relayPort, resolvesViaProxyDNS: true)
+            let transport = UDPTransport(host: relayHost, port: relayPort, resolution: .proxies)
             try await transport.connect()
             return DirectUDPProxyConnection(transport: transport)
         }

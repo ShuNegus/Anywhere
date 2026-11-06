@@ -6,51 +6,38 @@
 //
 
 import Foundation
-import JavaScriptCore
 import Synchronization
+import JavaScriptCore
+import os
+
+nonisolated private let logger = AnywhereLogger(category: "MITMScriptTransform")
+
+nonisolated private let nativeBodyEditReservedBytes = Atomic<Int>(0)
 
 nonisolated enum MITMScriptTransform {
+    private static let bodyJSONMemoryFactor = 5
+    private static let bodyReplaceMemoryFactor = 12
+    private static let nativeBodyEditHeadroom = 8 * 1024 * 1024
+    private static let maxNativeBodyEditReservedBytes = 48 * 1024 * 1024
 
-    /// Compiles every script rule on the JSC queue at (re)configuration time so cold-start cost doesn't
-    /// land on the first intercepted flow. One async dispatch per scope so real calls can interleave.
-    static func prewarm(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
-        // scope → its deduped script/streamScript sources (the same source on multiple rules compiles once).
-        var scriptsByScope: [UUID: [(source: String, sourceKey: Int)]] = [:]
-        for entry in scopedRules {
-            var seen = Set<Int>()
-            let scripts: [(source: String, sourceKey: Int)] = entry.rules.compactMap { rule in
+    static func rulesDidReload(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
+        let hasScriptRule = scopedRules.contains { entry in
+            entry.rules.contains { rule in
                 switch rule.operation {
-                case .script(let source, let sourceKey), .streamScript(let source, let sourceKey):
-                    return seen.insert(sourceKey).inserted ? (source: source, sourceKey: sourceKey) : nil
-                case .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
-                    return nil
-                }
-            }
-            if !scripts.isEmpty { scriptsByScope[entry.scope] = scripts }
-        }
-        // Reset every surviving engine first.
-        let keepByScope = scriptsByScope.mapValues { Set($0.map { $0.sourceKey }) }
-        MITMScriptEngine.resetCachesOnReload(keepByScope: keepByScope)
-        // Precompile per scope.
-        for (scope, scripts) in scriptsByScope {
-            JSCConcurrencyBridge.shared.enqueue {
-                // The enqueue body runs on the JSC queue = the engine's actor executor.
-                let engine = MITMScriptEngine.sharedEngine(forScope: scope)
-                for script in scripts {
-                    engine.assumeIsolated { $0.precompile(source: script.source, sourceKey: script.sourceKey) }
+                case .script, .streamScript: return true
+                case .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON: return false
                 }
             }
         }
+        guard hasScriptRule else { return }
+        MITMScriptEngine.warmVirtualMachine()
     }
 
     enum Outcome {
         case message(HTTPMessage)
-        /// Request-phase `Anywhere.respond(...)` — drop the upstream request and send this to the client.
         case synthesizedResponse(MITMScriptEngine.SynthesizedResponse)
     }
 
-    /// True when a `.script` rule would fire per the head-time verdicts; check
-    /// hasStreamScriptRule first — streaming takes priority.
     static func hasScriptRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
         for (index, rule) in rules.enumerated() {
             if case .script = rule.operation, verdicts.matches(at: index) { return true }
@@ -79,23 +66,17 @@ nonisolated enum MITMScriptTransform {
         return false
     }
 
-    /// True when any buffered body transform (needing the full decompressed body) would fire;
-    /// `.streamScript` is deliberately excluded.
     static func hasBufferedBodyRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
         hasScriptRule(in: rules, verdicts: verdicts)
             || hasBodyReplaceRule(in: rules, verdicts: verdicts)
             || hasBodyJSONRule(in: rules, verdicts: verdicts)
     }
 
-    /// True when any rule would read or rewrite the body — buffered (`hasBufferedBodyRule`) or
-    /// per-frame (`.streamScript`).
     static func hasBodyAccessingRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
         hasBufferedBodyRule(in: rules, verdicts: verdicts)
             || hasStreamScriptRule(in: rules, verdicts: verdicts)
     }
 
-    /// True for media types meant for incremental delivery (SSE, NDJSON, etc.), where buffered
-    /// `.script` is a poor fit. Matches the media type only — parameters don't affect the result.
     static func isStreamingMediaType(_ contentType: String?) -> Bool {
         guard let raw = contentType else { return false }
         let mediaType = raw
@@ -104,88 +85,93 @@ nonisolated enum MITMScriptTransform {
             .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
             ?? ""
         switch mediaType {
-        case "text/event-stream",            // Server-Sent Events
-             "multipart/x-mixed-replace",    // server push / motion JPEG
-             "application/x-ndjson",         // newline-delimited JSON
+        case "text/event-stream",
+             "multipart/x-mixed-replace",
+             "application/x-ndjson",
              "application/jsonl",
              "application/stream+json",
-             "application/json-seq":         // RFC 7464 JSON text sequences
+             "application/json-seq":
             return true
         default:
             return false
         }
     }
 
-    /// Applies all matching `.bodyJSON` then `.bodyReplace` rules; JSON runs first so the replacement
-    /// regex sees the re-serialized JSON. Both run before any `.script` and survive `Anywhere.exit`.
-    /// `.bodyReplace` awaits the ReDoS-bounded substitution; neither op touches JSC, so this runs on
-    /// the caller's executor rather than `scriptQueue`.
     private static func applyNativeBodyEdits(
         _ message: HTTPMessage,
-        rules: [CompiledMITMRule]
+        operations: [CompiledMITMOperation]
     ) async -> HTTPMessage {
-        let requestURL = message.url
         var message = message
-        let jsonOperations = await matchingBodyJSONOperations(in: rules, requestURL: requestURL)
-        if !jsonOperations.isEmpty {
-            message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
+        var jsonOperations: [MITMJSONPatch.CompiledOperation] = []
+        var replaceOperations: [MITMBodyReplace.CompiledOperation] = []
+        for operation in operations {
+            if case .bodyJSON(let jsonOperation) = operation { jsonOperations.append(jsonOperation) }
+            if case .bodyReplace(let replaceOperation) = operation { replaceOperations.append(replaceOperation) }
         }
-        let replaceOperations = await matchingBodyReplaceOperations(in: rules, requestURL: requestURL)
+        if !jsonOperations.isEmpty {
+            let cost = message.body.count * bodyJSONMemoryFactor
+            if reserveNativeBodyEdit(cost) {
+                message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
+                releaseNativeBodyEdit(cost)
+            } else {
+                logger.warning("[MITM] bodyJSON: Memory budget exceeded")
+            }
+        }
         if !replaceOperations.isEmpty {
-            message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
+            let cost = message.body.count * bodyReplaceMemoryFactor
+            if reserveNativeBodyEdit(cost) {
+                message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
+                releaseNativeBodyEdit(cost)
+            } else {
+                logger.warning("[MITM] bodyReplace: Memory budget exceeded")
+            }
         }
         return message
     }
 
-    /// All matching `.bodyJSON` edits in rule order; unlike `.script`, every match is returned so edits compose.
-    private static func matchingBodyJSONOperations(
-        in rules: [CompiledMITMRule],
-        requestURL: String?
-    ) async -> [MITMJSONPatch.CompiledOperation] {
-        var operations: [MITMJSONPatch.CompiledOperation] = []
-        for rule in rules {
-            if case .bodyJSON(let operation) = rule.operation, await rule.matchesURL(requestURL) {
-                operations.append(operation)
-            }
+    private static func reserveNativeBodyEdit(_ bytes: Int) -> Bool {
+        let available = os_proc_available_memory()
+        let limit = available > 0
+            ? min(available - nativeBodyEditHeadroom, maxNativeBodyEditReservedBytes)
+            : maxNativeBodyEditReservedBytes
+        var reserved = nativeBodyEditReservedBytes.load(ordering: .relaxed)
+        while reserved + bytes <= limit {
+            let (exchanged, current) = nativeBodyEditReservedBytes.compareExchange(
+                expected: reserved,
+                desired: reserved + bytes,
+                ordering: .relaxed
+            )
+            if exchanged { return true }
+            reserved = current
         }
-        return operations
+        return false
     }
 
-    /// All matching `.bodyReplace` edits in rule order; every match composes over the running body text.
-    private static func matchingBodyReplaceOperations(
-        in rules: [CompiledMITMRule],
-        requestURL: String?
-    ) async -> [MITMBodyReplace.CompiledOperation] {
-        var operations: [MITMBodyReplace.CompiledOperation] = []
-        for rule in rules {
-            if case .bodyReplace(let operation) = rule.operation, await rule.matchesURL(requestURL) {
-                operations.append(operation)
-            }
-        }
-        return operations
+    private static func releaseNativeBodyEdit(_ bytes: Int) {
+        nativeBodyEditReservedBytes.wrappingSubtract(bytes, ordering: .relaxed)
     }
 
-    /// Runs native body edits and the matching `.script` rule. The `.script` engine hop confines the
-    /// JSC work to `scriptQueue` itself; an awaiting process(ctx) suspends without holding the queue.
-    /// `message` is a value copy never aliased to the caller's buffer. The caller awaits on its own
-    /// executor and re-establishes its confinement after the await.
     static func apply(
         _ message: HTTPMessage,
-        rules: [CompiledMITMRule],
-        engineProvider: MITMScriptEngine.Provider?
+        rules: [CompiledMITMRule]
     ) async -> Outcome {
-        let requestURL = message.url
-        let edited = await applyNativeBodyEdits(message, rules: rules)
-        guard let match = await lastMatchingScriptSource(in: rules, requestURL: requestURL),
-              let engineProvider
-        else {
-            return .message(edited)
+        if Task.isCancelled { return .message(message) }
+        let bodyRules = rules.filter { rule in
+            switch rule.operation {
+            case .script, .bodyReplace, .bodyJSON: return true
+            case .rewrite, .headerAdd, .headerDelete, .headerReplace, .streamScript: return false
+            }
         }
-        let outcome = await engineProvider.get().applyAsync(
-            edited,
-            source: match.source,
-            sourceKey: match.sourceKey
-        )
+        let verdicts = await MITMGateVerdictTable.resolve(rules: bodyRules, url: message.url)
+        let matched = bodyRules.indices.filter { verdicts.matches(at: $0) }.map { bodyRules[$0].operation }
+        let edited = await applyNativeBodyEdits(message, operations: matched)
+        if Task.isCancelled { return .message(edited) }
+        var scriptSource: String?
+        for operation in matched {
+            if case .script(let source) = operation { scriptSource = source }
+        }
+        guard let scriptSource else { return .message(edited) }
+        let outcome = await MITMScriptEngine.shared.applyAsync(edited, source: scriptSource)
         switch outcome {
         case .modified(let updated):  return .message(updated)
         case .done(let updated):      return .message(updated)
@@ -193,21 +179,14 @@ nonisolated enum MITMScriptTransform {
         case .respond(let response):  return .synthesizedResponse(response)
         }
     }
-    
+
     final class FrameCursor: Sendable {
         struct Mutable {
-            /// Script's persistent per-stream state; only ever touched on scriptQueue (deinit hops
-            /// its release there).
-            var state: JSValue?
-            /// Set by a done/exit directive; subsequent frames bypass the script.
-            var bypass = false
+            var run: MITMScriptEngine.ScriptRun?
+            var isBypassed = false
         }
-        /// Crossed by the lwIP-queue stream drivers (bypass) and the JSC queue (state), so the
-        /// Mutex is genuine cross-domain guarding; callers use `withLock` inline so every access
-        /// names the lock and multi-field transitions stay atomic.
         let mutable = Mutex(Mutable())
 
-        /// The last matching `.streamScript` rule, resolved at creation; nil = no rule matches.
         fileprivate let resolvedMatch: ScriptMatch?
 
         fileprivate init(resolvedMatch: ScriptMatch?) {
@@ -215,23 +194,21 @@ nonisolated enum MITMScriptTransform {
         }
 
         deinit {
-            // state's final release runs JSValueUnprotect, which mutates VM bookkeeping; off
-            // scriptQueue that would race in-flight scripts and corrupt the VM heap.
-            guard let state = mutable.withLock({ $0.state }) else { return }
-            JSCConcurrencyBridge.shared.enqueue { withExtendedLifetime(state) {} }
+            guard let run = mutable.withLock({ $0.run }) else { return }
+            JSCConcurrencyBridge.shared.enqueue {
+                MITMScriptEngine.shared.assumeIsolated { $0.closeStreamRun(run) }
+            }
         }
     }
 
-    /// Creates the per-stream cursor, resolving the last matching `.streamScript` rule
-    /// (last-wins semantics) from the head-time verdicts.
     static func makeFrameCursor(
         rules: [CompiledMITMRule],
         verdicts: MITMGateVerdictTable
     ) -> FrameCursor {
         for (index, rule) in zip(rules.indices, rules).reversed() {
-            if case .streamScript(let source, let sourceKey) = rule.operation,
+            if case .streamScript(let source) = rule.operation,
                verdicts.matches(at: index) {
-                return FrameCursor(resolvedMatch: ScriptMatch(source: source, sourceKey: sourceKey))
+                return FrameCursor(resolvedMatch: ScriptMatch(source: source))
             }
         }
         return FrameCursor(resolvedMatch: nil)
@@ -239,76 +216,68 @@ nonisolated enum MITMScriptTransform {
 
     struct StreamFrameResult {
         let body: Data
-        let bypass: Bool
+        let isBypassed: Bool
     }
 
-    /// Runs the last matching `.streamScript` rule against one frame. `Anywhere.done`/`exit`
-    /// both set `cursor.bypass`; exit additionally reverts to the original frame data.
     static func applyFrame(
         _ frame: Data,
         frameContext: MITMScriptEngine.FrameContext,
-        cursor: FrameCursor,
-        engineProvider: MITMScriptEngine.Provider?
+        cursor: FrameCursor
     ) -> StreamFrameResult {
-        guard let match = cursor.resolvedMatch, let engineProvider
-        else { return StreamFrameResult(body: frame, bypass: false) }
-        // Runs inside `JSCConcurrencyBridge.shared.run` (the async counterpart below) — on the
-        // engine's JSC executor — so enter its isolation synchronously.
-        let state = cursor.mutable.withLock { $0.state }
-        let outcome = engineProvider.get().assumeIsolated {
-            $0.applyFrame(frame, source: match.source, sourceKey: match.sourceKey,
-                          frameContext: frameContext, state: state)
-        }
-        switch outcome {
-        case .modified(let body, let state):
-            cursor.mutable.withLock { $0.state = state }
-            return StreamFrameResult(body: body, bypass: false)
-        case .done(let body):
-            cursor.mutable.withLock { $0.bypass = true }
-            return StreamFrameResult(body: body, bypass: true)
-        case .exit:
-            cursor.mutable.withLock { $0.bypass = true }
-            return StreamFrameResult(body: frame, bypass: true)
+        guard let match = cursor.resolvedMatch
+        else { return StreamFrameResult(body: frame, isBypassed: false) }
+        return MITMScriptEngine.shared.assumeIsolated { engine -> StreamFrameResult in
+            let run: MITMScriptEngine.ScriptRun
+            if let open = cursor.mutable.withLock({ $0.run }) {
+                run = open
+            } else if let opened = engine.openStreamRun(scope: frameContext.ruleSetID) {
+                cursor.mutable.withLock { $0.run = opened }
+                run = opened
+            } else {
+                cursor.mutable.withLock { $0.isBypassed = true }
+                return StreamFrameResult(body: frame, isBypassed: true)
+            }
+
+            let outcome = engine.applyFrame(
+                frame, source: match.source, frameContext: frameContext, run: run
+            )
+            switch outcome {
+            case .modified(let body):
+                return StreamFrameResult(body: body, isBypassed: false)
+            case .done(let body):
+                engine.closeStreamRun(run)
+                cursor.mutable.withLock {
+                    $0.run = nil
+                    $0.isBypassed = true
+                }
+                return StreamFrameResult(body: body, isBypassed: true)
+            case .exit:
+                engine.closeStreamRun(run)
+                cursor.mutable.withLock {
+                    $0.run = nil
+                    $0.isBypassed = true
+                }
+                return StreamFrameResult(body: frame, isBypassed: true)
+            }
         }
     }
 
-    /// Async counterpart: hops to the JSC bridge (the JSC home queue), runs the sync span, and
-    /// resumes the caller exactly once. Cursor mutation is safe because the caller keeps only one
-    /// frame in flight at a time.
     static func applyFrame(
         _ frame: Data,
         frameContext: MITMScriptEngine.FrameContext,
-        cursor: FrameCursor,
-        engineProvider: MITMScriptEngine.Provider?
+        cursor: FrameCursor
     ) async -> StreamFrameResult {
-        await JSCConcurrencyBridge.shared.run {
+        if Task.isCancelled { return StreamFrameResult(body: frame, isBypassed: false) }
+        return await JSCConcurrencyBridge.shared.run {
             applyFrame(
                 frame,
                 frameContext: frameContext,
-                cursor: cursor,
-                engineProvider: engineProvider
+                cursor: cursor
             )
         }
     }
 
-    // MARK: - Last-match selection
-
     fileprivate struct ScriptMatch {
         let source: String
-        let sourceKey: Int
-    }
-
-    /// Returns the last matching ``.script`` rule (last-wins semantics), or nil.
-    private static func lastMatchingScriptSource(
-        in rules: [CompiledMITMRule],
-        requestURL: String?
-    ) async -> ScriptMatch? {
-        for rule in rules.reversed() {
-            if case .script(let source, let sourceKey) = rule.operation,
-               await rule.matchesURL(requestURL) {
-                return ScriptMatch(source: source, sourceKey: sourceKey)
-            }
-        }
-        return nil
     }
 }

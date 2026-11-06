@@ -18,8 +18,7 @@ nonisolated enum CertificatePolicy {
     }
 
     private static let state = Mutex(State())
-
-    /// Idempotent.
+    
     static func startObserving() {
         state.withLock { state in
             guard !state.observerRegistered else { return }
@@ -43,13 +42,13 @@ nonisolated enum CertificatePolicy {
             state.allowInsecure = AWCore.getAllowInsecure()
             state.trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
         }
+        verifiedChains.withLock { $0.removeAll() }
     }
 
     static var allowInsecure: Bool {
         state.withLock { $0.allowInsecure }
     }
-
-    /// SHA-256 fingerprints.
+    
     private static var trustedFingerprints: [String] {
         state.withLock { $0.trustedFingerprints }
     }
@@ -60,36 +59,138 @@ nonisolated enum CertificatePolicy {
         case trusted
         case rejected(reason: String)
     }
+    
+    static func verify(chain: [SecCertificate], serverName: String) async -> Verification {
+        switch prepare(chain: chain, serverName: serverName) {
+        case .decided(let verification):
+            return verification
+        case .evaluate(let trust, let key):
+            let handoff = TrustHandoff(trust: trust)
+            let resumed = OneShotLatch()
+            let verification: Verification = await withCheckedContinuation { continuation in
+                evaluationQueue.async {
+                    let status = SecTrustEvaluateAsyncWithError(handoff.trust, evaluationQueue) { _, trusted, error in
+                        guard resumed.claim() else { return }
+                        continuation.resume(returning: outcome(trusted: trusted, error: error))
+                    }
+                    if status != errSecSuccess, resumed.claim() {
+                        continuation.resume(returning: .rejected(reason: "Certificate evaluation could not start (\(status))"))
+                    }
+                }
+            }
+            if case .trusted = verification {
+                rememberTrusted(key, chain: chain)
+            }
+            return verification
+        }
+    }
 
-    /// `chain` is leaf-first. A user-pinned leaf SHA-256 match short-circuits all other
-    /// checks: the pin is the user's full trust decision, so chain-of-trust, hostname/SAN,
-    /// and validity-period are not verified. Otherwise standard system SSL trust evaluation.
-    static func verify(chain: [SecCertificate], serverName: String) -> Verification {
+    private static let evaluationQueue = DispatchQueue(
+        label: "su.smd.Anywhere.CertificatePolicy",
+        qos: .userInitiated
+    )
+    
+    private struct TrustHandoff: @unchecked Sendable {
+        let trust: SecTrust
+    }
+
+    private enum Preparation {
+        case decided(Verification)
+        case evaluate(SecTrust, VerifiedChainKey)
+    }
+
+    private static func prepare(chain: [SecCertificate], serverName: String) -> Preparation {
         if allowInsecure {
-            return .trusted
+            return .decided(.trusted)
         }
 
         guard let leaf = chain.first else {
-            return .rejected(reason: "No server certificates received")
+            return .decided(.rejected(reason: "No server certificates received"))
         }
 
         if isPinned(leaf) {
-            return .trusted
+            return .decided(.trusted)
+        }
+
+        let key = VerifiedChainKey(chain: chain, serverName: serverName)
+        if isRecentlyTrusted(key) {
+            return .decided(.trusted)
         }
 
         var trust: SecTrust?
         let policy = SecPolicyCreateSSL(true, serverName as CFString)
         guard SecTrustCreateWithCertificates(chain as CFArray, policy, &trust) == errSecSuccess,
               let trust else {
-            return .rejected(reason: "Failed to create trust object")
+            return .decided(.rejected(reason: "Failed to create trust object"))
         }
+        return .evaluate(trust, key)
+    }
 
-        var cfError: CFError?
-        if SecTrustEvaluateWithError(trust, &cfError) {
+    // MARK: - Verified-chain cache
+
+    private struct VerifiedChainKey: Hashable, Sendable {
+        let serverName: String
+        let digest: SHA256.Digest
+
+        init(chain: [SecCertificate], serverName: String) {
+            var hasher = SHA256()
+            for certificate in chain {
+                let der = SecCertificateCopyData(certificate) as Data
+                withUnsafeBytes(of: UInt32(der.count).bigEndian) { hasher.update(bufferPointer: $0) }
+                hasher.update(data: der)
+            }
+            self.serverName = serverName.lowercased()
+            self.digest = hasher.finalize()
+        }
+    }
+
+    private struct VerifiedChain: Sendable {
+        let cachedAt: TimeInterval
+        let expiresAt: TimeInterval
+        let notAfter: Date
+    }
+
+    private static let verifiedChainTTL: TimeInterval = 10 * 60
+    private static let maxVerifiedChains = 256
+    private static let verifiedChains = Mutex<[VerifiedChainKey: VerifiedChain]>([:])
+
+    private static func isRecentlyTrusted(_ key: VerifiedChainKey) -> Bool {
+        let now = MonotonicClock.now
+        let wallNow = Date()
+        return verifiedChains.withLock { chains in
+            guard let entry = chains[key] else { return false }
+            guard now < entry.expiresAt, wallNow < entry.notAfter else {
+                chains.removeValue(forKey: key)
+                return false
+            }
+            return true
+        }
+    }
+
+    private static func rememberTrusted(_ key: VerifiedChainKey, chain: [SecCertificate]) {
+        var notAfter = Date.distantFuture
+        for certificate in chain {
+            guard let date = SecCertificateCopyNotValidAfterDate(certificate) as Date? else { return }
+            notAfter = min(notAfter, date)
+        }
+        let now = MonotonicClock.now
+        let entry = VerifiedChain(cachedAt: now, expiresAt: now + verifiedChainTTL, notAfter: notAfter)
+        verifiedChains.withLock { chains in
+            chains[key] = entry
+            guard chains.count > maxVerifiedChains else { return }
+            chains = chains.filter { $0.value.expiresAt > now }
+            while chains.count > maxVerifiedChains,
+                  let oldest = chains.min(by: { $0.value.cachedAt < $1.value.cachedAt })?.key {
+                chains.removeValue(forKey: oldest)
+            }
+        }
+    }
+
+    private static func outcome(trusted: Bool, error: CFError?) -> Verification {
+        if trusted {
             return .trusted
         }
-
-        let message = (cfError as Error?)?.localizedDescription ?? "Certificate evaluation failed"
+        let message = (error as Error?)?.localizedDescription ?? "Certificate evaluation failed"
         return .rejected(reason: message)
     }
 

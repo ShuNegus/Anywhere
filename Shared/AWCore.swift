@@ -18,7 +18,6 @@ nonisolated final class AWCore {
         static let bundle = "su.smd.Anywhere"
         static let errorDomain = bundle
         static let iCloudContainer = "iCloud.\(bundle)"
-        static let lwipQueue = "\(bundle).lwip"
     }
     
     static var isHostApp: Bool {
@@ -27,24 +26,23 @@ nonisolated final class AWCore {
     
     nonisolated(unsafe) private static let userDefaults: UserDefaults = {
         let defaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
+        migrateLegacySettings(defaults)
         defaults.register(defaults: [
             UserDefaultsKey.blockWebRTC: true,
             UserDefaultsKey.bypassCountryCode: "",
             UserDefaultsKey.echDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.echDNSPlainServer: DNSUpstream.defaultPlainServer,
-            UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultPlainServer,
-            UserDefaultsKey.ipRuleDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.ipRuleDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.echDNSUDPServer: DNSUpstream.defaultUDPServer,
+            UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.proModeEnabled: false,
             UserDefaultsKey.proxyDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.proxyDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.proxyDNSUDPServer: DNSUpstream.defaultUDPServer,
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
             UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
-            UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
             UserDefaultsKey.remnawaveHWID: UUID().uuidString,
             UserDefaultsKey.showVoyagerCard: true,
             UserDefaultsKey.subscriptionDNSDoHURL: DNSUpstream.defaultDoHURL,
-            UserDefaultsKey.subscriptionDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.subscriptionDNSUDPServer: DNSUpstream.defaultUDPServer,
+            UserDefaultsKey.syntheticAddressExcludedDomainSuffixes: [],
             UserDefaultsKey.trustedCertificateSHA256s: [],
             UserDefaultsKey.trustedSSIDs: [],
             UserDefaultsKey.turnCaptchaManual: false,
@@ -57,7 +55,7 @@ nonisolated final class AWCore {
     // MARK: - UserDefaults Keys
 
     private enum UserDefaultsKey {
-        static let advertiseIPv6ToApps = "advertiseIPv6ToApps"
+        static let activeConfiguration = "activeConfiguration"
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
         static let alwaysTrustCellular = "alwaysTrustCellular"
@@ -67,31 +65,30 @@ nonisolated final class AWCore {
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
         static let chainLatencyResults = "chainLatencyResults"
+        static let detailRevealed = "detailRevealed"
         static let echDNSDoHURL = "echDNSDoHURL"
         static let echDNSMode = "echDNSMode"
-        static let echDNSPlainServer = "echDNSPlainServer"
+        static let echDNSUDPServer = "echDNSUDPServer"
         static let experimentalEnabled = "experimentalEnabled"
         static let fallbackDNSMode = "fallbackDNSMode"
         static let fallbackDNSServer = "fallbackDNSServer"
         static let hideVPNIcon = "hideVPNIcon"
         static let homeColorScheme = "homeColorScheme"
+        static let hostMappings = "hostMappings"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
-        static let ipRuleDNSDoHURL = "ipRuleDNSDoHURL"
-        static let ipRuleDNSMode = "ipRuleDNSMode"
-        static let ipRuleDNSPlainServer = "ipRuleDNSPlainServer"
-        static let lastConfigurationData = "lastConfigurationData"
         static let latencyResults = "latencyResults"
         static let mitmEnabled = "mitmEnabled"
+        static let moduleRuleSetAssignments = "moduleRuleSetAssignments"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
         static let proModeEnabled = "proModeEnabled"
+        static let proxiesPageProxyType = "proxiesPageProxyType"
         static let proxyDNSDoHURL = "proxyDNSDoHURL"
         static let proxyDNSMode = "proxyDNSMode"
-        static let proxyDNSPlainServer = "proxyDNSPlainServer"
+        static let proxyDNSUDPServer = "proxyDNSUDPServer"
         static let proxyMode = "proxyMode"
         static let quicPolicy = "quicPolicy"
-        static let reflectionAddresses = "reflectionAddresses"
         static let reflectionEnabled = "reflectionEnabled"
         static let remnawaveHWID = "remnawaveHWID"
         static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
@@ -101,16 +98,17 @@ nonisolated final class AWCore {
         static let showVoyagerCard = "showVoyagerCard"
         static let subscriptionDNSDoHURL = "subscriptionDNSDoHURL"
         static let subscriptionDNSMode = "subscriptionDNSMode"
-        static let subscriptionDNSPlainServer = "subscriptionDNSPlainServer"
-        static let syncDeviceID = "syncDeviceID"
+        static let subscriptionDNSUDPServer = "subscriptionDNSUDPServer"
+        static let syntheticAddressExcludedDomainSuffixes = "syntheticAddressExcludedDomainSuffixes"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let trustedSSIDs = "trustedSSIDs"
+        static let tunnelExcludeAPNs = "tunnelExcludeAPNs"
+        static let tunnelExcludeCellularServices = "tunnelExcludeCellularServices"
+        static let tunnelExcludeDeviceCommunication = "tunnelExcludeDeviceCommunication"
         static let tunnelExcludedRoutes = "tunnelExcludedRoutes"
+        static let tunnelExcludeLocalNetworks = "tunnelExcludeLocalNetworks"
         static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
-        static let tunnelIncludeAPNs = "tunnelIncludeAPNs"
-        static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
         static let tunnelIncludedRoutes = "tunnelIncludedRoutes"
-        static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
         static let preflightVerdict = "preflightVerdict"
         static let preflightVerdictAt = "preflightVerdictAt"
         static let turnCaptchaManual = "turnCaptchaManual"
@@ -124,19 +122,6 @@ nonisolated final class AWCore {
         static let voyagerMembership = "voyagerMembership"
     }
 
-    static func migrateToAppGroup(fileName: String) {
-        let fileManager = FileManager.default
-        let oldURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(fileName)
-        guard let container = fileManager.containerURL(forSecurityApplicationGroupIdentifier: Identifier.appGroupSuite) else { return }
-        let newURL = container.appendingPathComponent(fileName)
-        guard fileManager.fileExists(atPath: oldURL.path), !fileManager.fileExists(atPath: newURL.path) else { return }
-        do {
-            try fileManager.moveItem(at: oldURL, to: newURL)
-        } catch {
-            logger.report(AnywhereError.store(.migrationFailed(file: fileName, underlying: error)))
-        }
-    }
-
     // MARK: - Typed UserDefaults Accessors
     
     // App
@@ -147,6 +132,22 @@ nonisolated final class AWCore {
     static func setOnboardingCompleted(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.onboardingCompleted)
     }
+
+    static func getDetailRevealed() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.detailRevealed)
+    }
+
+    static func setDetailRevealed(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.detailRevealed)
+    }
+
+    static func getProxiesPageProxyType() -> String? {
+        userDefaults.string(forKey: UserDefaultsKey.proxiesPageProxyType)
+    }
+
+    static func setProxiesPageProxyType(_ rawValue: String) {
+        userDefaults.set(rawValue, forKey: UserDefaultsKey.proxiesPageProxyType)
+    }
     
     static func getICloudSyncEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.iCloudSyncEnabled)
@@ -156,13 +157,6 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.iCloudSyncEnabled)
     }
     
-    static func getSyncDeviceID() -> String {
-        if let id = userDefaults.string(forKey: UserDefaultsKey.syncDeviceID) { return id }
-        let id = UUID().uuidString
-        userDefaults.set(id, forKey: UserDefaultsKey.syncDeviceID)
-        return id
-    }
-
     // Voyager
     static func getVoyagerMembership() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.voyagerMembership)
@@ -185,18 +179,12 @@ nonisolated final class AWCore {
     }
 
     enum ThemeColorSlot: String {
-        case connectedBackgroundStart
-        case connectedBackgroundEnd
-        case disconnectedBackgroundStart
-        case disconnectedBackgroundEnd
-    }
-    
-    static func getHomeColorScheme() -> String? {
-        userDefaults.string(forKey: UserDefaultsKey.homeColorScheme)
-    }
-
-    static func setHomeColorScheme(_ rawValue: String) {
-        userDefaults.set(rawValue, forKey: UserDefaultsKey.homeColorScheme)
+        case homeBackgroundLightStart
+        case homeBackgroundLightEnd
+        case homeBackgroundDarkStart
+        case homeBackgroundDarkEnd
+        case statCardBackgroundLight
+        case statCardBackgroundDark
     }
     
     static func getThemeColorData(_ slot: ThemeColorSlot) -> Data? {
@@ -213,12 +201,16 @@ nonisolated final class AWCore {
     }
 
     // Tunnel
-    static func getLastConfigurationData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.lastConfigurationData)
+    static func getActiveConfigurationData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.activeConfiguration)
     }
 
-    static func setLastConfigurationData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.lastConfigurationData)
+    static func setActiveConfigurationData(_ data: Data?) {
+        if let data {
+            userDefaults.set(data, forKey: UserDefaultsKey.activeConfiguration)
+        } else {
+            userDefaults.removeObject(forKey: UserDefaultsKey.activeConfiguration)
+        }
     }
     
     static func getSelectedConfigurationId() -> UUID? {
@@ -263,6 +255,14 @@ nonisolated final class AWCore {
     }
 
     // Settings
+    static func getProxyMode() -> ProxyMode {
+        ProxyMode(rawValue: userDefaults.string(forKey: UserDefaultsKey.proxyMode)!) ?? .rule
+    }
+    
+    static func setProxyMode(_ proxyMode: ProxyMode) {
+        userDefaults.set(proxyMode.rawValue, forKey: UserDefaultsKey.proxyMode)
+    }
+    
     static func getAlwaysOnEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
     }
@@ -271,12 +271,112 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.alwaysOnEnabled)
     }
     
-    static func getProxyMode() -> ProxyMode {
-        ProxyMode(rawValue: userDefaults.string(forKey: UserDefaultsKey.proxyMode)!) ?? .rule
+    static func getTunnelIncludeAllNetworks() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func setTunnelIncludeAllNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func getTunnelExcludeLocalNetworks() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeLocalNetworks) as? Bool {
+            return value
+        }
+        return true
+    }
+
+    static func setTunnelExcludeLocalNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeLocalNetworks)
+    }
+
+    static func getTunnelExcludeAPNs() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeAPNs) as? Bool {
+            return value
+        }
+        return true
+    }
+
+    static func setTunnelExcludeAPNs(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeAPNs)
+    }
+
+    static func getTunnelExcludeCellularServices() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeCellularServices) as? Bool {
+            return value
+        }
+        return true
+    }
+
+    static func setTunnelExcludeCellularServices(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeCellularServices)
+    }
+
+    static func getTunnelExcludeDeviceCommunication() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeDeviceCommunication) as? Bool {
+            return value
+        }
+        return true
+    }
+
+    static func setTunnelExcludeDeviceCommunication(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeDeviceCommunication)
+    }
+
+    static func getTunnelIncludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelIncludedRoutes) ?? []
+    }
+
+    static func setTunnelIncludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelIncludedRoutes)
+    }
+
+    static func getTunnelExcludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelExcludedRoutes) ?? []
+    }
+
+    static func setTunnelExcludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
+    }
+
+    static func getSyntheticAddressExcludedDomainSuffixes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.syntheticAddressExcludedDomainSuffixes) ?? []
+    }
+
+    static func setSyntheticAddressExcludedDomainSuffixes(_ suffixes: [String]) {
+        userDefaults.set(suffixes, forKey: UserDefaultsKey.syntheticAddressExcludedDomainSuffixes)
     }
     
-    static func setProxyMode(_ proxyMode: ProxyMode) {
-        userDefaults.set(proxyMode.rawValue, forKey: UserDefaultsKey.proxyMode)
+    static func getBlockUDP() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.blockUDP)
+    }
+
+    static func setBlockUDP(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockUDP)
+    }
+
+    static func getQUICPolicy() -> QUICPolicy {
+        userDefaults.string(forKey: UserDefaultsKey.quicPolicy).flatMap(QUICPolicy.init(rawValue:)) ?? .blocked
+    }
+
+    static func setQUICPolicy(_ value: QUICPolicy) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
+    }
+
+    static func getBlockWebRTC() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.blockWebRTC)
+    }
+
+    static func setBlockWebRTC(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockWebRTC)
+    }
+
+    static func getPreventDNSLeak() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.preventDNSLeak)
+    }
+
+    static func setPreventDNSLeak(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.preventDNSLeak)
     }
 
     static func getBypassCountryCode() -> String {
@@ -287,12 +387,20 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.bypassCountryCode)
     }
     
-    static func getRuleSetAssignments() -> [String: String] {
+    static func getRoutingRuleSetAssignments() -> [String: String] {
         userDefaults.dictionary(forKey: UserDefaultsKey.ruleSetAssignments) as? [String: String] ?? [:]
     }
 
-    static func setRuleSetAssignments(_ assignments: [String: String]) {
+    static func setRoutingRuleSetAssignments(_ assignments: [String: String]) {
         userDefaults.set(assignments, forKey: UserDefaultsKey.ruleSetAssignments)
+    }
+    
+    static func getModuleRoutingRuleSetAssignments() -> [String: String] {
+        userDefaults.dictionary(forKey: UserDefaultsKey.moduleRuleSetAssignments) as? [String: String] ?? [:]
+    }
+
+    static func setModuleRoutingRuleSetAssignments(_ assignments: [String: String]) {
+        userDefaults.set(assignments, forKey: UserDefaultsKey.moduleRuleSetAssignments)
     }
 
     static func getAllowInsecure() -> Bool {
@@ -359,46 +467,6 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.reflectionEnabled)
     }
 
-    static func getReflectionAddresses() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.reflectionAddresses) ?? []
-    }
-
-    static func setReflectionAddresses(_ addresses: [String]) {
-        userDefaults.set(addresses, forKey: UserDefaultsKey.reflectionAddresses)
-    }
-
-    static func getQUICPolicy() -> QUICPolicy {
-        userDefaults.string(forKey: UserDefaultsKey.quicPolicy).flatMap(QUICPolicy.init(rawValue:)) ?? .blocked
-    }
-
-    static func setQUICPolicy(_ value: QUICPolicy) {
-        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
-    }
-    
-    static func getBlockUDP() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.blockUDP)
-    }
-
-    static func setBlockUDP(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.blockUDP)
-    }
-
-    static func getBlockWebRTC() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.blockWebRTC)
-    }
-
-    static func setBlockWebRTC(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.blockWebRTC)
-    }
-
-    static func getPreventDNSLeak() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.preventDNSLeak)
-    }
-
-    static func setPreventDNSLeak(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.preventDNSLeak)
-    }
-
     static func getSubscriptionDNSMode() -> DNSMode {
         userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
     }
@@ -407,12 +475,12 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.subscriptionDNSMode)
     }
 
-    static func getSubscriptionDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSPlainServer)!
+    static func getSubscriptionDNSUDPServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSUDPServer)!
     }
 
-    static func setSubscriptionDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSPlainServer)
+    static func setSubscriptionDNSUDPServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSUDPServer)
     }
 
     static func getSubscriptionDNSDoHURL() -> String {
@@ -423,28 +491,16 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSDoHURL)
     }
 
-    static func getIPRuleDNSMode() -> DNSMode {
-        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
+    static func getHostMappingsData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.hostMappings)
     }
 
-    static func setIPRuleDNSMode(_ value: DNSMode) {
-        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.ipRuleDNSMode)
-    }
-
-    static func getIPRuleDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSPlainServer)!
-    }
-
-    static func setIPRuleDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.ipRuleDNSPlainServer)
-    }
-
-    static func getIPRuleDNSDoHURL() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSDoHURL)!
-    }
-
-    static func setIPRuleDNSDoHURL(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.ipRuleDNSDoHURL)
+    static func setHostMappingsData(_ data: Data?) {
+        if let data {
+            userDefaults.set(data, forKey: UserDefaultsKey.hostMappings)
+        } else {
+            userDefaults.removeObject(forKey: UserDefaultsKey.hostMappings)
+        }
     }
 
     static func getFallbackDNSMode() -> FallbackDNSMode {
@@ -471,12 +527,12 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.proxyDNSMode)
     }
 
-    static func getProxyDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.proxyDNSPlainServer)!
+    static func getProxyDNSUDPServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.proxyDNSUDPServer)!
     }
 
-    static func setProxyDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.proxyDNSPlainServer)
+    static func setProxyDNSUDPServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.proxyDNSUDPServer)
     }
 
     static func getProxyDNSDoHURL() -> String {
@@ -495,12 +551,12 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.echDNSMode)
     }
 
-    static func getECHDNSPlainServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.echDNSPlainServer)!
+    static func getECHDNSUDPServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.echDNSUDPServer)!
     }
 
-    static func setECHDNSPlainServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.echDNSPlainServer)
+    static func setECHDNSUDPServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.echDNSUDPServer)
     }
 
     static func getECHDNSDoHURL() -> String {
@@ -514,30 +570,22 @@ nonisolated final class AWCore {
     static func getSubscriptionDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getSubscriptionDNSMode(),
-            plainServer: getSubscriptionDNSPlainServer(),
+            udpServer: getSubscriptionDNSUDPServer(),
             dohURL: getSubscriptionDNSDoHURL()
-        )
-    }
-    
-    static func getIPRuleDNSUpstream() -> DNSUpstream {
-        DNSUpstream(
-            mode: getIPRuleDNSMode(),
-            plainServer: getIPRuleDNSPlainServer(),
-            dohURL: getIPRuleDNSDoHURL()
         )
     }
     
     static func getFallbackDNSUpstream() -> DNSUpstream {
         switch getFallbackDNSMode() {
-        case .default: return .defaultPlain
-        case .plain: return DNSUpstream.parsePlain(getFallbackDNSServer()) ?? .defaultPlain
+        case .default: return .defaultUDP
+        case .udp: return DNSUpstream.parseUDP(getFallbackDNSServer()) ?? .defaultUDP
         }
     }
 
     static func getProxyDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getProxyDNSMode(),
-            plainServer: getProxyDNSPlainServer(),
+            udpServer: getProxyDNSUDPServer(),
             dohURL: getProxyDNSDoHURL()
         )
     }
@@ -545,77 +593,24 @@ nonisolated final class AWCore {
     static func getECHDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getECHDNSMode(),
-            plainServer: getECHDNSPlainServer(),
+            udpServer: getECHDNSUDPServer(),
             dohURL: getECHDNSDoHURL()
         )
     }
-
-    static func getAdvertiseIPv6ToApps() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.advertiseIPv6ToApps)
-    }
-
-    static func setAdvertiseIPv6ToApps(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.advertiseIPv6ToApps)
-    }
-
+    
     static func getRemnawaveHWIDEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.remnawaveHWIDEnabled)
     }
 
     static func setRemnawaveHWIDEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.remnawaveHWIDEnabled)
+        if value {
+            userDefaults.set(UUID().uuidString, forKey: UserDefaultsKey.remnawaveHWID)
+        }
     }
     
     static func getRemnawaveHWID() -> String {
         userDefaults.string(forKey: UserDefaultsKey.remnawaveHWID)!
-    }
-
-    static func getTunnelIncludeAllNetworks() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
-    }
-
-    static func setTunnelIncludeAllNetworks(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
-    }
-
-    static func getTunnelIncludeLocalNetworks() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
-    }
-
-    static func setTunnelIncludeLocalNetworks(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
-    }
-
-    static func getTunnelIncludeAPNs() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAPNs)
-    }
-
-    static func setTunnelIncludeAPNs(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAPNs)
-    }
-
-    static func getTunnelIncludeCellularServices() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeCellularServices)
-    }
-
-    static func setTunnelIncludeCellularServices(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
-    }
-
-    static func getTunnelIncludedRoutes() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelIncludedRoutes) ?? []
-    }
-
-    static func setTunnelIncludedRoutes(_ routes: [String]) {
-        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelIncludedRoutes)
-    }
-
-    static func getTunnelExcludedRoutes() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelExcludedRoutes) ?? []
-    }
-
-    static func setTunnelExcludedRoutes(_ routes: [String]) {
-        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
     }
 
     // MARK: - Routing Data
@@ -688,10 +683,48 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.mitmEnabled)
     }
 
-    /// False until the toggle has been written locally at least once — the cue for the
-    /// one-time migration off the synced blob (see `MITMRuleSetStore.init`).
-    static func hasMITMEnabled() -> Bool {
-        userDefaults.object(forKey: UserDefaultsKey.mitmEnabled) != nil
+    // MARK: - Legacy Migrations
+
+    private static func migrateLegacySettings(_ defaults: UserDefaults) {
+        migratePlainDNSToUDP(defaults)
+        removeLocalRequestDNSSettings(defaults)
+    }
+
+    /// Nov 2026: the "Plain" DNS mode was renamed to "UDP".
+    private static func migratePlainDNSToUDP(_ defaults: UserDefaults) {
+        let modeKeys = [
+            UserDefaultsKey.echDNSMode,
+            UserDefaultsKey.fallbackDNSMode,
+            UserDefaultsKey.proxyDNSMode,
+            UserDefaultsKey.subscriptionDNSMode,
+        ]
+        for key in modeKeys where defaults.string(forKey: key) == "plain" {
+            defaults.set("udp", forKey: key)
+        }
+
+        let serverKeys = [
+            ("echDNSPlainServer", UserDefaultsKey.echDNSUDPServer),
+            ("proxyDNSPlainServer", UserDefaultsKey.proxyDNSUDPServer),
+            ("subscriptionDNSPlainServer", UserDefaultsKey.subscriptionDNSUDPServer),
+        ]
+        for (legacyKey, key) in serverKeys {
+            guard let server = defaults.string(forKey: legacyKey) else { continue }
+            defaults.set(server, forKey: key)
+            defaults.removeObject(forKey: legacyKey)
+        }
+    }
+
+    /// Nov 2026: local requests hand their hostnames to Network.framework; the dedicated resolver was removed.
+    private static func removeLocalRequestDNSSettings(_ defaults: UserDefaults) {
+        let keys = [
+            "localRequestDNSMode",
+            "localRequestDNSUDPServer",
+            "localRequestDNSDoHURL",
+            "localRequestDNSPlainServer",
+        ]
+        for key in keys {
+            defaults.removeObject(forKey: key)
+        }
     }
 
     // MARK: - App State

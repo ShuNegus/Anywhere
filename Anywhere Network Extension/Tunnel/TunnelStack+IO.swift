@@ -6,156 +6,238 @@
 //
 
 import Foundation
-import NetworkExtension
 import Synchronization
-
-nonisolated private let logger = AnywhereLogger(category: "TunnelStack+IO")
+@preconcurrency import NetworkExtension
+import AnywhereIP
 
 extension TunnelStack {
 
-    // MARK: - Output Batching
-    
-    nonisolated func drainOutputLoop(packetFlow: NEPacketTunnelFlow) async {
-        while true {
-            var packets: [Data] = []
-            var protocols: [NSNumber] = []
-            var releases: [LWIPReleaseAction] = []
+    // MARK: - Output Writer
 
-            outputBuffer.withLock { buffer in
-                let pending = buffer.packets.count
-                if pending == 0 {
-                    buffer.drainInFlight = false
-                    return
-                }
-                packets = buffer.packets
-                protocols = buffer.protocols
-                releases = buffer.releases
-                buffer.packets = []
-                buffer.protocols = []
-                buffer.releases = []
+    @concurrent
+    nonisolated func runOutputWriter() async {
+        var packets: [OutboundPacket] = []
+        while !Task.isCancelled {
+            guard let writer = outputBuffer.withLock({ $0.take(&packets) }) else {
+                await parkOutputWriter()
+                continue
             }
-
-            if packets.isEmpty { return }
-            packetFlow.writePackets(packets, withProtocols: protocols)
-            
-            if !releases.isEmpty {
-                let toRelease = releases
-                lwipBridge.enqueue {
-                    for release in toRelease {
-                        release.run()
-                    }
+            autoreleasepool {
+                var start = 0
+                while start < packets.count {
+                    let end = min(start + TunnelConstants.outputWriteLimit, packets.count)
+                    write(packets[start..<end], to: writer)
+                    start = end
                 }
             }
-
-            await Task.yield()
+            packets.removeAll(keepingCapacity: true)
         }
     }
-    
-    nonisolated func enqueueOutbound(_ packet: Data, isIPv6: Bool) {
-        let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
-        let needsKick: Bool = outputBuffer.withLock { buffer in
+
+    private nonisolated func parkOutputWriter() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let ready: Bool = outputBuffer.withLock { buffer in
+                    if buffer.hasWritable || Task.isCancelled { return true }
+                    buffer.waiter = continuation
+                    return false
+                }
+                if ready { continuation.resume() }
+            }
+        } onCancel: {
+            outputBuffer.withLock { $0.takeWaiter() }?.resume()
+        }
+    }
+
+    private nonisolated func write(_ packets: ArraySlice<OutboundPacket>, to writer: PacketFlowWriter) {
+        var attempt = 0
+        while !writer.write(packets), attempt < TunnelConstants.outputRetryLimit {
+            attempt += 1
+            usleep(UInt32(TunnelConstants.outputRetryDelayMicroseconds * attempt))
+        }
+    }
+
+    nonisolated func enqueueOutbound(_ packet: OutboundPacket) {
+        outputBuffer.withLock { buffer -> CheckedContinuation<Void, Never>? in
+            guard buffer.writer != nil else { return nil }
             buffer.packets.append(packet)
-            buffer.protocols.append(proto)
-            buffer.releases.append(.noop)
-            if buffer.drainInFlight { return false }
-            buffer.drainInFlight = true
-            return true
-        }
-        if needsKick {
-            kickOutputDrain()
-        }
+            return buffer.takeWaiter()
+        }?.resume()
+    }
+
+    nonisolated func enqueueTCPOutput(_ packets: [OutboundPacket], generation: UInt64) {
+        outputBuffer.withLock { buffer -> CheckedContinuation<Void, Never>? in
+            guard buffer.generation == generation, buffer.writer != nil, !packets.isEmpty else { return nil }
+            buffer.packets.append(contentsOf: packets)
+            return buffer.takeWaiter()
+        }?.resume()
     }
 
     // MARK: - Packet Reading
-    
-    func runReadLoop(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
-        let demand = AsyncInbox<Void>(capacity: 1)
-        demand.yield(())
-        let batches = AsyncStream<[Data]> { continuation in
-            let producer = Task {
-                while (try? await demand.next()) != nil {
-                    let (packets, _) = await packetFlow.readPackets()
-                    continuation.yield(packets)
+
+    private static let inboundMergeLimit = 256
+
+    nonisolated func runReadLoop(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
+        let intake = AsyncInbox<[InboundDatagram]>(capacity: TunnelConstants.udpIntakeBacklog)
+        datagramIntake.withLock { $0 = intake }
+        let queue = InboundQueue(limit: TunnelConstants.inboundQueueLimit)
+        let reader = PacketReader(flow: packetFlow) { batch in queue.push(batch) }
+        await withDiscardingTaskGroup { group in
+            group.addTask {
+                while let batches = try? await intake.nextBatch() {
+                    await udpPlane.feed(batches.count == 1 ? batches[0] : Array(batches.joined()))
                 }
-                continuation.finish()
             }
-            continuation.onTermination = { _ in producer.cancel() }
+            group.addTask { await self.runInboundProcessing(queue: queue, reader: reader) }
+            await reader.run()
+            queue.finish()
+            datagramIntake.withLock { if $0 === intake { $0 = nil } }
+            intake.finish()
         }
-        for await packets in batches {
-            demand.yield(())
-            await processInboundBatch(packets, udpPlane: udpPlane)
+    }
+
+    @concurrent
+    private nonisolated func runInboundProcessing(queue: InboundQueue, reader: PacketReader) async {
+        var packets: [UnsafeRawBufferPointer] = []
+        packets.reserveCapacity(Self.inboundMergeLimit)
+        while let batches = await queue.next() {
+            var index = 0
+            while index < batches.count {
+                packets.removeAll(keepingCapacity: true)
+                repeat {
+                    packets.append(contentsOf: batches[index].packets)
+                    index += 1
+                } while index < batches.count && packets.count + batches[index].packets.count <= Self.inboundMergeLimit
+                processInbound(packets)
+            }
+            if queue.didConsume(batches) { reader.resume() }
+        }
+    }
+
+    private nonisolated func processInbound(_ packets: [UnsafeRawBufferPointer]) {
+        var batch = packets
+        if reflectionEnabled {
+            batch = []
+            batch.reserveCapacity(packets.count)
+            for packet in packets {
+                if let reflected = Reflector.reflect(packet) {
+                    enqueueOutbound(reflected)
+                    continue
+                }
+                batch.append(packet)
+            }
+        }
+        if !batch.isEmpty, let ipStack = liveIPStack.withLock({ $0 }) {
+            ipStack.input(batch)
         }
     }
     
-    private func processInboundBatch(_ packets: [Data], udpPlane: UDPPlane) async {
-        let reflector = reflector()
-        var lwipBatch: [Data] = []
-        var udpBatch: [Data] = []
-
-        for packet in packets {
-            if reflector.isActive, let reflected = reflector.reflect(packet) {
-                enqueueOutbound(reflected.data, isIPv6: reflected.isIPv6)
-                continue
-            }
-            if UDPPacket.ipProtocol(of: packet)?.proto == UDPPacket.ipProtocolUDP {
-                udpBatch.append(packet)
-            } else {
-                lwipBatch.append(packet)
-            }
-        }
-
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { [lwipBatch] in await self.feedLwipBatch(lwipBatch) }
-            group.addTask { [udpBatch] in await udpPlane.feed(udpBatch) }
-        }
-    }
-    
-    func feedLwipBatch(_ packets: [Data]) {
-        lwip_bridge_input_batch_begin()
-        for packet in packets {
-            packet.withUnsafeBytes { buffer in
-                guard let baseAddress = buffer.baseAddress else { return }
-                lwip_bridge_input(baseAddress, Int32(buffer.count))
-            }
-        }
-        lwip_bridge_input_batch_end()
-        FlowGauge.publishTCPTable(Int(lwip_bridge_active_tcp_count()))
-        lwipTick?.resume()
+    nonisolated func admitDatagrams(_ batch: [InboundDatagram]) {
+        datagramIntake.withLock { $0 }?.yield(batch)
     }
 
     // MARK: - Timers
 
-    func startTimeoutTimer() {
-        lwipTick = lwipBridge.makeTick(
-            intervalMs: TunnelConstants.lwipTimeoutIntervalMs,
-            leewayMs: TunnelConstants.lwipTimeoutLeewayMs
-        ) { [weak self] in
-            guard let self, self.running.load(ordering: .relaxed) else { return }
-            let idle = lwip_bridge_check_timeouts() != 0
-            FlowGauge.publishTCPTable(Int(lwip_bridge_active_tcp_count()))
-            if idle {
-                self.assumeIsolated { $0.lwipTick?.suspend() }
-            }
+    func startIPStackTick() {
+        guard let ipStack else { return }
+        ipStackTick = Task { await ipStack.runTimer() }
+    }
+
+    nonisolated func scheduleTCPIdleSweep(at deadline: TimeInterval) {
+        let armed = tcpIdleSweepArmed.load(ordering: .sequentiallyConsistent)
+        if deadline < armed { tcpIdleSweepRegistration.withLock { $0 }?.poke() }
+    }
+
+    nonisolated func runTCPIdleSweep() async {
+        let source = TCPIdleSweepSource(stack: self)
+        let registration = TickScheduler.shared.register(source)
+        tcpIdleSweepRegistration.withLock { $0 = registration }
+        await Task.suspendUntilCancelled()
+        tcpIdleSweepRegistration.withLock { if $0 === registration { $0 = nil } }
+        registration.cancel()
+        tcpIdleSweepArmed.store(.infinity, ordering: .sequentiallyConsistent)
+    }
+
+    nonisolated func scheduleUDPCleanup(at deadline: TimeInterval) {
+        udpCleanupSource.withLock { $0 }?.lower(to: deadline)
+    }
+
+    nonisolated func runUDPCleanupLoop(udpPlane: UDPPlane) async {
+        let source = UDPCleanupSource(stack: self, plane: udpPlane)
+        let registration = TickScheduler.shared.register(source)
+        source.attach(registration)
+        udpCleanupSource.withLock { $0 = source }
+        await Task.suspendUntilCancelled()
+        udpCleanupSource.withLock { if $0 === source { $0 = nil } }
+        registration.cancel()
+    }
+}
+
+nonisolated final class TCPIdleSweepSource: DeadlineSource, @unchecked Sendable {
+    private weak var stack: TunnelStack?
+
+    init(stack: TunnelStack) {
+        self.stack = stack
+    }
+
+    func nextDeadline() -> Deadline? {
+        guard let stack else { return nil }
+        var next = TimeInterval.infinity
+        for connection in stack.tcpConnections.withLock({ Array($0.connections.values) }) {
+            guard let deadline = connection.idleDeadline else { continue }
+            next = min(next, deadline)
+        }
+        stack.tcpIdleSweepArmed.store(next, ordering: .sequentiallyConsistent)
+        guard next.isFinite else { return nil }
+        return Deadline(atSeconds: next, precision: .relaxed)
+    }
+
+    func fire(now: MonotonicClock.Instant) {
+        guard let stack else { return }
+        let seconds = now.seconds
+        for connection in stack.tcpConnections.withLock({ Array($0.connections.values) }) {
+            guard let deadline = connection.idleDeadline, deadline <= seconds else { continue }
+            connection.expireIdle()
         }
     }
-    
-    func resumeLwipTickIfNeeded() {
-        lwipTick?.resume()
+}
+
+nonisolated final class UDPCleanupSource: DeadlineSource, @unchecked Sendable {
+    private weak var stack: TunnelStack?
+    private let plane: UDPPlane
+    private let deadline = Mutex<TimeInterval?>(nil)
+    private let registration = Mutex<DeadlineRegistration?>(nil)
+
+    init(stack: TunnelStack, plane: UDPPlane) {
+        self.stack = stack
+        self.plane = plane
     }
-    
-    nonisolated func runUDPCleanupLoop(udpPlane: UDPPlane) async {
-        let interval = TimeInterval(TunnelConstants.udpCleanupIntervalSec)
-        var lastRun = MonotonicClock.now
-        while !Task.isCancelled {
-            let remaining = interval - (MonotonicClock.now - lastRun)
-            if remaining > 0 {
-                try? await Task.sleep(for: .seconds(remaining))
-                continue
-            }
-            if self.running.load(ordering: .relaxed) {
-                await udpPlane.cleanup()
-            }
-            lastRun = MonotonicClock.now
+
+    func attach(_ registration: DeadlineRegistration) {
+        self.registration.withLock { $0 = registration }
+    }
+
+    func lower(to candidate: TimeInterval) {
+        let changed: Bool = deadline.withLock { current in
+            if let current, current <= candidate { return false }
+            current = candidate
+            return true
+        }
+        if changed { registration.withLock { $0 }?.poke() }
+    }
+
+    func nextDeadline() -> Deadline? {
+        deadline.withLock { $0 }.map { Deadline(atSeconds: $0, precision: .relaxed) }
+    }
+
+    func fire(now: MonotonicClock.Instant) {
+        deadline.withLock { $0 = nil }
+        guard let stack else { return }
+        let plane = plane
+        Task { [weak self, weak stack] in
+            guard let stack, stack.publishedPhase.load(ordering: .relaxed) == .running else { return }
+            guard let next = await plane.cleanup() else { return }
+            self?.lower(to: next + TimeInterval(TunnelConstants.udpCleanupCoalescingSec))
         }
     }
 }

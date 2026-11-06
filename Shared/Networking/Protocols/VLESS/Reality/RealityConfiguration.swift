@@ -13,7 +13,7 @@ nonisolated struct RealityConfiguration {
     let shortId: Data               // 0-8 bytes
     let fingerprint: TLSFingerprint
 
-    init(serverName: String, publicKey: Data, shortId: Data, fingerprint: TLSFingerprint = .chrome120) {
+    init(serverName: String, publicKey: Data, shortId: Data, fingerprint: TLSFingerprint = .default) {
         self.serverName = serverName
         self.publicKey = publicKey
         self.shortId = shortId
@@ -38,8 +38,7 @@ nonisolated struct RealityConfiguration {
         let sidString = params["sid"] ?? ""
         let shortId = Data(hexString: sidString) ?? Data()
 
-        let fpString = params["fp"] ?? "chrome_120"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
+        let fingerprint = TLSFingerprint(linkValue: params["fp"])
 
         return RealityConfiguration(
             serverName: sni,
@@ -106,17 +105,12 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
     case safari26 = "safari_26"
 
     case edge106 = "edge_106"
-
-    /// Minimal ClientHello for real (non-camouflage) handshakes, e.g. the MITM outer leg.
-    /// Browser fingerprints advertise ALPS, which needs a ClientEncryptedExtensions we don't
-    /// send — strict origins (e.g. Google's GFE) abort with `unexpected_message`.
-    case nonBrowser = "non_browser"
-
-    /// Tolerant decoder: an unknown saved fingerprint falls back to Chrome 120
-    /// rather than failing to decode.
+    
+    case plain = "plain"
+    
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = TLSFingerprint(rawValue: raw) ?? .chrome120
+        self = TLSFingerprint(importValue: raw) ?? .default
     }
 
     var displayName: String {
@@ -128,15 +122,52 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
         case .firefox120: return "Firefox 120"
         case .safari26:   return "Safari 26.3"
         case .edge106:    return "Edge 106"
-        case .nonBrowser: return "Non-Browser"
+        case .plain:      return "Plain"
+        }
+    }
+    
+    static var `default`: TLSFingerprint { TLSFingerprint.chrome133.supportedOnThisOS }
+
+    init(linkValue: String?) {
+        guard let linkValue, !linkValue.isEmpty else {
+            self = .plain
+            return
+        }
+        self = TLSFingerprint(importValue: linkValue) ?? .default
+    }
+    
+    init?(importValue: String) {
+        if let exact = TLSFingerprint(rawValue: importValue) {
+            self = exact
+            return
+        }
+        switch importValue.lowercased() {
+        case "chrome":  self = TLSFingerprint.chrome133.supportedOnThisOS
+        case "firefox": self = TLSFingerprint.firefox148.supportedOnThisOS
+        case "safari":  self = TLSFingerprint.safari26.supportedOnThisOS
+        case "edge":    self = TLSFingerprint.edge106.supportedOnThisOS
+        case "plain":   self = .plain
+        default:        return nil
+        }
+    }
+    
+    var supportedOnThisOS: TLSFingerprint {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+            return self
+        }
+        return withoutPostQuantum
+    }
+
+    var withoutPostQuantum: TLSFingerprint {
+        switch self {
+        case .chrome133:  return .chrome120
+        case .firefox148: return .firefox120
+        case .safari26:   return .chrome120
+        default:          return self
         }
     }
 
-    /// User-selectable camouflage fingerprints; `nonBrowser` is intentionally excluded.
-    static var allCases: [TLSFingerprint] {
-        [.chrome133, .chrome120, .chrome106,
-         .firefox148, .firefox120,
-         .safari26,
-         .edge106]
+    var offersPostQuantumKeyShare: Bool {
+        withoutPostQuantum != self
     }
 }

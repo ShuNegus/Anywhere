@@ -8,61 +8,76 @@
 import Foundation
 import Security
 import Synchronization
+import BLAKE
 
 // MARK: - Salamander
 
-/// XOR obfuscation: every datagram is `salt(8) || (packet XOR keystream)`, where the keystream is
-/// BLAKE2b-256 over `password || salt` cycled to the packet length.
 nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
     static let saltLength = 8
     private static let keyLength = 32  // BLAKE2b-256 digest
 
-    private let passwordBytes: [UInt8]
+    private let passwordHasher: BLAKE2b
 
     init(password: String) {
-        self.passwordBytes = Array(password.utf8)
+        var hasher = BLAKE2b(digestByteCount: Self.keyLength)
+        hasher.update(data: Array(password.utf8))
+        self.passwordHasher = hasher
     }
 
-    private func keystream(salt: [UInt8]) -> [UInt8] {
-        BLAKE2bHasher.hash256(passwordBytes, salt)
+    private func keystream(salt: UnsafeRawBufferPointer) -> [UInt8] {
+        var hasher = passwordHasher
+        hasher.update(bufferPointer: salt)
+        return hasher.finalize()
     }
 
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data] {
-        var salt = [UInt8](repeating: 0, count: Self.saltLength)
-        _ = SecRandomCopyBytes(kSecRandomDefault, salt.count, &salt)
-        let key = keystream(salt: salt)
-
-        var out = [UInt8]()
-        out.reserveCapacity(Self.saltLength + packet.count)
-        out.append(contentsOf: salt)
-        for index in 0..<packet.count {
-            out.append(packet[index] ^ key[index % Self.keyLength])
+        var out = Data(count: Self.saltLength + packet.count)
+        out.withUnsafeMutableBytes { raw in
+            _ = SecRandomCopyBytes(kSecRandomDefault, Self.saltLength, raw.baseAddress!)
+            let key = keystream(salt: UnsafeRawBufferPointer(rebasing: raw[..<Self.saltLength]))
+            Self.apply(key, to: packet, into: UnsafeMutableRawBufferPointer(rebasing: raw[Self.saltLength...]))
         }
-        return [Data(out)]
+        return [out]
     }
 
     func open(_ datagram: Data) -> Data? {
         let count = datagram.count
-        // Too short to carry a salt; pass through untouched.
         guard count > Self.saltLength else { return datagram }
         return datagram.withUnsafeBytes { raw -> Data in
-            let source = raw.bindMemory(to: UInt8.self)
-            let salt = Array(UnsafeBufferPointer(start: source.baseAddress, count: Self.saltLength))
-            let key = keystream(salt: salt)
-            var out = [UInt8](repeating: 0, count: count - Self.saltLength)
-            for index in 0..<out.count {
-                out[index] = source[Self.saltLength + index] ^ key[index % Self.keyLength]
+            let key = keystream(salt: UnsafeRawBufferPointer(rebasing: raw[..<Self.saltLength]))
+            var out = Data(count: count - Self.saltLength)
+            out.withUnsafeMutableBytes { output in
+                Self.apply(key, to: UnsafeRawBufferPointer(rebasing: raw[Self.saltLength...]), into: output)
             }
-            return Data(out)
+            return out
+        }
+    }
+
+    private static func apply(_ key: [UInt8], to input: UnsafeRawBufferPointer, into output: UnsafeMutableRawBufferPointer) {
+        key.withUnsafeBytes { key in
+            let k0 = key.loadUnaligned(fromByteOffset: 0, as: UInt64.self)
+            let k1 = key.loadUnaligned(fromByteOffset: 8, as: UInt64.self)
+            let k2 = key.loadUnaligned(fromByteOffset: 16, as: UInt64.self)
+            let k3 = key.loadUnaligned(fromByteOffset: 24, as: UInt64.self)
+            let count = input.count
+            var index = 0
+            while index + keyLength <= count {
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index, as: UInt64.self) ^ k0, toByteOffset: index, as: UInt64.self)
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index + 8, as: UInt64.self) ^ k1, toByteOffset: index + 8, as: UInt64.self)
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index + 16, as: UInt64.self) ^ k2, toByteOffset: index + 16, as: UInt64.self)
+                output.storeBytes(of: input.loadUnaligned(fromByteOffset: index + 24, as: UInt64.self) ^ k3, toByteOffset: index + 24, as: UInt64.self)
+                index += keyLength
+            }
+            while index < count {
+                output[index] = input[index] ^ key[index % keyLength]
+                index += 1
+            }
         }
     }
 }
 
 // MARK: - Gecko
 
-/// Wraps Salamander, additionally fragmenting long-header (handshake) packets into 2–8 randomly
-/// padded chunks reassembled by `msgID`. 1-RTT (short-header) packets pass through with Salamander
-/// only.
 nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     private static let fragmentFlag: UInt8 = 0x80
     private static let headerLength = 5
@@ -90,11 +105,9 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     }
 
     private struct ReassemblyTable {
-        /// Keyed by `msgID`.
         var entries: [UInt8: Reassembly] = [:]
         var lastSweep: UInt64
     }
-    /// All reassembly state; `Reassembly` instances are only ever touched under this lock.
     private let table: Mutex<ReassemblyTable>
 
     init(password: String, minPacketSize: Int, maxPacketSize: Int) {
@@ -102,14 +115,13 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
         let sizes = HysteriaObfuscation.normalizedGeckoSizes(min: minPacketSize, max: maxPacketSize)
         self.minPacketSize = sizes.min
         self.maxPacketSize = sizes.max
-        self.table = Mutex(ReassemblyTable(lastSweep: DispatchTime.now().uptimeNanoseconds))
+        self.table = Mutex(ReassemblyTable(lastSweep: MonotonicClock.nanoseconds))
     }
 
     // MARK: Seal
 
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data] {
         guard !packet.isEmpty else { return [] }
-        // Only long-header packets (high bit set) are fragmented; 1-RTT data rides Salamander alone.
         guard packet[0] & Self.fragmentFlag != 0 else { return inner.seal(packet) }
 
         let chunks = Int.random(in: Self.minChunks...Self.maxChunks)
@@ -154,7 +166,6 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
 
     func open(_ datagram: Data) -> Data? {
         guard let opened = inner.open(datagram), let first = opened.first else { return nil }
-        // 1-RTT (short header) passes straight through.
         guard first & Self.fragmentFlag != 0 else { return opened }
 
         let bytes = [UInt8](opened)
@@ -174,7 +185,7 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     
     private func acceptChunk(msgID: UInt8, chunkIdx: Int, totalChunks: Int, payload: [UInt8]) -> Data? {
         table.withLock { table in
-            let now = DispatchTime.now().uptimeNanoseconds
+            let now = MonotonicClock.nanoseconds
             if now &- table.lastSweep >= Self.sweepIntervalNanos {
                 table.entries = table.entries.filter { $0.value.deadline >= now }
                 table.lastSweep = now

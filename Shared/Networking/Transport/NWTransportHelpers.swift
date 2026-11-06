@@ -6,7 +6,37 @@
 //
 
 import Foundation
+import Synchronization
 import Network
+
+// MARK: - Stall
+
+nonisolated final class NWStallLatch: Sendable {
+    private let stallError = Mutex<NWError?>(nil)
+
+    func watch(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { [weak connection, self] state in
+            switch state {
+            case .waiting(let error), .failed(let error):
+                if self.record(error) { connection?.cancel() }
+            default:
+                break
+            }
+        }
+    }
+
+    func failure(for error: NWError, operation: AnywhereError.Transport.Operation) -> any Error {
+        (stallError.withLock { $0 } ?? error).engineError(operation: operation)
+    }
+
+    private func record(_ error: NWError) -> Bool {
+        stallError.withLock { stored in
+            guard stored == nil else { return false }
+            stored = error
+            return true
+        }
+    }
+}
 
 // MARK: - NWError
 
@@ -22,7 +52,7 @@ extension NWError {
         }
     }
     
-    nonisolated func legacyEngineError(operation: AnywhereError.Transport.Operation) -> any Error {
+    nonisolated func engineError(operation: AnywhereError.Transport.Operation) -> any Error {
         if case .posix(.ECANCELED) = self { return CancellationError() }
         return anywhereError(operation: operation)
     }
@@ -37,7 +67,6 @@ extension NWError {
             return "waiting(\(localizedDescription))"
         }
     }
-
 }
 
 // MARK: - AnywhereError
@@ -70,12 +99,36 @@ extension NWEndpoint.Host {
         }
     }
     
-    nonisolated static func dialHost(for host: String, viaProxyDNS: Bool) async -> NWEndpoint.Host {
+    nonisolated static func dialHost(for host: String, resolution: DialResolution) async throws -> NWEndpoint.Host {
         if let literal = NWEndpoint.Host(ipLiteral: host) { return literal }
-        guard viaProxyDNS,
-              let resolved = await DNSResolver.shared.resolveDialAddress(for: host),
-              let literal = NWEndpoint.Host(ipLiteral: resolved)
-        else { return .name(host, nil) }
-        return literal
+        switch resolution {
+        case .system:
+            return .name(host, nil)
+        case .proxies:
+            let resolver = DNSResolver.proxies
+            if let mapped = resolver.mappedAddress(for: host),
+               let literal = NWEndpoint.Host(ipLiteral: mapped) {
+                return literal
+            }
+            guard !resolver.usesSystemUpstream,
+                  let resolved = await resolver.resolveHost(host),
+                  let literal = NWEndpoint.Host(ipLiteral: resolved)
+            else { return .name(host, nil) }
+            return literal
+        case .localRequests:
+            if let mapped = DNSResolver.localRequests.mappedAddress(for: host),
+               let literal = NWEndpoint.Host(ipLiteral: mapped) {
+                return literal
+            }
+            return .name(host, nil)
+        }
     }
+}
+
+// MARK: - Dial resolution
+
+nonisolated enum DialResolution: Sendable {
+    case system
+    case proxies
+    case localRequests
 }

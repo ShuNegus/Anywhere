@@ -9,26 +9,25 @@ import Foundation
 import Observation
 import SwiftUI
 
-nonisolated private let logger = AnywhereLogger(category: "ChainStore")
-
 @MainActor
 @Observable
 class ChainStore {
-    static let shared = ChainStore()
-
     private(set) var chains: [ProxyChain] = []
     private var tombstones: [ProxyChain] = []
-    
-    @ObservationIgnored private var loadedBlob: Data?
+
+    @ObservationIgnored private let syncStore: SyncStore
+    @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
-    private init() {
-        let data = JSONBlobStore.shared.load(.chains)
-        loadedBlob = data
-        let split = Self.decodeSplit(from: data)
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+
+    init(syncStore: SyncStore) {
+        self.syncStore = syncStore
+        let items = syncStore.loadItems(.chains)
+        loadedItems = items
+        let split = Self.decodeSplit(from: items)
         chains = split.live
         tombstones = split.tombstones
-        Task { @MainActor in self.coordinate() }
     }
 
     // MARK: - CRUD
@@ -40,7 +39,6 @@ class ChainStore {
         stamped.updatedAt = SyncStamp.after(tombstone)
         chains.append(stamped)
         save()
-        coordinate()
     }
 
     func update(_ chain: ProxyChain) {
@@ -49,7 +47,6 @@ class ChainStore {
             stamped.updatedAt = SyncStamp.after(chains[index])
             chains[index] = stamped
             save()
-            coordinate()
         }
     }
 
@@ -57,56 +54,42 @@ class ChainStore {
         chains.removeAll { $0.id == chain.id }
         recordTombstone(chain)
         save()
-        coordinate()
     }
-
-    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
-        chains.move(fromOffsets: source, toOffset: destination)
+    
+    func moveChains(withIds ids: [UUID], fromOffsets source: IndexSet, toOffset destination: Int) {
+        let idSet = Set(ids)
+        chains.moveSubsequence(where: { idSet.contains($0.id) }, fromOffsets: source, toOffset: destination)
         save()
     }
 
-    // MARK: - Coordination
-    
-    private func coordinate() {
-        guard ConfigurationStore.shared.isLoaded else { return }
-        let configurations = ConfigurationStore.shared.configurations
-        VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
-        RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)
-        RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
-    }
-    
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
+            await saveTask?.value
+            guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                () -> (data: Data?, live: [ProxyChain], tombstones: [ProxyChain])? in
-                let data = JSONBlobStore.shared.load(.chains)
-                guard data != previous else { return nil }
-                let split = Self.decodeSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [ProxyChain], tombstones: [ProxyChain])? in
+                let items = syncStore.loadItems(.chains)
+                guard items != previous else { return nil }
+                let split = Self.decodeSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             chains = outcome.live
             tombstones = outcome.tombstones
-            coordinate()
             return
         }
     }
 
     // MARK: - Persistence
-    
-    nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyChain], tombstones: [ProxyChain]) {
-        guard let data else { return ([], []) }
-        guard let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) else {
-            JSONBlobStore.quarantine(.chains, data)
-            return ([], [])
-        }
-        return Tombstone.split(all)
+
+    nonisolated private static func decodeSplit(from items: [Data]) -> (live: [ProxyChain], tombstones: [ProxyChain]) {
+        Tombstone.split(SyncCodec.decodeItems(ProxyChain.self, key: .chains, payloads: items))
     }
-    
+
     private func recordTombstone(_ chain: ProxyChain) {
         var tomb = chain
         tomb.deletedAt = .now
@@ -117,24 +100,12 @@ class ChainStore {
 
     private func save() {
         mutationEpoch += 1
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(chains + tombstones)
-            JSONBlobStore.shared.save(.chains, data: data)
-        } catch {
-            logger.report(AnywhereError.store(.saveFailed(.chains, underlying: error)))
-        }
-    }
-}
-
-extension ChainStore {
-    var pickerItems: [PickerItem] {
-        let configurations = ConfigurationStore.shared.configurations
-        return chains.compactMap { chain in
-            let proxies = chain.resolveProxies(from: configurations)
-            guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { return nil }
-            return PickerItem(id: chain.id, name: chain.name)
+        let live = chains
+        let snapshot = live + tombstones
+        let previous = saveTask
+        saveTask = Task.detached { [syncStore] in
+            await previous?.value
+            syncStore.save(.chains, items: SyncCodec.encodeItems(snapshot), order: SyncCodec.order(of: live))
         }
     }
 }

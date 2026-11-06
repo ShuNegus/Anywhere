@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "MITMScriptHTTP2Pool")
-
 nonisolated enum MITMScriptHTTP2Outcome {
     case response(MITMScriptHTTPClient.Response)
     case fallbackToHTTP1
@@ -31,14 +29,14 @@ nonisolated final class MITMScriptHTTP2Pool: TransportPool {
         pool.startIdleEviction(Self.poolPolicy)
     }
 
-    func reclaim() { pool.closeAll() }
+    func reclaim() { pool.drainAll() }
 
     private static func originKey(host: String, port: UInt16, insecure: Bool) -> String {
         "\(host):\(port):\(insecure)"
     }
 
     // MARK: - Perform
-    
+
     func perform(
         request: URLRequest,
         host: String,
@@ -52,27 +50,28 @@ nonisolated final class MITMScriptHTTP2Pool: TransportPool {
         if isKnownHTTP1(key) {
             return .fallbackToHTTP1
         }
-        
-        let connection: MITMScriptHTTP2Connection = pool.state.withLock { st in
-            st.multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
 
-            if let existing = st.multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
-                st.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
-                return existing
+        let (connection, didDial): (MITMScriptHTTP2Connection, Bool) = pool.state.withLock { state in
+            state.multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
+
+            if let existing = state.multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
+                state.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+                return (existing, false)
             } else {
-                let new = MITMScriptHTTP2Connection(
+                let created = MITMScriptHTTP2Connection(
                     host: host, port: port, insecure: insecure,
                     onClose: { [weak self] connection in
                         self?.pool.removeMultiplexer(connection, key: key)
                     },
                     onNegotiatedHTTP1: { [weak self] in self?.markHTTP1(key) }
                 )
-                _ = new.tryReserveStream()   // fresh connection always has capacity
-                st.multiplexers[key, default: []].append(new)
-                st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
-                return new
+                _ = created.tryReserveStream()
+                state.multiplexers[key, default: []].append(created)
+                state.lastActivity[ObjectIdentifier(created)] = MonotonicClock.now
+                return (created, true)
             }
         }
+        if didDial { pool.noteMultiplexersChanged() }
 
         do {
             let response = try await connection.perform(
@@ -90,23 +89,22 @@ nonisolated final class MITMScriptHTTP2Pool: TransportPool {
     // MARK: - HTTP/1.1-only origin cache
 
     private func isKnownHTTP1(_ key: String) -> Bool {
-        pool.state.withLock { st in
-            guard let expiry = st.extra[key] else { return false }
+        pool.state.withLock { state in
+            guard let expiry = state.extra[key] else { return false }
             if MonotonicClock.now < expiry { return true }
-            st.extra.removeValue(forKey: key)
+            state.extra.removeValue(forKey: key)
             return false
         }
     }
 
     private func markHTTP1(_ key: String) {
-        pool.state.withLock { st in
-            if st.extra[key] == nil, st.extra.count >= Self.maxHTTP1Origins {
-                if let oldest = st.extra.min(by: { $0.value < $1.value })?.key {
-                    st.extra.removeValue(forKey: oldest)
+        pool.state.withLock { state in
+            if state.extra[key] == nil, state.extra.count >= Self.maxHTTP1Origins {
+                if let oldest = state.extra.min(by: { $0.value < $1.value })?.key {
+                    state.extra.removeValue(forKey: oldest)
                 }
             }
-            st.extra[key] = MonotonicClock.now + Self.http1TTL
+            state.extra[key] = MonotonicClock.now + Self.http1TTL
         }
-        logger.debug("[MITMScriptHTTP2Pool] cached HTTP/1.1-only origin \(key)")
     }
 }

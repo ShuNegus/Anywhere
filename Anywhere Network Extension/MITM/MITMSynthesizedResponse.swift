@@ -12,7 +12,7 @@ extension MITMScriptEngine.SynthesizedResponse {
     /// Header names a script must not set on a synth response: content-length/transfer-encoding
     /// are serializer-owned; the rest are hop-by-hop (RFC 9110 §7.6.1) and illegal on the
     /// HTTP/2 synth path (RFC 9113 §8.2.2). Dropping them keeps the wire well-framed.
-    private static let disallowedSynthHeaders: Set<String> = [
+    private static let disallowedSynthesizedHeaders: Set<String> = [
         "content-length", "transfer-encoding", "connection", "keep-alive",
         "upgrade", "proxy-connection", "te", "trailer",
     ]
@@ -28,7 +28,7 @@ extension MITMScriptEngine.SynthesizedResponse {
         for entry in headers {
             let name = lowercaseNames ? entry.name.lowercased() : entry.name
             if name.hasPrefix(":") { continue }
-            if Self.disallowedSynthHeaders.contains(name.lowercased()) {
+            if Self.disallowedSynthesizedHeaders.contains(name.lowercased()) {
                 continue
             }
             guard HTTPHeader.isValidName(name), HTTPHeader.isValidValue(entry.value) else {
@@ -57,9 +57,9 @@ extension MITMScriptEngine.SynthesizedResponse {
         return headers + [(name: lowercaseName ? "date" : "Date", value: Self.imfFixdateFormatter.string(from: Date()))]
     }
 
-    func truncatedBody(cap: Int, onTruncate: (Int) -> Void) -> Data {
+    func truncatedBody(cap: Int, onTruncate: () -> Void) -> Data {
         guard body.count > cap else { return body }
-        onTruncate(body.count)
+        onTruncate()
         let end = body.startIndex + cap
         return body.subdata(in: body.startIndex..<end)
     }

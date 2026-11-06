@@ -9,13 +9,13 @@ import Foundation
 import Synchronization
 
 nonisolated final class MITMScriptHTTP2Stream: Sendable {
-    
+
     private static let receiveWindow = 4 * 1024 * 1024
 
     // MARK: Inputs
 
     let streamID: UInt32
-    
+
     private struct WeakConnection: Sendable { weak var value: MITMScriptHTTP2Connection? }
     private let connectionBox: WeakConnection
     private var connection: MITMScriptHTTP2Connection? { connectionBox.value }
@@ -23,28 +23,43 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     private let hostHeader: String
     private let maxBytes: Int
     private let resourceTimeout: TimeInterval
-    
+
     private let responseSignal: AsyncThrowingStream<MITMScriptHTTPClient.Response, Error>.Continuation
 
     // MARK: State
 
-    private struct State {
-        var haveFinalHead = false
+    private enum Phase: PhaseTransitionable {
+        case awaitingHead
+        case receivingBody
+        case finished
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.awaitingHead, .receivingBody):
+                return true
+            case (_, .finished):
+                return old != .finished
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .awaitingHead
         var status = 0
         var headers: [(name: String, value: String)] = []
         var body = Data()
         var reservedBytes = 0
         var endStreamReceived = false
         var streamReceiveConsumed = 0
-
-        var finished = false
-        
+        var headersSent = false
         var idleGeneration = 0
     }
-    private let lock = Mutex(State())
+    private let state = Mutex(State())
 
     // MARK: Timer pokes
-    
+
     private let finishPoke = AsyncInbox<Void>(capacity: 1)
     private let idleFinishPoke = AsyncInbox<Void>(capacity: 1)
 
@@ -69,20 +84,25 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     }
 
     // MARK: - Jobs
-    
+
     func runSend() async {
-        guard !lock.withLock({ $0.finished }) else { return }
+        guard state.withLock({ $0.phase != .finished }) else { return }
         await sendRequest()
     }
-    
+
     func runDeadline() async {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                do { try await Task.sleep(for: .seconds(self.resourceTimeout)); return true }
-                catch { return false }
+                do {
+                    try await Task.sleep(seconds: self.resourceTimeout, precision: .relaxed)
+                    return true
+                } catch {
+                    return false
+                }
             }
             group.addTask {
-                _ = try? await self.finishPoke.next(); return false
+                _ = try? await self.finishPoke.next()
+                return false
             }
             let first = await group.next() ?? false
             group.cancelAll()
@@ -91,46 +111,59 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         guard timedOut else { return }
         fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request exceeded \(Int(resourceTimeout))s deadline")))
     }
-    
+
     func runIdleLoop() async {
         let interval = request.timeoutInterval
         guard interval > 0 else { return }
         while true {
-            let generation = lock.withLock { $0.idleGeneration }
-            let finished = await withTaskGroup(of: Bool.self) { group in
+            let generation = state.withLock { $0.idleGeneration }
+            let isFinished = await withTaskGroup(of: Bool.self) { group in
                 group.addTask {
-                    do { try await Task.sleep(for: .seconds(interval)); return false }
-                    catch { return true }
+                    do {
+                        try await Task.sleep(seconds: interval, precision: .relaxed)
+                        return false
+                    } catch {
+                        return true
+                    }
                 }
                 group.addTask {
-                    _ = try? await self.idleFinishPoke.next(); return true
+                    _ = try? await self.idleFinishPoke.next()
+                    return true
                 }
                 let first = await group.next() ?? true
                 group.cancelAll()
                 return first
             }
-            if finished { return }
-            let expired = lock.withLock { !$0.finished && $0.idleGeneration == generation }
-            guard expired else { continue }
+            if isFinished { return }
+            let isExpired = state.withLock { $0.phase != .finished && $0.idleGeneration == generation }
+            guard isExpired else { continue }
             fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request idle for \(Int(interval))s")))
             return
         }
     }
-    
+
     private func rearmIdleTimer() {
-        lock.withLock { $0.idleGeneration += 1 }
+        state.withLock { $0.idleGeneration += 1 }
     }
 
     // MARK: - Request
-    
+
     private func sendRequest() async {
-        guard let connection else { fail(AnywhereError.proxy(.http2, .notReady)); return }
+        guard let connection else {
+            fail(AnywhereError.proxy(.http2, .notReady))
+            return
+        }
         guard let headerBlock = buildHeaderBlock() else {
             fail(AnywhereError.mitm(.invalidScriptRequest))
             return
         }
+        guard headerBlock.count <= Int(MITMScriptHTTP2Connection.maxFrameSize) else {
+            fail(AnywhereError.mitm(.requestHeadersTooLarge))
+            return
+        }
         let requestBody = request.httpBody ?? Data()
         let hasBody = !requestBody.isEmpty
+        state.withLock { $0.headersSent = true }
         do {
             try await connection.sendHeaders(streamID: streamID, headerBlock: headerBlock, endStream: !hasBody)
             if hasBody {
@@ -140,16 +173,16 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             fail(error)
         }
     }
-    
+
     private func buildHeaderBlock() -> Data? {
         guard let url = request.url,
-              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
         let method = (request.httpMethod ?? "GET").uppercased()
         guard HTTPHeader.isValidName(method) else { return nil }
 
-        var path = comps.percentEncodedPath
+        var path = components.percentEncodedPath
         if path.isEmpty { path = "/" }
-        if let query = comps.percentEncodedQuery, !query.isEmpty { path += "?" + query }
+        if let query = components.percentEncodedQuery, !query.isEmpty { path += "?" + query }
 
         var fields: [(name: String, value: String)] = [
             (":method", method),
@@ -157,7 +190,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             (":authority", hostHeader),
             (":path", path),
         ]
-        
+
         let dropped: Set<String> = [
             "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te",
             "host", "content-length", "accept-encoding",
@@ -180,17 +213,17 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     func handleHeaders(fields: [(name: String, value: String)], endStream: Bool) {
         rearmIdleTimer()
 
-        enum Outcome { case ignore; case failStatus; case finishOK }
-        let outcome: Outcome = lock.withLock { state in
-            guard !state.finished else { return .ignore }
+        enum Outcome { case ignore, failStatus, finishOK }
+        let outcome: Outcome = state.withLock { state in
+            guard state.phase != .finished else { return .ignore }
 
-            if !state.haveFinalHead {
+            if state.phase == .awaitingHead {
                 guard let statusValue = HTTPHeader.firstValue(in: fields, named: ":status"),
                       let code = HTTPHeader.parseStatusCode(statusValue) else {
                     return .failStatus
                 }
                 if (100..<200).contains(code) { return .ignore }
-                state.haveFinalHead = true
+                state.transition(to: .receivingBody)
                 state.status = code
                 state.headers = fields.filter { !$0.name.hasPrefix(":") }
             }
@@ -218,12 +251,20 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             case ignore
             case failNoHead
             case fail(Error)
-            case ok(windowUpdate: NaiveHTTP2Frame?, finish: Bool)
+            case ok(windowUpdate: HTTP2Frame?, finish: Bool)
         }
-        let outcome: Outcome = lock.withLock { state in
-            guard !state.finished else { return .ignore }
-            guard state.haveFinalHead else { return .failNoHead }
-            
+        let outcome: Outcome = state.withLock { state in
+            switch state.phase {
+            case .finished: return .ignore
+            case .awaitingHead:
+                if fullPayloadCount == 0 && !endStream {
+                    return .ignore
+                } else {
+                    return .failNoHead
+                }
+            case .receivingBody: break
+            }
+
             if !body.isEmpty {
                 if state.body.count + body.count > maxBytes {
                     return .fail(AnywhereError.mitm(.responseTooLarge(limit: maxBytes)))
@@ -234,13 +275,13 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
                 state.reservedBytes += body.count
                 state.body.append(body)
             }
-            
-            var windowUpdate: NaiveHTTP2Frame?
+
+            var windowUpdate: HTTP2Frame?
             state.streamReceiveConsumed += fullPayloadCount
             if !endStream, state.streamReceiveConsumed >= Self.receiveWindow / 2 {
                 let increment = UInt32(state.streamReceiveConsumed)
                 state.streamReceiveConsumed = 0
-                windowUpdate = NaiveHTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
+                windowUpdate = HTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
             }
 
             if endStream { state.endStreamReceived = true }
@@ -262,9 +303,13 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     func handleReset(errorCode: UInt32) {
         finish(.failure(AnywhereError.proxy(.http2, .streamReset(code: errorCode))), removeFromConnection: false, sendRST: false)
     }
-    
+
     func failFromSession(_ error: Error) {
         finish(.failure(error), removeFromConnection: false, sendRST: false)
+    }
+
+    func cancelByConsumer() {
+        fail(CancellationError())
     }
 
     // MARK: - Completion
@@ -274,15 +319,15 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     }
 
     private func finishSuccess() {
-        let snapshot: (body: Data, headers: [(name: String, value: String)], status: Int)? = lock.withLock { state in
-            guard !state.finished else { return nil }
+        let snapshot: (body: Data, headers: [(name: String, value: String)], status: Int)? = state.withLock { state in
+            guard state.phase != .finished else { return nil }
             return (state.body, state.headers, state.status)
         }
         guard let snapshot else { return }
 
         var responseBody = snapshot.body
         var dropHeaders: Set<String> = ["transfer-encoding"]
-        
+
         let plan = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: snapshot.headers, named: "content-encoding"))
         if plan.requiresDecompression,
            let decoded = MITMBodyCodec.decompress(snapshot.body, plan: plan, host: request.url?.host ?? "") {
@@ -310,20 +355,19 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         removeFromConnection: Bool,
         sendRST: Bool
     ) {
-        let captured: (reservedBytes: Int, endStreamReceived: Bool)? = lock.withLock { state in
-            guard !state.finished else { return nil }
-            state.finished = true
-            let c = (state.reservedBytes, state.endStreamReceived)
+        let captured: (reservedBytes: Int, endStreamReceived: Bool, headersSent: Bool)? = state.withLock { state in
+            guard state.transition(to: .finished) else { return nil }
+            let snapshot = (state.reservedBytes, state.endStreamReceived, state.headersSent)
             state.reservedBytes = 0
-            return c
+            return snapshot
         }
         guard let captured else { return }
-        
+
         finishPoke.finish()
         idleFinishPoke.finish()
         MITMScriptHTTPClient.releaseInFlight(captured.reservedBytes)
         if removeFromConnection {
-            connection?.removeStream(self, sendRST: sendRST && !captured.endStreamReceived)
+            connection?.removeStream(self, sendRST: sendRST && captured.headersSent && !captured.endStreamReceived)
         }
         connection?.wakeFlowParks()
         switch result {

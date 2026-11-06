@@ -7,11 +7,10 @@
 
 import Foundation
 
-nonisolated private let logger = AnywhereLogger(category: "SubscriptionFetcher")
-
 nonisolated struct SubscriptionFetcher {
     struct Result {
         let configurations: [ProxyConfiguration]
+        let stableKeys: [UUID: String]
         let name: String?
         let upload: Int64?
         let download: Int64?
@@ -19,23 +18,26 @@ nonisolated struct SubscriptionFetcher {
         let expire: Date?
         /// TURN relays advertised next to the subscription, fetched separately (see
         /// `fetchTurnEndpoint`). `nil` when the server offers no `turn` block.
-        let turn: TurnMetadata?
+        var turn: TurnMetadata? = nil
         /// Revision and push endpoints from the same response. `nil` when the server
         /// offers no `push` block.
-        let push: SubscriptionPushInfo?
+        var push: SubscriptionPushInfo? = nil
         /// How the `/turn` request ended — tells «no backup route» apart from «could not
         /// load it» and «subscription not found» for the status icon.
         var turnOutcome: TurnFetchOutcome = .failed
+        let iconLight: Data?
+        let iconDark: Data?
     }
 
-    static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
+    static func fetch(url urlString: String) async throws -> Result {
         guard let url = URL(string: urlString) else {
             throw AnywhereError.subscription(.invalidURL)
         }
 
         var request = URLRequest(url: url)
         request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
-        if withRemnawaveHWID {
+        request.setValue(AJSONParser.formatHeaderValue, forHTTPHeaderField: "X-Anywhere-Format")
+        if AWCore.getRemnawaveHWIDEnabled() {
             request.setValue(AWCore.getRemnawaveHWID(), forHTTPHeaderField: "x-hwid")
         }
 
@@ -63,16 +65,36 @@ nonisolated struct SubscriptionFetcher {
 
         let profileTitle = parseProfileTitle(from: httpResponse)
         let userInfo = parseSubscriptionUserInfo(from: httpResponse)
+        let iconLight = parseIcon(from: httpResponse, field: "aw-icon-light")
+        let iconDark = parseIcon(from: httpResponse, field: "aw-icon-dark")
+
+        if let rawString = String(data: data, encoding: .utf8), AJSONParser.looksLikeDocument(rawString) {
+            let document = try AJSONParser.parse(rawString)
+            guard !document.configurations.isEmpty else {
+                throw AnywhereError.subscription(.noConfigurations)
+            }
+            return Result(
+                configurations: document.configurations,
+                stableKeys: document.stableKeys,
+                name: document.name ?? profileTitle,
+                upload: document.upload ?? userInfo.upload,
+                download: document.download ?? userInfo.download,
+                total: document.total ?? userInfo.total,
+                expire: document.expire ?? userInfo.expire,
+                iconLight: document.iconLight ?? iconLight,
+                iconDark: document.iconDark ?? iconDark
+            )
+        }
 
         // Second, optional request for the `turn` and `push` blocks. Never fatal — see
         // fetchTurnEndpoint.
-        let (turnOutcome, push) = await fetchTurnEndpoint(url: url, withRemnawaveHWID: withRemnawaveHWID)
+        let (turnOutcome, push) = await fetchTurnEndpoint(url: url, withRemnawaveHWID: AWCore.getRemnawaveHWIDEnabled())
         let turn: TurnMetadata? = if case .loaded(let metadata) = turnOutcome { metadata } else { nil }
 
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
            let decodedString = String(data: decoded, encoding: .utf8),
-           ProxyConfiguration.parsableURLPrefixes.contains(where: { decodedString.contains($0) }) {
+           ProxyConfiguration.subscriptionEntryPrefixes.contains(where: { decodedString.contains($0) }) {
             bodyString = decodedString
         } else if let rawString = String(data: data, encoding: .utf8) {
             bodyString = rawString
@@ -87,6 +109,7 @@ nonisolated struct SubscriptionFetcher {
             }
             return Result(
                 configurations: result.configurations,
+                stableKeys: [:],
                 name: profileTitle,
                 upload: userInfo.upload,
                 download: userInfo.download,
@@ -94,15 +117,17 @@ nonisolated struct SubscriptionFetcher {
                 expire: userInfo.expire,
                 turn: turn,
                 push: push,
-                turnOutcome: turnOutcome
+                turnOutcome: turnOutcome,
+                iconLight: iconLight,
+                iconDark: iconDark
             )
         }
 
         let configurations = bodyString
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { ProxyConfiguration.canParseURL($0) }
-            .compactMap { try? ProxyConfiguration.parse(url: $0) }
+            .filter { ProxyConfiguration.canParseSubscriptionEntry($0) }
+            .compactMap { try? ProxyConfiguration.parseSubscriptionEntry(url: $0) }
 
         guard !configurations.isEmpty else {
             throw AnywhereError.subscription(.noConfigurations)
@@ -110,6 +135,7 @@ nonisolated struct SubscriptionFetcher {
 
         return Result(
             configurations: configurations,
+            stableKeys: [:],
             name: profileTitle,
             upload: userInfo.upload,
             download: userInfo.download,
@@ -117,7 +143,9 @@ nonisolated struct SubscriptionFetcher {
             expire: userInfo.expire,
             turn: turn,
             push: push,
-            turnOutcome: turnOutcome
+            turnOutcome: turnOutcome,
+            iconLight: iconLight,
+            iconDark: iconDark
         )
     }
 
@@ -249,6 +277,11 @@ nonisolated struct SubscriptionFetcher {
         return trimmed.isEmpty ? nil : decoded
     }
 
+    private static func parseIcon(from response: HTTPURLResponse?, field: String) -> Data? {
+        guard let value = response?.value(forHTTPHeaderField: field) else { return nil }
+        return Data(iconBase64: value)
+    }
+
     private static func parseSubscriptionUserInfo(from response: HTTPURLResponse?) -> (upload: Int64?, download: Int64?, total: Int64?, expire: Date?) {
         guard let value = response?.value(forHTTPHeaderField: "subscription-userinfo") else {
             return (nil, nil, nil, nil)
@@ -286,8 +319,6 @@ nonisolated struct SubscriptionFetcher {
         return (upload, download, total, expire)
     }
 }
-
-// MARK: - URLSession delegate that accepts self-signed certificates
 
 nonisolated private final class InsecureSessionDelegate: NSObject, URLSessionDelegate {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {

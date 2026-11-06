@@ -6,9 +6,10 @@
 //
 
 import Foundation
+import Synchronization
 import CryptoKit
 import Security
-import Synchronization
+import AnywhereQUIC
 
 nonisolated private let logger = AnywhereLogger(category: "QUICTLSHandler")
 
@@ -22,10 +23,10 @@ nonisolated struct QUICSessionTicket {
     let issued: CFAbsoluteTime
     let lifetime: UInt32
     let ticketAgeAdd: UInt32
+    let issuedInsecure: Bool
 }
 
 extension QUICSessionTicket {
-    /// The maximum cache lifetime allowed by RFC 8446.
     nonisolated static let maxLifetime = UInt32(604800)
 }
 
@@ -65,27 +66,43 @@ nonisolated enum QUICSessionTicketCache {
 nonisolated enum QUICTLSResult {
     case success
     case needMoreData
-    case error(Int32)
+    case error
 }
 
-nonisolated class QUICTLSHandler {
+nonisolated final class QUICTLSHandler: QUICTLSProvider {
 
     // MARK: - State
 
-    enum HandshakeState {
+    enum Phase: PhaseTransitionable {
         case initial
         case clientHelloSent
         case serverHelloReceived
-        case handshakeKeysInstalled
-        case serverFinishedReceived
         case completed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.initial, .clientHelloSent),
+                 (.clientHelloSent, .serverHelloReceived),
+                 (.serverHelloReceived, .completed):
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: - Properties
 
     private let serverName: String
     private let alpn: [String]
-    private var state: HandshakeState = .initial
+    private var phase: Phase = .initial
+
+    @discardableResult
+    private func transition(to new: Phase) -> Bool {
+        Phase.transition(&phase, to: new)
+    }
+
+    private var builtClientHello: Data?
 
     private var keyDerivation: TLS13KeyDerivation?
     private var handshakeSecret: Data?
@@ -96,16 +113,19 @@ nonisolated class QUICTLSHandler {
     private var privateKeyP256: P256.KeyAgreement.PrivateKey?
     private var privateKeyX25519: Curve25519.KeyAgreement.PrivateKey?
     private var clientRandom = Data(count: 32)
-
-    /// Concatenation of all handshake messages.
+    
     private var transcript = Data()
 
     private(set) var cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256
+    
+    private var actions: [QUICHandshakeAction] = []
 
-    /// Accumulates partial TLS messages across CRYPTO frames.
     private var cryptoBuffer = Data()
+    private var cryptoBufferLevel: QUICEncryptionLevel?
 
     private var serverCertificates: [SecCertificate] = []
+    private var serverCertificateData: [Data] = []
+    private var isAwaitingPeerVerification = false
     private var transcriptBeforeCertVerify: Data?
     private var transcriptBeforeServerFinished: Data?
     private var certificateVerifyAlgorithm: UInt16 = 0
@@ -116,11 +136,13 @@ nonisolated class QUICTLSHandler {
     private var offeredPSKCipherSuite: UInt16?
     private var pskAccepted = false
     private var pskBinderLength: Int = 0
+    private var offeredTicketInsecure = false
+    private var authenticatedInsecurely = false
 
     private(set) var peerQUICTransportParameters: Data?
 
     private(set) var negotiatedALPN: String?
-    
+
     private(set) var handshakeError: Error?
 
     // MARK: - Initialization
@@ -138,7 +160,7 @@ nonisolated class QUICTLSHandler {
     }
 
     func exportKeyingMaterial(label: String, context: Data, length: Int) throws -> Data {
-        guard state == .completed, let keyDerivation, let exporterMasterSecret, length > 0 else {
+        guard phase == .completed, let keyDerivation, let exporterMasterSecret, length > 0 else {
             throw AnywhereError.quic(.connectionFailed(detail: "TLS exporter unavailable"))
         }
         return keyDerivation.exportKeyingMaterial(
@@ -152,8 +174,12 @@ nonisolated class QUICTLSHandler {
     // MARK: - Build ClientHello
 
     func buildClientHello(transportParams: Data) -> Data? {
+        if phase == .clientHelloSent, let cached = builtClientHello {
+            return cached
+        }
+        guard phase == .initial else { return nil }
         guard let privateKeyP256, let privateKeyX25519 else { return nil }
-        
+
         serverCertificates.removeAll()
         transcriptBeforeCertVerify = nil
         certificateVerifySignature = nil
@@ -175,12 +201,14 @@ nonisolated class QUICTLSHandler {
         let cachedTicket = QUICSessionTicketCache.lookup(serverName: serverName, alpn: alpn)
 
         if let ticket = cachedTicket,
-           CFAbsoluteTimeGetCurrent() - ticket.issued < Double(ticket.lifetime) {
+           CFAbsoluteTimeGetCurrent() - ticket.issued < Double(ticket.lifetime),
+           !ticket.issuedInsecure || CertificatePolicy.allowInsecure {
             let (extData, binderLen) = buildPSKExtension(ticket: ticket)
             pskExtData = extData
             pskBinderLength = binderLen
             candidatePSK = ticket.psk
             candidateCipherSuite = ticket.cipherSuite
+            offeredTicketInsecure = ticket.issuedInsecure
         }
 
         var clientHello = TLSClientHelloBuilder.buildQUICClientHello(
@@ -200,38 +228,63 @@ nonisolated class QUICTLSHandler {
         }
 
         transcript.append(clientHello)
-        state = .clientHelloSent
+        builtClientHello = clientHello
+        transition(to: .clientHelloSent)
 
         return clientHello
     }
 
     // MARK: - Failure Reporting
-    
+
     private func fail(_ reason: String, error: Error? = nil) -> QUICTLSResult {
         if handshakeError == nil {
             handshakeError = error ?? AnywhereError.tls(.handshakeFailed(detail: reason))
         }
-        return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        return .error
     }
 
     // MARK: - Process Crypto Data
+    
+    func startHandshake(localTransportParameters: Data) throws -> [QUICHandshakeAction] {
+        guard let hello = buildClientHello(transportParams: localTransportParameters) else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "Unable to build QUIC ClientHello"))
+        }
+        return [.sendCryptoData(hello, level: .initial)]
+    }
 
-    /// Bytes that don't form a complete message remain buffered for the next call.
-    func processCryptoData(_ data: Data, level: ngtcp2_encryption_level,
-                           conn: OpaquePointer) -> QUICTLSResult {
+    func receiveCryptoData(_ data: Data, at level: QUICEncryptionLevel) throws -> [QUICHandshakeAction] {
+        actions.removeAll(keepingCapacity: true)
+        if case .error = processCryptoData(data, level: level) {
+            actions.removeAll(keepingCapacity: true)
+            throw handshakeError ?? AnywhereError.tls(.handshakeFailed(detail: "QUIC TLS handshake failed"))
+        }
+        let result = actions
+        actions.removeAll(keepingCapacity: true)
+        return result
+    }
+
+    private func processCryptoData(_ data: Data, level: QUICEncryptionLevel) -> QUICTLSResult {
+        if !cryptoBuffer.isEmpty, let bufferedLevel = cryptoBufferLevel, bufferedLevel != level {
+            return fail("handshake message split across encryption levels (\(bufferedLevel) → \(level))")
+        }
+        cryptoBufferLevel = level
         cryptoBuffer.append(data)
 
         while cryptoBuffer.count >= 4 {
+            guard !isAwaitingPeerVerification else {
+                return fail("handshake data after server Finished at level \(level)")
+            }
             let startIndex = cryptoBuffer.startIndex
             let msgType = cryptoBuffer[startIndex]
             let msgLen = (Int(cryptoBuffer[startIndex + 1]) << 16)
-                       | (Int(cryptoBuffer[startIndex + 2]) << 8)
-                       |  Int(cryptoBuffer[startIndex + 3])
-
-            // Length field is uint24; this cap is not RFC-specified but guards against
-            // huge allocations from erroneous lengths.
+            | (Int(cryptoBuffer[startIndex + 2]) << 8)
+            |  Int(cryptoBuffer[startIndex + 3])
+            
             guard msgLen <= 0xFFFF else {
-                return fail("handshake message too long (type \(msgType), \(msgLen) B, level \(level.rawValue))")
+                return fail("handshake message too long (type \(msgType), \(msgLen) B, level \(level))")
+            }
+            if let expected = QUICTLSHandler.expectedLevel(for: msgType), level != expected {
+                return fail("handshake message type \(msgType) at level \(level), expected \(expected)")
             }
             let totalLen = 4 + msgLen
 
@@ -245,8 +298,6 @@ nonisolated class QUICTLSHandler {
             if msgType == TLSHandshakeType.certificateVerify {
                 transcriptBeforeCertVerify = transcript
             } else if msgType == TLSHandshakeType.finished {
-                // The server Finished verify_data covers the transcript up to but not
-                // including the Finished itself.
                 transcriptBeforeServerFinished = transcript
             }
 
@@ -254,7 +305,7 @@ nonisolated class QUICTLSHandler {
 
             let body = message.count > 4 ? Data(message[4...]) : Data()
             let result = processHandshakeMessage(msgType: msgType, body: body,
-                                                  fullMessage: message, level: level, conn: conn)
+                                                  fullMessage: message, level: level)
             if case .error = result {
                 return result
             }
@@ -262,28 +313,49 @@ nonisolated class QUICTLSHandler {
 
         return .success
     }
+    
+    private static func expectedLevel(for msgType: UInt8) -> QUICEncryptionLevel? {
+        switch msgType {
+        case TLSHandshakeType.serverHello:
+            return .initial
+        case TLSHandshakeType.encryptedExtensions, TLSHandshakeType.certificate,
+             TLSHandshakeType.certificateRequest, TLSHandshakeType.certificateVerify,
+             TLSHandshakeType.finished:
+            return .handshake
+        case TLSHandshakeType.newSessionTicket:
+            return .application
+        default:
+            return nil
+        }
+    }
 
     // MARK: - Process Individual Messages
 
-    private func processHandshakeMessage(msgType: UInt8, body: Data, fullMessage: Data,
-                                          level: ngtcp2_encryption_level,
-                                          conn: OpaquePointer) -> QUICTLSResult {
+    private func processHandshakeMessage(
+        msgType: UInt8,
+        body: Data,
+        fullMessage: Data,
+        level: QUICEncryptionLevel
+    ) -> QUICTLSResult {
         switch msgType {
-        case TLSHandshakeType.serverHello:         return processServerHello(body, conn: conn)
-        case TLSHandshakeType.encryptedExtensions: return processEncryptedExtensions(body, conn: conn)
+        case TLSHandshakeType.serverHello:         return processServerHello(body)
+        case TLSHandshakeType.encryptedExtensions: return processEncryptedExtensions(body)
         case TLSHandshakeType.certificate:         return processCertificate(body)
         case TLSHandshakeType.certificateVerify:   return processCertificateVerify(body)
-        case TLSHandshakeType.finished:            return processServerFinished(body, conn: conn)
+        case TLSHandshakeType.finished:            return processServerFinished(body)
         case TLSHandshakeType.newSessionTicket:    return processNewSessionTicket(body)
         default:
-            logger.warning("[QUIC-TLS] Unknown message type: \(msgType)")
+            logger.warning("[QUIC-TLS] Unknown handshake message: \(msgType)")
             return .success
         }
     }
 
     // MARK: - ServerHello
 
-    private func processServerHello(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+    private func processServerHello(_ body: Data) -> QUICTLSResult {
+        guard phase == .clientHelloSent else {
+            return fail("ServerHello in phase \(phase)")
+        }
         guard body.count >= 35 else {
             return fail("ServerHello truncated (\(body.count) B)")
         }
@@ -415,8 +487,6 @@ nonisolated class QUICTLSHandler {
 
             keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
 
-            ngtcp2_conn_set_tls_native_handle(conn, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
-
             if !pskAccepted { activePSK = nil }
 
             let (hsSecret, hsKeys) = keyDerivation!.deriveHandshakeKeys(
@@ -427,9 +497,13 @@ nonisolated class QUICTLSHandler {
             clientHandshakeTrafficSecret = hsKeys.clientTrafficSecret
             serverHandshakeTrafficSecret = hsKeys.serverTrafficSecret
 
-            installHandshakeKeys(conn: conn, keys: hsKeys)
+            actions.append(.installHandshakeKeys(
+                cipherSuite: QUICCipherSuite(rawValue: cipherSuite)!,
+                readSecret: hsKeys.serverTrafficSecret,
+                writeSecret: hsKeys.clientTrafficSecret
+            ))
 
-            state = .serverHelloReceived
+            transition(to: .serverHelloReceived)
         } catch {
             return fail(String(format: "key agreement failed (group 0x%04x): %@", serverKeyShareGroup, String(describing: error)))
         }
@@ -439,7 +513,7 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - EncryptedExtensions
 
-    private func processEncryptedExtensions(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+    private func processEncryptedExtensions(_ body: Data) -> QUICTLSResult {
         guard body.count >= 2 else { return .success }
         let extLen = (Int(body[0]) << 8) | Int(body[1])
         var offset = 2
@@ -464,14 +538,7 @@ nonisolated class QUICTLSHandler {
                 let parameters = Data(body[offset..<(offset + extDataLen)])
                 peerQUICTransportParameters = parameters
 
-                _ = parameters.withUnsafeBytes { buffer -> Int32 in
-                    guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                        return -1
-                    }
-                    return ngtcp2_conn_decode_and_set_remote_transport_params(
-                        conn, pointer, parameters.count
-                    )
-                }
+                actions.append(.setRemoteTransportParameters(parameters))
             } else if extType == TLSExtensionType.applicationLayerProtocolNegotiation {
                 if extDataLen >= 3 {
                     let listLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
@@ -499,33 +566,27 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - Server Finished
 
-    private func processServerFinished(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
-        guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
+    private func processServerFinished(_ body: Data) -> QUICTLSResult {
+        guard phase == .serverHelloReceived else {
+            return fail("Finished in phase \(phase)")
+        }
+        guard let keyDerivation, handshakeSecret != nil, clientHandshakeTrafficSecret != nil else {
             return fail("internal: handshake secrets unavailable at server Finished")
         }
 
-        // A resumed handshake carries no Certificate/CertificateVerify; the server
-        // is authenticated by the PSK.
-        if !pskAccepted {
-            if let error = validateCertificate() {
-                logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
-                handshakeError = error
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
-            }
+        let allowInsecure = CertificatePolicy.allowInsecure
+        authenticatedInsecurely = pskAccepted ? offeredTicketInsecure : allowInsecure
 
-            // CertificateVerify is MANDATORY in a full TLS 1.3 handshake.
-            if !CertificatePolicy.allowInsecure {
-                if let error = TLS13CertificateVerifier.verify(
-                    transcriptBeforeCertVerify: transcriptBeforeCertVerify,
-                    algorithm: certificateVerifyAlgorithm,
-                    signature: certificateVerifySignature,
-                    serverCertificates: serverCertificates,
-                    keyDerivation: keyDerivation
-                ) {
-                    logger.warning("[QUIC-TLS] CertificateVerify rejected: \(error.localizedDescription)")
-                    handshakeError = error
-                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
-                }
+        if !pskAccepted, !allowInsecure {
+            if let error = TLS13CertificateVerifier.verify(
+                transcriptBeforeCertVerify: transcriptBeforeCertVerify,
+                algorithm: certificateVerifyAlgorithm,
+                signature: certificateVerifySignature,
+                serverCertificates: serverCertificates,
+                keyDerivation: keyDerivation
+            ) {
+                handshakeError = error
+                return .error
             }
         }
 
@@ -540,32 +601,56 @@ nonisolated class QUICTLSHandler {
             return fail("server Finished verification failed (transcript mismatch)")
         }
 
+        guard pskAccepted || allowInsecure else {
+            isAwaitingPeerVerification = true
+            actions.append(.verifyPeer(certificates: serverCertificateData))
+            return .success
+        }
+        return completeServerFinished()
+    }
+
+    func completePeerVerification(error: (any Error)?) throws -> [QUICHandshakeAction] {
+        guard isAwaitingPeerVerification else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "Unexpected peer verification result"))
+        }
+        isAwaitingPeerVerification = false
+        if let error {
+            handshakeError = error
+            throw error
+        }
+        actions.removeAll(keepingCapacity: true)
+        if case .error = completeServerFinished() {
+            actions.removeAll(keepingCapacity: true)
+            throw handshakeError ?? AnywhereError.tls(.handshakeFailed(detail: "QUIC TLS handshake failed"))
+        }
+        let result = actions
+        actions.removeAll(keepingCapacity: true)
+        return result
+    }
+
+    private func completeServerFinished() -> QUICTLSResult {
+        guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
+            return fail("internal: handshake secrets unavailable at server Finished")
+        }
+
         let application = keyDerivation.deriveApplicationMaterial(
             handshakeSecret: handshakeSecret, fullTranscript: transcript
         )
         exporterMasterSecret = application.exporterMasterSecret
-        installApplicationKeys(conn: conn, keys: application.keys)
+        actions.append(.installApplicationKeys(
+            cipherSuite: QUICCipherSuite(rawValue: cipherSuite)!,
+            readSecret: application.keys.serverTrafficSecret,
+            writeSecret: application.keys.clientTrafficSecret
+        ))
 
         let verifyData = keyDerivation.finishedPayload(
             trafficSecret: clientHTS, transcript: transcript
         )
         let finishedMessage = buildFinishedMessage(verifyData: verifyData)
 
-        let rv = finishedMessage.withUnsafeBytes { buffer -> Int32 in
-            guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return NGTCP2_ERR_CALLBACK_FAILURE
-            }
-            return ngtcp2_conn_submit_crypto_data(
-                conn, NGTCP2_ENCRYPTION_LEVEL_HANDSHAKE, pointer, finishedMessage.count
-            )
-        }
-
-        if rv != 0 {
-            return fail("submitting client Finished failed: \(rv) (\(String(cString: ngtcp2_strerror(rv))))")
-        }
-
-        ngtcp2_conn_tls_handshake_completed(conn)
-        state = .completed
+        actions.append(.sendCryptoData(finishedMessage, level: .handshake))
+        actions.append(.handshakeComplete)
+        transition(to: .completed)
 
         transcript.append(finishedMessage)
         let hsKey = SymmetricKey(data: handshakeSecret)
@@ -578,130 +663,6 @@ nonisolated class QUICTLSHandler {
         )
 
         return .success
-    }
-
-    // MARK: - Key Installation
-
-    private func installHandshakeKeys(conn: OpaquePointer, keys: TLS13HandshakeKeys) {
-        var context = ngtcp2_crypto_ctx()
-        ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
-        ngtcp2_conn_set_crypto_ctx(conn, &context)
-
-        let kd = keyDerivation!
-        let clientKey = kd.expandLabel(
-            secret: SymmetricKey(data: keys.clientTrafficSecret),
-            label: "quic key", context: Data(), length: kd.keyLength)
-        let clientIV = kd.expandLabel(
-            secret: SymmetricKey(data: keys.clientTrafficSecret),
-            label: "quic iv", context: Data(), length: 12)
-        let clientHP = kd.expandLabel(
-            secret: SymmetricKey(data: keys.clientTrafficSecret),
-            label: "quic hp", context: Data(), length: kd.keyLength)
-
-        let serverKey = kd.expandLabel(
-            secret: SymmetricKey(data: keys.serverTrafficSecret),
-            label: "quic key", context: Data(), length: kd.keyLength)
-        let serverIV = kd.expandLabel(
-            secret: SymmetricKey(data: keys.serverTrafficSecret),
-            label: "quic iv", context: Data(), length: 12)
-        let serverHP = kd.expandLabel(
-            secret: SymmetricKey(data: keys.serverTrafficSecret),
-            label: "quic hp", context: Data(), length: kd.keyLength)
-
-        var rxAeadCtx = ngtcp2_crypto_aead_ctx()
-        var txAeadCtx = ngtcp2_crypto_aead_ctx()
-        var rxHPCtx = ngtcp2_crypto_cipher_ctx()
-        var txHPCtx = ngtcp2_crypto_cipher_ctx()
-
-        _ = serverKey.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = clientKey.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = serverHP.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-        _ = clientHP.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
-                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-        _ = serverIV.withUnsafeBytes { ivBuf in
-            ngtcp2_conn_install_rx_handshake_key(conn, &rxAeadCtx,
-                ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &rxHPCtx)
-        }
-        _ = clientIV.withUnsafeBytes { ivBuf in
-            ngtcp2_conn_install_tx_handshake_key(conn, &txAeadCtx,
-                ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &txHPCtx)
-        }
-    }
-
-    private func installApplicationKeys(conn: OpaquePointer, keys: TLS13ApplicationKeys) {
-        let kd = keyDerivation!
-        var context = ngtcp2_crypto_ctx()
-        ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
-
-        let hsKey = SymmetricKey(data: handshakeSecret!)
-        let derivedHS = kd.deriveSecret(secret: hsKey, label: "derived", messages: Data())
-        let (_, masterKey) = kd.extract(inputKeyMaterial: Data(repeating: 0, count: kd.hashLength), salt: derivedHS)
-
-        let serverATS = kd.deriveSecret(secret: masterKey, label: "s ap traffic", messages: transcript)
-        let clientATS = kd.deriveSecret(secret: masterKey, label: "c ap traffic", messages: transcript)
-
-        let serverATSKey = SymmetricKey(data: serverATS)
-        let rxKey = kd.expandLabel(secret: serverATSKey, label: "quic key", context: Data(), length: kd.keyLength)
-        let rxIV = kd.expandLabel(secret: serverATSKey, label: "quic iv", context: Data(), length: 12)
-        let rxHP = kd.expandLabel(secret: serverATSKey, label: "quic hp", context: Data(), length: kd.keyLength)
-
-        let clientATSKey = SymmetricKey(data: clientATS)
-        let txKey = kd.expandLabel(secret: clientATSKey, label: "quic key", context: Data(), length: kd.keyLength)
-        let txIV = kd.expandLabel(secret: clientATSKey, label: "quic iv", context: Data(), length: 12)
-        let txHP = kd.expandLabel(secret: clientATSKey, label: "quic hp", context: Data(), length: kd.keyLength)
-
-        var rxAeadCtx = ngtcp2_crypto_aead_ctx()
-        var rxHPCtx = ngtcp2_crypto_cipher_ctx()
-        var txAeadCtx = ngtcp2_crypto_aead_ctx()
-        var txHPCtx = ngtcp2_crypto_cipher_ctx()
-
-        _ = rxKey.withUnsafeBytes { buffer in
-            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = rxHP.withUnsafeBytes { buffer in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-        _ = txKey.withUnsafeBytes { buffer in
-            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
-        }
-        _ = txHP.withUnsafeBytes { buffer in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
-        }
-
-        _ = serverATS.withUnsafeBytes { secretBuf in
-            rxIV.withUnsafeBytes { ivBuf in
-                ngtcp2_conn_install_rx_key(conn,
-                    secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,
-                    &rxAeadCtx,
-                    ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12,
-                    &rxHPCtx)
-            }
-        }
-
-        _ = clientATS.withUnsafeBytes { secretBuf in
-            txIV.withUnsafeBytes { ivBuf in
-                ngtcp2_conn_install_tx_key(conn,
-                    secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,
-                    &txAeadCtx,
-                    ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12,
-                    &txHPCtx)
-            }
-        }
     }
 
     // MARK: - Session Tickets
@@ -742,7 +703,8 @@ nonisolated class QUICTLSHandler {
         let cached = QUICSessionTicket(
             ticket: ticket, nonce: nonce, psk: psk,
             cipherSuite: cipherSuite, issued: CFAbsoluteTimeGetCurrent(),
-            lifetime: lifetime, ticketAgeAdd: ticketAgeAdd
+            lifetime: lifetime, ticketAgeAdd: ticketAgeAdd,
+            issuedInsecure: authenticatedInsecurely
         )
         QUICSessionTicketCache.store(cached, serverName: serverName, alpn: alpn)
 
@@ -750,10 +712,10 @@ nonisolated class QUICTLSHandler {
     }
 
     // MARK: - PSK Extension Building
-
-    /// Binder is left zero-filled here; patched in later by patchPSKBinder.
+    
     private func buildPSKExtension(ticket: QUICSessionTicket) -> (extensionData: Data, binderLen: Int) {
-        let ticketAgeMs = UInt32((CFAbsoluteTimeGetCurrent() - ticket.issued) * 1000)
+        let ageMs = max(0, (CFAbsoluteTimeGetCurrent() - ticket.issued) * 1000)
+        let ticketAgeMs = UInt32(min(ageMs, Double(UInt32.max)))
         let obfuscatedAge = ticketAgeMs &+ ticket.ticketAgeAdd
 
         var identities = Data()
@@ -789,8 +751,7 @@ nonisolated class QUICTLSHandler {
 
         return (ext, binderLen)
     }
-
-    /// Replaces the zero-filled binder placeholder with the computed PSK binder.
+    
     private func patchPSKBinder(clientHello: inout Data, binderLen: Int, psk: Data, cipherSuite ticketCipherSuite: UInt16) {
         let kd = TLS13KeyDerivation(cipherSuite: ticketCipherSuite)
 
@@ -802,9 +763,7 @@ nonisolated class QUICTLSHandler {
             context: Data(),
             length: kd.hashLength
         )
-
-        // Strip the single binder (binderLen) plus its 1-byte length and the
-        // 2-byte binder-list length before hashing the truncated ClientHello.
+        
         let truncatedSuffix = binderLen + 3
         guard clientHello.count >= truncatedSuffix else { return }
         let partial = Data(clientHello[0..<(clientHello.count - truncatedSuffix)])
@@ -831,6 +790,7 @@ nonisolated class QUICTLSHandler {
 
     private func parseTLS13CertificateMessage(_ body: Data) {
         serverCertificates.removeAll()
+        serverCertificateData.removeAll()
         guard body.count >= 4 else { return }
 
         var offset = 0
@@ -854,6 +814,7 @@ nonisolated class QUICTLSHandler {
 
             if let cert = SecCertificateCreateWithData(nil, certData as CFData) {
                 serverCertificates.append(cert)
+                serverCertificateData.append(certData)
             }
 
             guard offset + 2 <= listEnd else { break }
@@ -869,8 +830,7 @@ nonisolated class QUICTLSHandler {
             return fail("CertificateVerify truncated (\(body.count) B)")
         }
         certificateVerifyAlgorithm = UInt16(body[0]) << 8 | UInt16(body[1])
-
-        // Parse-time sanity check: must be an algorithm we offered.
+        
         guard TLSClientHelloBuilder.quicSignatureAlgorithms.contains(certificateVerifyAlgorithm) else {
             return fail(String(format: "CertificateVerify uses signature algorithm 0x%04x", certificateVerifyAlgorithm))
         }
@@ -885,8 +845,9 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - Certificate Validation
 
-    private func validateCertificate() -> Error? {
-        switch CertificatePolicy.verify(chain: serverCertificates, serverName: serverName) {
+    static func verifyPeer(certificates: [Data], serverName: String) async -> Error? {
+        let chain = certificates.compactMap { SecCertificateCreateWithData(nil, $0 as CFData) }
+        switch await CertificatePolicy.verify(chain: chain, serverName: serverName) {
         case .trusted:
             return nil
         case .rejected(let reason):

@@ -9,9 +9,6 @@ import CryptoKit
 import Foundation
 
 nonisolated extension UUID {
-    /// Parses a UUID using the VLESS user-ID convention:
-    /// length 32–36 is hex-decoded; length 1–30 is derived as
-    /// `SHA1(zero_uuid || input)[0..<16]` with RFC 4122 v5 + variant bits stamped.
     init?(vlessString: String) {
         let length = vlessString.utf8.count
 
@@ -29,9 +26,15 @@ nonisolated extension UUID {
 
         guard length >= 1, length <= 30 else { return nil }
 
+        self = UUID(namespace: Self.null, name: vlessString)
+    }
+
+    private static let null = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+    init(namespace: UUID, name: String) {
         var hasher = Insecure.SHA1()
-        hasher.update(data: Data(count: 16))
-        hasher.update(data: Data(vlessString.utf8))
+        withUnsafeBytes(of: namespace.uuid) { hasher.update(bufferPointer: $0) }
+        hasher.update(data: Data(name.utf8))
         var bytes = Array(hasher.finalize().prefix(16))
         bytes[6] = (bytes[6] & 0x0f) | (5 << 4)
         bytes[8] = (bytes[8] & 0x3f) | 0x80
@@ -41,8 +44,12 @@ nonisolated extension UUID {
     private static func from(bytes: Data) -> UUID {
         bytes.withUnsafeBytes { raw in
             let bytePointer = raw.bindMemory(to: UInt8.self).baseAddress!
-            return UUID(uuid: (bytePointer[0], bytePointer[1], bytePointer[2], bytePointer[3], bytePointer[4], bytePointer[5], bytePointer[6], bytePointer[7],
-                               bytePointer[8], bytePointer[9], bytePointer[10], bytePointer[11], bytePointer[12], bytePointer[13], bytePointer[14], bytePointer[15]))
+            return UUID(uuid: (
+                bytePointer[0], bytePointer[1], bytePointer[2], bytePointer[3],
+                bytePointer[4], bytePointer[5], bytePointer[6], bytePointer[7],
+                bytePointer[8], bytePointer[9], bytePointer[10], bytePointer[11],
+                bytePointer[12], bytePointer[13], bytePointer[14], bytePointer[15]
+            ))
         }
     }
 }

@@ -10,26 +10,23 @@ import Foundation
 nonisolated private let logger = AnywhereLogger(category: "LatencyTester")
 
 nonisolated enum LatencyTester {
-
     private static let timeout: Duration = .seconds(10)
 
     private static let latencyHost = "captive.apple.com"
     private static let latencyPort: UInt16 = 80
     
     nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
-        // Keep probe timings out of the live dial/handshake gauges.
         ConnectionMetrics.shared.suspendRecording()
         defer { ConnectionMetrics.shared.resumeRecording() }
-
-        let testConfiguration = await resolvedConfiguration(configuration)
 
         do {
             let latencyMilliseconds = try await withThrowingTaskGroup(of: Int.self) { group in
                 group.addTask {
-                    try await Self.performTest(testConfiguration)
+                    let testConfiguration = await Self.resolvedConfiguration(configuration)
+                    return try await Self.performTest(testConfiguration)
                 }
                 group.addTask {
-                    try await Task.sleep(for: Self.timeout)
+                    try await Task.sleep(for: Self.timeout, precision: .relaxed)
                     throw CancellationError()
                 }
 
@@ -38,49 +35,39 @@ nonisolated enum LatencyTester {
                 return result
             }
             return .success(latencyMilliseconds)
-        } catch let error as AnywhereError {
-            if case .tls(.certificateValidationFailed) = error {
-                logger.error("Latency test insecure for \(configuration.name): \(error.localizedDescription)")
-                return .insecure
+        } catch is CancellationError {
+            if !Task.isCancelled {
+                logger.error("[Latency] \(configuration.name): Timed out")
             }
-            logger.error("Latency test failed for \(configuration.name): \(error.localizedDescription)")
             return .failed
         } catch {
-            logger.error("Latency test failed for \(configuration.name): \(error.localizedDescription)")
+            logger.report("[Latency] \(configuration.name)", error: error)
+            if case AnywhereError.tls(.certificateValidationFailed) = error {
+                return .insecure
+            }
             return .failed
         }
     }
 
     // MARK: - Private
-    
+
     private static func resolvedConfiguration(_ configuration: ProxyConfiguration) async -> ProxyConfiguration {
-        var resolvedChain: [ProxyConfiguration]?
-        if let chain = configuration.chain {
-            var hops: [ProxyConfiguration] = []
-            hops.reserveCapacity(chain.count)
-            for hop in chain {
-                hops.append(await resolvedConfiguration(hop))
-            }
-            resolvedChain = hops
+        guard let chain = configuration.chain, let entry = chain.first else {
+            guard !configuration.isDirect else { return configuration }
+            return configuration.withResolvedIP(
+                await DNSResolver.proxies.resolveHost(configuration.serverAddress, forceFresh: true)
+            )
         }
-        return ProxyConfiguration(
-            id: configuration.id,
-            name: configuration.name,
-            serverAddress: configuration.serverAddress,
-            serverPort: configuration.serverPort,
-            resolvedIP: await DNSResolver.shared.resolveHost(configuration.serverAddress, forceFresh: true),
-            subscriptionId: configuration.subscriptionId,
-            outbound: configuration.outbound,
-            chain: resolvedChain
+        let resolvedEntry = entry.withResolvedIP(
+            await DNSResolver.proxies.resolveHost(entry.serverAddress, forceFresh: true)
         )
+        return configuration.withChain([resolvedEntry] + chain.dropFirst())
     }
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
-        await DNSResolver.shared.prewarm(configuration.serverAddress)
-        if let chain = configuration.chain {
-            for proxy in chain {
-                await DNSResolver.shared.prewarm(proxy.serverAddress)
-            }
+        let entry = configuration.chain?.first ?? configuration
+        if !entry.isDirect {
+            _ = await DNSResolver.proxies.resolveAll(entry.serverAddress)
         }
 
         let client = ProxyClient(configuration: configuration, useResolvedAddressForDirectDial: true)
@@ -88,12 +75,10 @@ nonisolated enum LatencyTester {
         do {
             let ms = try await withTaskCancellationHandler {
                 let proxyConnection = try await Self.establishWarmedConnection(client: client)
-
-                // Phase 3 (untimed): send the request.
+                
                 let httpRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
                 try await proxyConnection.send(httpRequest)
-
-                // Phase 4 (timed): timer starts after the send completes.
+                
                 let clock = ContinuousClock()
                 let start = clock.now
 
@@ -120,10 +105,8 @@ nonisolated enum LatencyTester {
     }
     
     private static func establishWarmedConnection(client: ProxyClient) async throws -> ProxyConnection {
-        // Phase 1 (untimed): TCP/TLS/outbound handshake.
         let proxyConnection = try await client.connect(to: Self.latencyHost, port: Self.latencyPort)
-
-        // Phase 2 (untimed): warmup request primes the proxy-to-target connection.
+        
         let warmupRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
         try await proxyConnection.send(warmupRequest)
 

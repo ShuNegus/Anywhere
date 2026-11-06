@@ -9,25 +9,39 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated protocol TCPTransportEngine: AnyObject, Sendable {
-    func send(_ data: Data) async throws
-    func receive(atMost maxLength: Int) async throws -> (content: Data, endOfStream: Bool)
-}
-
 nonisolated final class TCPTransport: ByteTransport, Sendable {
 
     // MARK: Constants
 
     private static let connectTimeout: UInt32 = 16
-    private static let maxReceiveLength = 65535
+    private static let maxReceiveLength = 128 * 1024
 
     // MARK: State
 
-    private struct State {
-        var engine: (any TCPTransportEngine)?
+    enum Phase: PhaseTransitionable {
+        case idle
+        case connecting
+        case ready
+        case cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .ready):
+                return true
+            case (_, .cancelled):
+                return old != .cancelled
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .idle
+
+        var engine: TCPTransportEngine?
         var flowSlot: FlowSlot?
-        var ready = false
-        var cancelled = false
         var failure: AnywhereError?
         var eofLatched = false
     }
@@ -36,15 +50,15 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
 
     private let host: String
     private let port: UInt16
-    private let resolvesViaProxyDNS: Bool
+    private let resolution: DialResolution
     let endpointDescription: String
 
     private let dialAttempt: ConnectionMetrics.Attempt?
-    
-    init(host: String, port: UInt16, resolvesViaProxyDNS: Bool = false) {
+
+    init(host: String, port: UInt16, resolution: DialResolution = .system) {
         self.host = host
         self.port = port
-        self.resolvesViaProxyDNS = resolvesViaProxyDNS
+        self.resolution = resolution
         self.endpointDescription = "\(host):\(port)"
         self.dialAttempt = ConnectionMetrics.currentAttempt
     }
@@ -54,7 +68,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     }
 
     var isReady: Bool {
-        state.withLock { $0.ready && !$0.cancelled && $0.failure == nil }
+        state.withLock { $0.phase == .ready }
     }
 
     // MARK: - Connect
@@ -63,19 +77,14 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "invalid port \(port)"))
         }
-        let endpointHost = await NWEndpoint.Host.dialHost(for: host, viaProxyDNS: resolvesViaProxyDNS)
+        let endpointHost = try await NWEndpoint.Host.dialHost(for: host, resolution: resolution)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(context: "[TCP] \(endpointDescription)")
-        
-        let engine: any TCPTransportEngine
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            engine = ModernTCPEngine(endpoint: endpoint, connectTimeout: Self.connectTimeout)
-        } else {
-            engine = LegacyTCPEngine(endpoint: endpoint, connectTimeout: Self.connectTimeout)
-        }
+
+        let engine = TCPTransportEngine(endpoint: endpoint, connectTimeout: Self.connectTimeout)
 
         let live: Bool = state.withLock { state in
-            guard !state.cancelled else { return false }
+            guard state.transition(to: .connecting) else { return false }
             state.flowSlot = slot
             state.engine = engine
             return true
@@ -89,11 +98,13 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
             do {
                 try await engine.send(initialData)
             } catch {
+                let cause = latchedFailure() ?? AnywhereError.networkFailure(error, operation: .connect)
                 cancel()
-                throw latchedFailure() ?? AnywhereError.networkFailure(error, operation: .connect)
+                throw cause
             }
         }
-        state.withLock { $0.ready = true }
+        let published: Bool = state.withLock { $0.transition(to: .ready) }
+        guard published else { throw AnywhereError.transport(.terminated) }
     }
 
     // MARK: - ByteTransport
@@ -132,25 +143,24 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     }
 
     func cancel() {
-        // Engines tear down on release; in-flight operations end via task cancellation.
-        let (_, slot): ((any TCPTransportEngine)?, FlowSlot?) = state.withLock { state in
+        let (engine, slot): (TCPTransportEngine?, FlowSlot?) = state.withLock { state in
             if state.failure == nil { state.failure = .transport(.terminated) }
-            state.cancelled = true
-            state.ready = false
+            state.transition(to: .cancelled)
             let pair = (state.engine, state.flowSlot)
             state.engine = nil
             state.flowSlot = nil
             return pair
         }
+        engine?.cancel()
         slot?.release()
     }
 
     // MARK: - Helpers
 
-    private func activeEngine() throws -> any TCPTransportEngine {
+    private func activeEngine() throws -> TCPTransportEngine {
         try state.withLock { state in
             if let failure = state.failure { throw failure }
-            if state.cancelled { throw AnywhereError.transport(.terminated) }
+            if state.phase == .cancelled { throw AnywhereError.transport(.terminated) }
             guard let engine = state.engine else { throw AnywhereError.transport(.notConnected) }
             return engine
         }
@@ -161,28 +171,68 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     }
 }
 
-// MARK: - Modern engine
+// MARK: - Engine
 
-@available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)
-nonisolated final class ModernTCPEngine: TCPTransportEngine, Sendable {
-
-    private let connection: NetworkConnection<TCP>
+nonisolated final class TCPTransportEngine: Sendable {
+    private let connection: NWConnection
+    private let queue = DispatchQueue(label: "su.smd.Anywhere.TCPTransport", qos: .userInitiated)
+    private let stall = NWStallLatch()
 
     init(endpoint: NWEndpoint, connectTimeout: UInt32) {
-        connection = NetworkConnection(to: endpoint) {
-            TCP()
-                .noDelay(true)
-                .keepalive(idleTimeInSeconds: 30, count: 3, intervalInSeconds: 10)
-                .connectionTimeout(connectTimeout)
-        }
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.noDelay = true
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 30
+        tcpOptions.keepaliveCount = 3
+        tcpOptions.keepaliveInterval = 10
+        tcpOptions.connectionTimeout = Int(connectTimeout)
+        connection = NWConnection(to: endpoint, using: NWParameters(tls: nil, tcp: tcpOptions))
+        stall.watch(connection)
+        connection.start(queue: queue)
+    }
+
+    deinit {
+        connection.cancel()
+    }
+
+    func cancel() {
+        connection.cancel()
     }
 
     func send(_ data: Data) async throws {
-        try await connection.send(data, endOfStream: false)
+        let connection = connection
+        let stall = stall
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error {
+                        continuation.resume(throwing: stall.failure(for: error, operation: .send))
+                    } else {
+                        continuation.resume()
+                    }
+                })
+            }
+        } onCancel: {
+            connection.cancel()
+        }
     }
 
     func receive(atMost maxLength: Int) async throws -> (content: Data, endOfStream: Bool) {
-        let message = try await connection.receive(atLeast: 1, atMost: maxLength)
-        return (message.content, message.metadata.endOfStream)
+        let connection = connection
+        let stall = stall
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(content: Data, endOfStream: Bool), any Error>) in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { content, context, isComplete, error in
+                    if let error {
+                        continuation.resume(throwing: stall.failure(for: error, operation: .receive))
+                        return
+                    }
+                    let endOfStream = isComplete && (context == nil || context?.isFinal == true)
+                    continuation.resume(returning: (content ?? Data(), endOfStream))
+                }
+            }
+        } onCancel: {
+            connection.cancel()
+        }
     }
 }

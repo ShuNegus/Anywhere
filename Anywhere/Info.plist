@@ -6,9 +6,19 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
+			<string>Anywhere JSON</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>su.smd.Anywhere-JSON</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
 			<string>Anywhere Routing Rule Set</string>
 			<key>LSHandlerRank</key>
-			<string>Default</string>
+			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>su.smd.Anywhere-Routing-Rule-Set</string>
@@ -18,10 +28,20 @@
 			<key>CFBundleTypeName</key>
 			<string>Anywhere MITM Rule Set</string>
 			<key>LSHandlerRank</key>
-			<string>Default</string>
+			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>su.smd.Anywhere-MITM-Rule-Set</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Anywhere Module</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>su.smd.Anywhere-Module</string>
 			</array>
 		</dict>
 	</array>
@@ -29,7 +49,7 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.anywhere</string>
 			<key>CFBundleURLSchemes</key>
@@ -39,7 +59,17 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>su.smd.Anywhere.scheme.ajson</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ajson</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.nowhere</string>
 			<key>CFBundleURLSchemes</key>
@@ -49,7 +79,7 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.vless</string>
 			<key>CFBundleURLSchemes</key>
@@ -59,7 +89,7 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.hysteria2</string>
 			<key>CFBundleURLSchemes</key>
@@ -69,7 +99,7 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.hy2</string>
 			<key>CFBundleURLSchemes</key>
@@ -79,7 +109,17 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>su.smd.Anywhere.scheme.sudoku</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>sudoku</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.trojan</string>
 			<key>CFBundleURLSchemes</key>
@@ -89,7 +129,7 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.anytls</string>
 			<key>CFBundleURLSchemes</key>
@@ -99,7 +139,7 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>su.smd.Anywhere.scheme.ss</string>
 			<key>CFBundleURLSchemes</key>
@@ -109,12 +149,12 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
-			<string>su.smd.Anywhere.scheme.sudoku</string>
+			<string>su.smd.Anywhere.scheme.rfc</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>sudoku</string>
+				<string>rfc</string>
 			</array>
 		</dict>
 	</array>

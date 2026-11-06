@@ -6,53 +6,23 @@
 //
 
 import Foundation
-import Network
-import CryptoKit
 import Synchronization
+import Network
+import AnywhereQUIC
 
 private struct WeakConnectionBox: Sendable {
     weak var value: QUICConnection?
 }
 
-extension QUICConnection {
+extension QUICConnectionCore {
 
     // MARK: Connect
-    
-    nonisolated func connect() async throws {
-        let dialAttempt = ConnectionMetrics.currentAttempt
-        let resolvedIPs: [String] = transport == nil ? await DNSResolver.shared.resolveAll(host) : []
-        try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.state == .idle else {
-                continuation.resume(throwing: AnywhereError.quic(.connectionFailed(detail: "Invalid state")))
-                return
-            }
-            QUICCrypto.registerCallbacks()
-            me.state = .connecting
-            me.dialAttempt = dialAttempt
-            me.connectContinuation = continuation
-            me.setupUDP(resolvedIPs: resolvedIPs)
-        }
-    }
-    
+
     func finishConnect(_ error: Error?) {
         guard let continuation = connectContinuation else { return }
         connectContinuation = nil
         if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
-    
-    nonisolated func exportKeyingMaterial(label: String, context: Data, length: Int) async throws -> Data {
-        let result: Result<Data, Error> = await bridge.run { [weak self] in
-            guard let self else { return .failure(AnywhereError.quic(.closed(graceful: false))) }
-            return self.assumeIsolated { connection in
-                guard connection.state == .connected, let tls = connection.tlsHandler else {
-                    return .failure(AnywhereError.quic(.closed(graceful: false)))
-                }
-                return Result { try tls.exportKeyingMaterial(label: label, context: context, length: length) }
-            }
-        }
-        return try result.get()
-    }
-
 
     // MARK: UDP
 
@@ -70,55 +40,53 @@ extension QUICConnection {
             guard remoteAddr.ss_family != 0 else {
                 throw AnywhereError.quic(.connectionFailed(detail: "DNS lookup failed for \(host)"))
             }
-            let carrier = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
+            let carrier = QUICDatagramCarrier(obfuscator: obfuscator, executor: executor)
             let remote = remoteAddr
             var local = localAddr
-            try carrier.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &local) }
+            try carrier.connect(remoteAddr: remote, localAddr: &local)
             localAddr = local
             self.carrier = carrier
-            try initializeNgtcp2()
-            state = .handshaking
+            try initializeQUIC()
+            transition(to: .handshaking)
             armActiveCarrier(carrier, localAddr: localAddr)
             writeToUDP()
             rescheduleTimer()
         } catch {
-            state = .closed
-            closeCarrier()
-            finishConnect(error)
+            performTeardown(error: error)
         }
     }
 
     func setupTunnelTransport(transport: QUICDatagramTransport) {
         do {
             configurePlaceholderAddrs()
-            try initializeNgtcp2()
-            state = .handshaking
+            try initializeQUIC()
+            transition(to: .handshaking)
             startTransportIO(transport: transport)
             writeToUDP()
             rescheduleTimer()
         } catch {
-            state = .closed
-            transport.cancel()
-            finishConnect(error)
+            performTeardown(error: error)
         }
     }
-    
+
     func startTransportIO(transport: QUICDatagramTransport) {
         let localAddr = self.localAddr
-        let bridge = self.bridge
         let obfuscator = self.obfuscator
 
         var sealStream: AsyncStream<Data>?
         if obfuscator != nil {
-            let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
+            let (stream, continuation) = AsyncStream.makeStream(
+                of: Data.self,
+                bufferingPolicy: .bufferingOldest(Self.maxQueuedTransportDatagrams)
+            )
             transportSealContinuation = continuation
             sealStream = stream
         }
 
-        let host = WeakConnectionBox(value: self)
+        let host = WeakConnectionBox(value: owner)
         rootTask = Task {
             await Self.runTransportDriver(
-                host: host, bridge: bridge, transport: transport, obfuscator: obfuscator,
+                host: host, transport: transport, obfuscator: obfuscator,
                 sealStream: sealStream, localAddr: localAddr
             )
         }
@@ -127,7 +95,6 @@ extension QUICConnection {
     @concurrent
     private static func runTransportDriver(
         host: WeakConnectionBox,
-        bridge: NGTCP2ConcurrencyBridge,
         transport: QUICDatagramTransport,
         obfuscator: QUICPacketObfuscator?,
         sealStream: AsyncStream<Data>?,
@@ -137,7 +104,6 @@ extension QUICConnection {
             group.addTask {
                 await Self.runTransportReceiveLoop(
                     host: host,
-                    bridge: bridge,
                     transport: transport,
                     obfuscator: obfuscator,
                     localAddr: localAddr
@@ -153,7 +119,6 @@ extension QUICConnection {
 
     private static func runTransportReceiveLoop(
         host: WeakConnectionBox,
-        bridge: NGTCP2ConcurrencyBridge,
         transport: QUICDatagramTransport,
         obfuscator: QUICPacketObfuscator?,
         localAddr: sockaddr_storage
@@ -161,7 +126,7 @@ extension QUICConnection {
         do {
             while true {
                 guard let data = try await transport.receiveDatagram() else {
-                    bridge.enqueue { host.value?.assumeIsolated { $0.handleTransportClosed(nil) } }
+                    host.value?.update { $0.handleTransportClosed(nil) }
                     return
                 }
                 guard !data.isEmpty else { continue }
@@ -171,10 +136,10 @@ extension QUICConnection {
                     packet = opened
                 }
                 let datagram = packet
-                bridge.enqueue { host.value?.assumeIsolated { $0.handleReceivedPacket(datagram, localAddr: localAddr) } }
+                host.value?.update { $0.handleReceivedPacket(datagram, localAddr: localAddr) }
             }
         } catch {
-            bridge.enqueue { host.value?.assumeIsolated { $0.handleTransportClosed(error) } }
+            host.value?.update { $0.handleTransportClosed(error) }
         }
     }
 
@@ -192,7 +157,7 @@ extension QUICConnection {
         finishConnect(err)
         close(error: err)
     }
-    
+
     func configurePlaceholderAddrs() {
         addrLen = MemoryLayout<sockaddr_in>.size
         withUnsafeMutablePointer(to: &remoteAddr) { storage in
@@ -215,12 +180,16 @@ extension QUICConnection {
     }
 
     func closeCarrier() {
-        carrier?.assumeIsolated { $0.close() }
+        carrier?.close()
         carrier = nil
-        migratingCarrier?.assumeIsolated { $0.close() }
-        clearMigrationState()
+        if case .proactiveProbing(let target, _) = migration {
+            target.close()
+        } else if case .proactiveValidating(let target, _) = migration {
+            target.close()
+        }
+        setMigration(.none)
     }
-    
+
     func populateRemoteAddr(resolvedIPs: [String]) {
         var addr4 = in_addr()
         if inet_pton(AF_INET, host, &addr4) == 1 {
@@ -302,86 +271,52 @@ extension QUICConnection {
     }
 
 
-    // MARK: ngtcp2 Init
+    // MARK: QUIC engine
 
-    func initializeNgtcp2() throws {
-        generateConnectionID(&dcid, length: 16)
-        generateConnectionID(&scid, length: 16)
-
-        tlsHandler = QUICTLSHandler(serverName: serverName, alpn: alpn)
-
-        var callbacks = makeCallbacks(datagramsEnabled: datagramsEnabled)
-
-        var settings = defaultSettings()
-        settings.initial_ts = currentTimestamp()
-        settings.max_tx_udp_payload_size = (transport != nil) ? Self.chainedMaxUDPPayload : Self.maxUDPPayload
-        settings.cc_algo = tuning.ngtcp2CCAlgo
-        settings.max_stream_window = tuning.maxStreamWindow
-        settings.max_window = tuning.maxWindow
-        settings.handshake_timeout = tuning.handshakeTimeout
-        var parameters = defaultTransportParams()
-        parameters.initial_max_streams_bidi = tuning.initialMaxStreamsBidi
-        parameters.initial_max_streams_uni = tuning.initialMaxStreamsUni
-        parameters.initial_max_data = tuning.initialMaxData
-        parameters.initial_max_stream_data_bidi_local = tuning.initialMaxStreamDataBidiLocal
-        parameters.initial_max_stream_data_bidi_remote = tuning.initialMaxStreamDataBidiRemote
-        parameters.initial_max_stream_data_uni = tuning.initialMaxStreamDataUni
-        parameters.max_idle_timeout = tuning.maxIdleTimeout
-        parameters.disable_active_migration = migrationEnabled ? 0 : 1
-        if datagramsEnabled {
-            parameters.max_datagram_frame_size = Self.maxDatagramFrameSize
+    func initializeQUIC() throws {
+        let tls = QUICTLSHandler(serverName: serverName, alpn: alpn)
+        let payloadSize = transport != nil ? Self.chainedMaxUDPPayload : directMaxUDPPayload
+        var probes = Self.pmtudProbes.filter { $0 <= payloadSize }
+        if let maximumProbe = UInt16(exactly: payloadSize),
+           maximumProbe > UInt16(Self.chainedMaxUDPPayload),
+           !probes.contains(maximumProbe) {
+            probes.append(maximumProbe)
         }
-
-        configureConnRef(&connRefStorage)
-
-        let usePMTUD = (transport == nil)
-        let (conn, rv) = createClientConn(
-            dcid: &dcid, scid: &scid,
-            localAddr: &localAddr, remoteAddr: &remoteAddr, addrLen: addrLen,
-            version: UInt32(NGTCP2_PROTO_VER_V1),
-            callbacks: &callbacks, settings: &settings,
-            pmtudProbes: usePMTUD ? Self.pmtudProbes : nil,
-            params: &parameters, connRef: &connRefStorage
+        let settings = QUICSettings(
+            maxSendUDPPayloadSize: payloadSize,
+            handshakeTimeout: .nanoseconds(Int64(tuning.handshakeTimeout)),
+            maxStreamWindow: tuning.maxStreamWindow,
+            maxConnectionWindow: tuning.maxWindow,
+            pmtudProbes: probes,
+            isPMTUDEnabled: transport == nil,
+            keepAliveTimeout: .nanoseconds(Int64(tuning.keepAliveTimeout)),
+            localConnectionIDLength: 16,
+            maxPendingDatagrams: Self.maxPendingDatagrams
         )
-        guard rv == 0, let connectionOpaquePointer = conn else {
-            throw AnywhereError.quic(.connectionFailed(detail: "ngtcp2_conn_client_new: \(rv)"))
-        }
-        self.connectionOpaquePointer = connectionOpaquePointer
-        
-        setKeepAliveTimeout(connectionOpaquePointer, tuning.keepAliveTimeout)
-
-        setTLSNativeHandle(
-            connectionOpaquePointer,
-            UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256))
+        let parameters = QUICTransportParameters(
+            maxIdleTimeout: .nanoseconds(Int64(tuning.maxIdleTimeout)),
+            initialMaxData: tuning.initialMaxData,
+            initialMaxStreamDataBidirectionalLocal: tuning.initialMaxStreamDataBidiLocal,
+            initialMaxStreamDataBidirectionalRemote: tuning.initialMaxStreamDataBidiRemote,
+            initialMaxStreamDataUnidirectional: tuning.initialMaxStreamDataUni,
+            initialMaxStreamsBidirectional: tuning.initialMaxStreamsBidi,
+            initialMaxStreamsUnidirectional: tuning.initialMaxStreamsUni,
+            isActiveMigrationDisabled: !migrationEnabled,
+            maxDatagramFrameSize: datagramsEnabled ? Self.maxDatagramFrameSize : 0
         )
-
-        if case .brutal(let initialBps) = tuning.cc {
-            let brutal = BrutalCongestionControl(initialBps: initialBps)
-            if let ccKey = installBrutal(connectionOpaquePointer) {
-                BrutalCongestionControl.register(brutal, for: ccKey)
-                self.brutalCC = brutal
-                self.brutalCCKey = ccKey
-            }
-        }
-    }
-
-    nonisolated func setBrutalBandwidth(_ bps: UInt64) {
-        bridge.enqueue { [weak self] in
-            self?.assumeIsolated { $0.brutalCC?.setTargetBandwidth(bps) }
-        }
-    }
-    
-    nonisolated func uninstallBrutalCC() {
-        bridge.enqueue { [weak self] in
-            self?.assumeIsolated { me in
-                guard let connectionOpaquePointer = me.connectionOpaquePointer else { return }
-                if let key = me.brutalCCKey {
-                    BrutalCongestionControl.unregister(cc: key)
-                    me.brutalCCKey = nil
-                    me.brutalCC = nil
-                }
-                me.uninstallBrutal(connectionOpaquePointer)
-            }
-        }
+        let controller = tuning.makeCongestionController()
+        usesBrutalCC = controller is QUICBrutalCongestionController
+        let engine = AnywhereQUIC.QUICConnection(
+            settings: settings,
+            transportParameters: parameters,
+            destinationID: .random(length: 16),
+            path: quicPath(local: localAddr),
+            tls: tls,
+            congestionController: controller,
+            now: currentTimestamp()
+        )
+        self.engine = engine
+        retransmitTimer = makeRetransmitTimer()
+        outbound = DatagramStage(packetCapacity: engine.settings.maxSendUDPPayloadSize)
     }
 }

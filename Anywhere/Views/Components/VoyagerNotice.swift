@@ -8,20 +8,21 @@
 import SwiftUI
 
 struct VoyagerNotice: View {
-    @Environment(VoyagerStore.self) private var voyagerStore
-
     let description: LocalizedStringKey
 
-    init(_ description: LocalizedStringKey) {
-        self.description = description
-    }
+    @State private var isPresentingVoyager = false
 
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Image(systemName: "sparkles.2")
-                        .foregroundStyle(Color(hex: 0x5060F0))
+                    if #available(iOS 26.0, *) {
+                        Image(systemName: "sparkles.2")
+                            .foregroundStyle(Color.voyagerAccent)
+                    } else {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(Color.voyagerAccent)
+                    }
                     Text("Voyager Only")
                         .font(.headline)
                 }
@@ -29,10 +30,11 @@ struct VoyagerNotice: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 JoinVoyagerButton {
-                    voyagerStore.isPresentingVoyagerView = true
+                    isPresentingVoyager = true
                 }
             }
             .padding(.vertical, 4)
+            .voyagerCover(isPresented: $isPresentingVoyager)
         }
     }
 }

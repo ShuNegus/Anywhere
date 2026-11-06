@@ -9,34 +9,41 @@ import Foundation
 
 nonisolated extension ProxyClient {
 
-    var isShadowsocks: Bool {
-        configuration.outboundProtocol == .shadowsocks
+    func connectWithShadowsocks(_ request: ProxyRequest) async throws -> ProxyConnection {
+        if request.network == .udp {
+            return try await connectShadowsocksRealUDP(
+                destinationHost: request.host, destinationPort: request.port
+            )
+        }
+        let directProxyConnection = try await dialDirectProxyConnection()
+        do {
+            let connection = try await sendShadowsocksProtocolHandshake(over: directProxyConnection, request: request)
+            try await connection.send(request.initialData ?? Data())
+            return connection
+        } catch {
+            directProxyConnection.cancel()
+            throw error
+        }
     }
 
-    /// No network round-trip — just wraps the transport with cipher/PSK. Native async.
     func sendShadowsocksProtocolHandshake(
         over connection: ProxyConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16
+        request: ProxyRequest
     ) async throws -> ProxyConnection {
         try wrapWithShadowsocks(
             inner: connection,
-            command: command,
-            destinationHost: destinationHost,
-            destinationPort: destinationPort
+            network: request.network,
+            destinationHost: request.host,
+            destinationPort: request.port
         ).get()
     }
-
-    /// Opens a real-UDP path to the SS server (chain-tunnel datagram or direct UDP transport)
-    /// and wraps with SS UDP encryption keyed for the final destination. Native async.
+    
     func connectShadowsocksRealUDP(
         destinationHost: String,
         destinationPort: UInt16
     ) async throws -> ProxyConnection {
         let udpInner: ProxyConnection
         if let tunnel = self.tunnel {
-            // SS UDP needs real datagrams; a TCP tunnel here is a config error — fail rather than silently truncate.
             guard tunnel.deliversDatagrams else {
                 throw AnywhereError.proxy(.shadowsocks, .protocolViolation(
                     detail: "Shadowsocks UDP requires the chain link above it to deliver UDP datagrams."
@@ -45,38 +52,42 @@ nonisolated extension ProxyClient {
             setChainTunnel(nil)
             udpInner = tunnel
         } else {
-            let transport = UDPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
+            let transport = UDPTransport(host: directDialHost, port: configuration.serverPort, resolution: .proxies)
             try await transport.connect()
             udpInner = DirectUDPProxyConnection(transport: transport)
         }
-        return try wrapWithShadowsocks(
-            inner: udpInner,
-            command: .udp,
-            destinationHost: destinationHost,
-            destinationPort: destinationPort
-        ).get()
+        do {
+            return try wrapWithShadowsocks(
+                inner: udpInner,
+                network: .udp,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort
+            ).get()
+        } catch {
+            udpInner.cancel()
+            throw error
+        }
     }
 
     fileprivate func wrapWithShadowsocks(
         inner: ProxyConnection,
-        command: ProxyCommand,
+        network: ProxyNetwork,
         destinationHost: String,
         destinationPort: UInt16
     ) -> Result<ProxyConnection, Error> {
-        guard case .shadowsocks(let password, let method) = configuration.outbound else {
+        guard case .shadowsocks(let shadowsocks) = configuration.outbound else {
             return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Shadowsocks password not set")))
         }
-        guard let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Invalid Shadowsocks method: \(method)")))
+        guard let cipher = shadowsocks.cipher else {
+            return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Invalid Shadowsocks method: \(shadowsocks.method)")))
         }
 
         if cipher.isSS2022 {
-            // Shadowsocks 2022: base64-encoded PSK(s), BLAKE3 key derivation
-            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
+            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: shadowsocks.password, keySize: cipher.keySize) else {
                 return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Invalid Shadowsocks 2022 PSK")))
             }
 
-            if command == .udp {
+            if network == .udp {
                 if cipher == .blake3chacha20poly1305 {
                     return .success(Shadowsocks2022ChaChaUDPConnection(
                         inner: inner, psk: pskList.last!, dstHost: destinationHost, dstPort: destinationPort
@@ -95,11 +106,10 @@ nonisolated extension ProxyClient {
                 ))
             }
         } else {
-            // Legacy Shadowsocks: password-based EVP_BytesToKey derivation
-            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
+            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: shadowsocks.password, keySize: cipher.keySize)
             let addressHeader = ShadowsocksProtocol.buildAddressHeader(host: destinationHost, port: destinationPort)
 
-            if command == .udp {
+            if network == .udp {
                 return .success(ShadowsocksUDPConnection(
                     inner: inner, cipher: cipher, masterKey: masterKey,
                     dstHost: destinationHost, dstPort: destinationPort

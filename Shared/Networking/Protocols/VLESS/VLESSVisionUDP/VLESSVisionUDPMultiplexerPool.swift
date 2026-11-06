@@ -15,25 +15,26 @@ nonisolated final class VLESSVisionUDPMultiplexerPool: Sendable {
     init(configuration: ProxyConfiguration) {
         self.configuration = configuration
     }
-
-    /// Reuses a mux with spare capacity or dials a fresh one, then opens a stream.
+    
     func acquireStream(
         network: VLESSVisionUDPNetwork,
         host: String,
         port: UInt16,
         globalID: Data?
     ) async throws -> VLESSVisionUDPStream {
+        guard host.utf8.count <= 255 else {
+            throw AnywhereError.proxy(.vless, .protocolViolation(detail: "destination host exceeds 255 bytes"))
+        }
         let multiplexer: VLESSVisionUDPMultiplexer = multiplexers.withLock { multiplexers in
             multiplexers.removeAll { $0.isClosed }
-
-            if let reusable = multiplexers.first(where: { !$0.isFull }) {
+            
+            if globalID == nil, let reusable = multiplexers.first(where: { !$0.isFull }) {
                 return reusable
             }
-
-            // Self-eviction: a mux that idle-times-out or fails removes itself here instead of
-            // lingering until the next acquire. `onClose` fires off this lock.
+            
             let created = VLESSVisionUDPMultiplexer(
                 configuration: configuration,
+                reservedForXUDP: globalID != nil,
                 onClose: { [weak self] multiplexer in
                     self?.multiplexers.withLock { $0.removeAll { $0 === multiplexer } }
                 }
@@ -46,8 +47,6 @@ nonisolated final class VLESSVisionUDPMultiplexerPool: Sendable {
     }
 
     func closeAll() {
-        // Snapshot and clear under the lock, then close off-lock: each close() re-enters the
-        // lock via `onClose`, which would deadlock the non-reentrant Mutex if held here.
         let all = multiplexers.withLock { multiplexers -> [VLESSVisionUDPMultiplexer] in
             let snapshot = multiplexers
             multiplexers.removeAll()
@@ -56,5 +55,31 @@ nonisolated final class VLESSVisionUDPMultiplexerPool: Sendable {
         for multiplexer in all {
             multiplexer.close()
         }
+    }
+}
+
+// MARK: - UDPMultiplexerPool
+
+nonisolated extension VLESSVisionUDPMultiplexerPool: UDPMultiplexerPool {
+    func acquireUDPStream(
+        host: String,
+        port: UInt16,
+        sourceAddress: String
+    ) async throws -> any UDPMultiplexerStream {
+        try await acquireStream(
+            network: .udp,
+            host: host,
+            port: port,
+            globalID: VLESSVisionUDPGlobalID.generateGlobalID(sourceAddress: sourceAddress)
+        )
+    }
+}
+
+// MARK: - Configuration hook
+
+nonisolated extension ProxyConfiguration {
+    func makeUDPMultiplexerPool() -> (any UDPMultiplexerPool)? {
+        guard case .vless = outbound else { return nil }
+        return VLESSVisionUDPMultiplexerPool(configuration: self)
     }
 }

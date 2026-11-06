@@ -9,17 +9,17 @@ import Foundation
 import Synchronization
 
 nonisolated final class MITMRegexConcurrencyBridge: Sendable {
-
     static let shared = MITMRegexConcurrencyBridge()
 
-    /// Worker pool for uninterruptible evaluations. Concurrent, so independent evaluations
-    /// parallelize and an abandoned (pinned) worker can't head-of-line-block later ones.
-    /// Dispatch is the right tool precisely because a pinned worker must burn a queue thread —
-    /// not a cooperative-pool lane — while the hard-cap watchdog decides its fate.
     private let queue = DispatchQueue(
         label: "su.smd.Anywhere.MITMRegexConcurrencyBridge",
         qos: .userInitiated,
         attributes: .concurrent
+    )
+
+    private let deadlineQueue = DispatchQueue(
+        label: "su.smd.Anywhere.MITMRegexConcurrencyBridge.Deadline",
+        qos: .userInitiated
     )
 
     enum Outcome<T: Sendable>: Sendable {
@@ -27,89 +27,123 @@ nonisolated final class MITMRegexConcurrencyBridge: Sendable {
         case timedOut
     }
 
-    /// Completion flag shared between the worker and the hard-cap watchdog: the worker
-    /// publishes `true` before signalling, so a watchdog that still reads `false` at the hard
-    /// cap has found a permanently pinned worker.
-    private final class DoneFlag: Sendable {
-        let finished = Atomic<Bool>(false)
+    enum GateMatch: Sendable {
+        case noMatch
+        case match([String?]?)
     }
 
-    // MARK: - Regex operations (the uninterruptible ICU work — kept inside this boundary)
+    struct GateRequest: Sendable {
+        let regex: NSRegularExpression
+        let wantsCaptures: Bool
+        let onResolved: @Sendable (GateMatch) -> Void
+        let hardCapMessage: @Sendable () -> String
+    }
 
-    /// Whether `regex` has an (unanchored) first match in `string`. Fail-closed on `.timedOut` is
-    /// the caller's decision. `onResolved` runs on the worker with the verdict — even for an
-    /// abandoned (timed-out) worker that finishes late — so the caller can memoize the result
-    /// without ever re-running the match itself.
-    func firstMatch(
-        _ regex: NSRegularExpression,
+    // MARK: - Regex operations
+
+    func firstMatches(
+        _ requests: [GateRequest],
         in string: String,
         deadlineMillis: Int,
-        hardCapSeconds: Int,
-        hardCapMessage: @escaping @Sendable () -> String,
-        onResolved: (@Sendable (Bool) -> Void)? = nil
-    ) async -> Outcome<Bool> {
-        await run(deadlineMillis: deadlineMillis, hardCapSeconds: hardCapSeconds, hardCapMessage: hardCapMessage) {
-            let range = NSRange(string.startIndex..., in: string)
-            let matched = regex.firstMatch(in: string, options: [], range: range) != nil
-            onResolved?(matched)
-            return matched
+        hardCapSeconds: Int
+    ) async -> [Outcome<GateMatch>] {
+        let abortAfterSeconds = Self.abortAfterSeconds(hardCapSeconds: hardCapSeconds)
+        var outcomes: [Outcome<GateMatch>] = []
+        outcomes.reserveCapacity(requests.count)
+        while outcomes.count < requests.count {
+            let remaining = Array(requests[outcomes.count...])
+            let run = await runSteps(
+                remaining.count,
+                deadlineMillis: deadlineMillis,
+                hardCapSeconds: hardCapSeconds,
+                hardCapMessage: { remaining[$0].hardCapMessage() }
+            ) { index -> GateMatch in
+                let request = remaining[index]
+                guard let match = Self.match(request, in: string, abortAfterSeconds: abortAfterSeconds) else {
+                    return .noMatch
+                }
+                request.onResolved(match)
+                return match
+            }
+            outcomes.append(contentsOf: run.completed.map { .completed($0) })
+            guard run.timedOut else { break }
+            outcomes.append(.timedOut)
         }
+        return outcomes
     }
 
-    /// Capture groups of the first match (index 0 = whole match), or `nil` on no match. The match
-    /// and the group-range reads both run on the worker, so only value-typed strings escape.
-    func firstMatchCaptureGroups(
-        _ regex: NSRegularExpression,
-        in string: String,
-        deadlineMillis: Int,
-        hardCapSeconds: Int,
-        hardCapMessage: @escaping @Sendable () -> String
-    ) async -> Outcome<[String?]?> {
-        await run(deadlineMillis: deadlineMillis, hardCapSeconds: hardCapSeconds, hardCapMessage: hardCapMessage) {
-            Self.captureGroups(regex, in: string)
-        }
-    }
-
-    /// Applies `regex` substitution over `text`, replacing each match with `staticReplacement`
-    /// (when non-nil) or with `expand(match output)`. The substitution *traversal* is the
-    /// uninterruptible ICU work and stays inside this boundary; `expand` only builds a replacement
-    /// string from an already-computed match. `onResolved` runs on the worker after the traversal
-    /// (even if abandoned), for the caller's single-flight bookkeeping.
     func applyingSubstitution(
-        _ regex: Regex<AnyRegexOutput>,
+        _ regex: NSRegularExpression,
         to text: String,
-        staticReplacement: String?,
-        expand: @escaping @Sendable (AnyRegexOutput) -> String,
+        template: String,
         deadlineMillis: Int,
         hardCapSeconds: Int,
         hardCapMessage: @escaping @Sendable () -> String,
         onResolved: (@Sendable () -> Void)? = nil
-    ) async -> Outcome<String> {
-        await run(deadlineMillis: deadlineMillis, hardCapSeconds: hardCapSeconds, hardCapMessage: hardCapMessage) {
-            let out: String
-            if let staticReplacement {
-                out = text.replacing(regex, with: staticReplacement)
-            } else {
-                out = text.replacing(regex) { match in expand(match.output) }
-            }
+    ) async -> Outcome<String?> {
+        let run = await runSteps(
+            1,
+            deadlineMillis: deadlineMillis,
+            hardCapSeconds: hardCapSeconds,
+            hardCapMessage: { _ in hardCapMessage() }
+        ) { _ -> String? in
+            let range = NSRange(text.startIndex..., in: text)
+            let out = regex.firstMatch(in: text, options: [], range: range) == nil
+                ? nil
+                : regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
             onResolved?()
             return out
         }
+        guard let out = run.completed.first else { return .timedOut }
+        return .completed(out)
     }
 
-    /// Extracts the first match's groups (index 0 = whole match); a non-participating group is
-    /// `nil`, and `nil` overall means the pattern did not match. Runs on the worker.
-    private static func captureGroups(_ regex: NSRegularExpression, in string: String) -> [String?]? {
+    private enum ScanResult {
+        case match(NSTextCheckingResult)
+        case noMatch
+        case aborted
+    }
+
+    private static func abortAfterSeconds(hardCapSeconds: Int) -> Int {
+        max(1, hardCapSeconds / 2)
+    }
+
+    private static func match(_ request: GateRequest, in string: String, abortAfterSeconds: Int) -> GateMatch? {
+        switch scanFirstMatch(request.regex, in: string, abortAfterSeconds: abortAfterSeconds) {
+        case .aborted:
+            return nil
+        case .noMatch:
+            return .noMatch
+        case .match(let result):
+            return .match(request.wantsCaptures ? captureGroups(of: result, in: string) : nil)
+        }
+    }
+
+    private static func scanFirstMatch(_ regex: NSRegularExpression, in string: String, abortAfterSeconds: Int) -> ScanResult {
         let range = NSRange(string.startIndex..., in: string)
-        guard let match = regex.firstMatch(in: string, options: [], range: range) else { return nil }
+        let abortAt = MonotonicClock.nanoseconds + UInt64(abortAfterSeconds) * 1_000_000_000
+        var outcome = ScanResult.noMatch
+        regex.enumerateMatches(in: string, options: [.reportProgress], range: range) { result, _, stop in
+            if let result {
+                outcome = .match(result)
+                stop.pointee = true
+            } else if MonotonicClock.nanoseconds >= abortAt {
+                outcome = .aborted
+                stop.pointee = true
+            }
+        }
+        return outcome
+    }
+
+    private static func captureGroups(of match: NSTextCheckingResult, in string: String) -> [String?] {
         var groups: [String?] = []
         groups.reserveCapacity(match.numberOfRanges)
-        for i in 0..<match.numberOfRanges {
-            let nsRange = match.range(at: i)
+        for index in 0..<match.numberOfRanges {
+            let nsRange = match.range(at: index)
             if nsRange.location == NSNotFound {
                 groups.append(nil)
-            } else if let r = Range(nsRange, in: string) {
-                groups.append(String(string[r]))
+            } else if let range = Range(nsRange, in: string) {
+                groups.append(String(string[range]))
             } else {
                 groups.append(nil)
             }
@@ -119,59 +153,90 @@ nonisolated final class MITMRegexConcurrencyBridge: Sendable {
 
     // MARK: - Bounded worker
 
-    /// Runs `body` on the worker pool and suspends the caller until it completes or
-    /// `deadlineMillis` elapses. On timeout the worker is abandoned — the evaluation is
-    /// uninterruptible, so nothing can stop it — and a watchdog crashes the process
-    /// (`hardCapMessage`) if the worker still hasn't returned `hardCapSeconds` later.
-    ///
-    /// Cancellation of the calling task reads as `.timedOut` (the deadline sleep returns early);
-    /// the worker itself is unaffected either way.
-    private func run<T: Sendable>(
-        deadlineMillis: Int,
-        hardCapSeconds: Int,
-        hardCapMessage: @escaping @Sendable () -> String,
-        _ body: @escaping @Sendable () -> T
-    ) async -> Outcome<T> {
-        // One-shot signal: the stream's iterator is cancellation-aware, so losing the race
-        // unblocks the caller immediately while the worker keeps spinning toward the hard cap.
-        let (done, doneSignal) = AsyncStream.makeStream(of: T.self)
-        let flag = DoneFlag()
-        queue.async {
-            let value = body()
-            flag.finished.store(true, ordering: .sequentiallyConsistent)
-            doneSignal.yield(value)
-            doneSignal.finish()
-        }
-        let outcome = await withTaskGroup(of: Outcome<T>.self) { group in
-            group.addTask {
-                var iterator = done.makeAsyncIterator()
-                if let value = await iterator.next() { return .completed(value) }
-                return .timedOut
-            }
-            group.addTask {
-                try? await Task.sleep(for: .milliseconds(deadlineMillis))
-                return .timedOut
-            }
-            let first = await group.next() ?? .timedOut
-            group.cancelAll()
-            return first
-        }
-        if case .timedOut = outcome {
-            scheduleHardCapCheck(flag, hardCapSeconds: hardCapSeconds, message: hardCapMessage)
-        }
-        return outcome
+    private struct StepRun<T: Sendable> {
+        let completed: [T]
+        let timedOut: Bool
     }
 
-    private func scheduleHardCapCheck(
-        _ flag: DoneFlag,
-        hardCapSeconds: Int,
-        message: @escaping @Sendable () -> String
-    ) {
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(for: .seconds(hardCapSeconds))
-            // A worker still pinned by catastrophic backtracking never published `finished`.
-            guard !flag.finished.load(ordering: .sequentiallyConsistent) else { return }
-            fatalError(message())
+    private final class Steps<T: Sendable>: Sendable {
+        struct State {
+            var completed: [T] = []
+            var stepStartedAt: UInt64
+            var isAbandoned = false
+            var isFinished = false
+            var waiter: CheckedContinuation<Void, Never>?
         }
+
+        let state: Mutex<State>
+        let returnedCount = Atomic<Int>(0)
+
+        init(startedAt: UInt64) {
+            state = Mutex(State(stepStartedAt: startedAt))
+        }
+    }
+
+    private func runSteps<T: Sendable>(
+        _ count: Int,
+        deadlineMillis: Int,
+        hardCapSeconds: Int,
+        hardCapMessage: @escaping @Sendable (Int) -> String,
+        step: @escaping @Sendable (Int) -> T
+    ) async -> StepRun<T> {
+        guard count > 0 else { return StepRun(completed: [], timedOut: false) }
+        let steps = Steps<T>(startedAt: MonotonicClock.nanoseconds)
+        queue.async {
+            for index in 0..<count {
+                let value = step(index)
+                steps.returnedCount.store(index + 1, ordering: .releasing)
+                let (waiter, proceed): (CheckedContinuation<Void, Never>?, Bool) = steps.state.withLock { state in
+                    guard !state.isAbandoned else { return (nil, false) }
+                    state.completed.append(value)
+                    state.stepStartedAt = MonotonicClock.nanoseconds
+                    guard state.completed.count == count else { return (nil, true) }
+                    state.isFinished = true
+                    defer { state.waiter = nil }
+                    return (state.waiter, false)
+                }
+                waiter?.resume()
+                guard proceed else { return }
+            }
+        }
+
+        let budget = UInt64(max(deadlineMillis, 1)) * 1_000_000
+        let checkInterval = DispatchTimeInterval.nanoseconds(Int(max(budget / 4, 1_000_000)))
+        let timer = DispatchSource.makeTimerSource(queue: deadlineQueue)
+        timer.setEventHandler {
+            let waiter: CheckedContinuation<Void, Never>? = steps.state.withLock { state in
+                guard !state.isFinished, !state.isAbandoned,
+                      MonotonicClock.nanoseconds &- state.stepStartedAt >= budget else { return nil }
+                state.isAbandoned = true
+                defer { state.waiter = nil }
+                return state.waiter
+            }
+            waiter?.resume()
+        }
+        timer.schedule(deadline: .now() + .nanoseconds(Int(budget)), repeating: checkInterval, leeway: checkInterval)
+        timer.resume()
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let ready = steps.state.withLock { state -> Bool in
+                guard !state.isFinished, !state.isAbandoned else { return true }
+                state.waiter = continuation
+                return false
+            }
+            if ready { continuation.resume() }
+        }
+        timer.cancel()
+
+        let (completed, isAbandoned) = steps.state.withLock { ($0.completed, $0.isAbandoned) }
+        if isAbandoned {
+            let stuck = completed.count
+            deadlineQueue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
+                guard steps.returnedCount.load(ordering: .acquiring) <= stuck else { return }
+                MITMScriptDiskStore.shared.flush()
+                fatalError(hardCapMessage(stuck))
+            }
+        }
+        return StepRun(completed: completed, timedOut: isAbandoned)
     }
 }

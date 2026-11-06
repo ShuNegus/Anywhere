@@ -8,23 +8,25 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
-
 nonisolated final class TrojanUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
-    private let passwordKey: Data
     private let destinationHost: String
     private let destinationPort: UInt16
 
-    private let headerSent = Atomic<Bool>(false)
-    /// Leftover TLS stream bytes carried across receives until a full packet is framed.
+    private let pendingHeader: Mutex<Data?>
     private let receiveBuffer = Mutex(Data())
 
     init(inner: ProxyConnection, password: String, destinationHost: String, destinationPort: UInt16) {
         self.inner = inner
-        self.passwordKey = TrojanProtocol.passwordKey(password)
+        let passwordKey = TrojanProtocol.passwordKey(password)
         self.destinationHost = destinationHost
         self.destinationPort = destinationPort
+        self.pendingHeader = Mutex(TrojanProtocol.buildRequestHeader(
+            passwordKey: passwordKey,
+            command: TrojanProtocol.commandUDP,
+            host: destinationHost,
+            port: destinationPort
+        ))
     }
 
     var isConnected: Bool { inner.isConnected }
@@ -32,7 +34,19 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
     var deliversDatagrams: Bool { true }
 
     func sendRaw(_ data: Data) async throws {
-        try await inner.sendRaw(frame(data))
+        guard data.count <= TrojanProtocol.maxUDPPayloadLength else {
+            throw AnywhereError.proxy(.trojan, .packetTooLarge)
+        }
+        let header = consumeHeader()
+        let packet = TrojanProtocol.encodeUDPPacket(host: destinationHost, port: destinationPort, payload: data)
+        try await inner.sendRaw(header.map { $0 + packet } ?? packet)
+    }
+
+    private func consumeHeader() -> Data? {
+        pendingHeader.withLock { header in
+            defer { header = nil }
+            return header
+        }
     }
 
     func receiveRaw() async throws -> Data? {
@@ -45,25 +59,11 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
 
     // MARK: - Framing
 
-    private func frame(_ payload: Data) -> Data {
-        var out = Data()
-        if !headerSent.exchange(true, ordering: .acquiringAndReleasing) {
-            out.append(TrojanProtocol.buildRequestHeader(
-                passwordKey: passwordKey,
-                command: TrojanProtocol.commandUDP,
-                host: destinationHost,
-                port: destinationPort
-            ))
-        }
-        out.append(TrojanProtocol.encodeUDPPacket(host: destinationHost, port: destinationPort, payload: payload))
-        return out
-    }
-
     private func nextPacket() async throws -> Data? {
         while true {
             let parsed: Data? = try receiveBuffer.withLock { buffer in
                 guard let parsed = try TrojanProtocol.tryDecodeUDPPacket(buffer: buffer) else { return nil }
-                buffer.removeFirst(parsed.consumed)
+                buffer = parsed.consumed == buffer.count ? Data() : Data(buffer.dropFirst(parsed.consumed))
                 return parsed.payload
             }
             if let parsed {

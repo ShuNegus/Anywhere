@@ -12,8 +12,6 @@ import Observation
 @MainActor
 @Observable
 class RequestsModel {
-    static let shared = RequestsModel()
-
     struct Entry: Identifiable, Equatable {
         enum `Protocol`: String {
             case tcp
@@ -28,8 +26,8 @@ class RequestsModel {
         let host: String
         let port: UInt16
         let routeTarget: RouteTarget
-        let viaDefault: Bool
         let ruleSetName: String?
+        let defaultRouteTarget: RouteTarget?
     }
 
     private(set) var requests: [Entry] = []
@@ -77,8 +75,8 @@ class RequestsModel {
                 host: entry.host,
                 port: entry.port,
                 routeTarget: entry.routeTarget,
-                viaDefault: entry.viaDefault,
-                ruleSetName: entry.ruleSetName
+                ruleSetName: entry.ruleSetName,
+                defaultRouteTarget: entry.defaultRouteTarget
             )
         }
     }

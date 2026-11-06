@@ -10,7 +10,6 @@ import Synchronization
 
 // MARK: - HTTPUpgradeConnection
 
-/// Performs an HTTP upgrade handshake, then passes data through as raw bytes (no WebSocket framing).
 nonisolated final class HTTPUpgradeConnection: Sendable {
 
     // MARK: Transport
@@ -21,18 +20,39 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
 
     private let configuration: HTTPUpgradeConfiguration
 
-    private struct ConnectionState {
-        var isConnected = false
-        /// Leftover data received after the HTTP 101 response headers.
+    private enum Phase: PhaseTransitionable {
+        case upgrading
+        case open
+        case closed
+        case cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.upgrading, .open):
+                return true
+            case (_, .closed), (_, .cancelled):
+                return old != .closed && old != .cancelled
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct ConnectionState: PhaseHolding {
+        var phase: Phase = .upgrading
         var leftoverBuffer = Data()
     }
 
     private let state: Mutex<ConnectionState>
 
+    private static let upgradeDeadline: Duration = .seconds(30)
+
+    private static let maxResponseHeaderSize = 65_536
+
     static let chromeUserAgent = ProxyUserAgent.chrome
 
     var isConnected: Bool {
-        state.withLock { $0.isConnected }
+        state.withLock { $0.phase == .open }
     }
 
     // MARK: - Initializers
@@ -40,7 +60,7 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
     init(transport: any ByteTransport, configuration: HTTPUpgradeConfiguration) {
         self.configuration = configuration
         self.transport = transport
-        self.state = Mutex(ConnectionState(isConnected: true))
+        self.state = Mutex(ConnectionState())
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: HTTPUpgradeConfiguration) {
@@ -54,6 +74,16 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
     // MARK: - HTTP Upgrade Handshake
 
     func performUpgrade() async throws {
+        try await withDialDeadline(Self.upgradeDeadline, onExpiry: {
+            self.cancel()
+        }, error: {
+            AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "handshake timed out"))
+        }) {
+            try await self.sendAndAwaitUpgrade()
+        }
+    }
+
+    private func sendAndAwaitUpgrade() async throws {
         var request = "GET \(configuration.normalizedPath) HTTP/1.1\r\n"
         request += "Host: \(configuration.host)\r\n"
         request += "Connection: Upgrade\r\n"
@@ -81,8 +111,7 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
 
         try await receiveUpgradeResponse()
     }
-
-    /// Reads the HTTP 101 response, validating status and Upgrade/Connection headers (case-insensitive).
+    
     private func receiveUpgradeResponse() async throws {
         while true {
             let chunk: TransportChunk
@@ -96,11 +125,14 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
                 throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Empty response from server"))
             }
 
-            let headerData: Data? = state.withLock { state in
+            let headerData: Data? = try state.withLock { state in
                 state.leftoverBuffer.append(data)
 
-                let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+                let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A])
                 guard let range = state.leftoverBuffer.range(of: headerEnd) else {
+                    if state.leftoverBuffer.count > Self.maxResponseHeaderSize {
+                        throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "response headers too large"))
+                    }
                     return nil
                 }
 
@@ -111,7 +143,7 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
             }
 
             guard let headerData else {
-                continue // need more bytes
+                continue
             }
 
             guard let headerString = String(data: headerData, encoding: .utf8) else {
@@ -146,37 +178,57 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
                 throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Missing Upgrade/Connection headers in 101 response"))
             }
 
+            let opened: Bool = state.withLock { $0.transition(to: .open) }
+            guard opened else {
+                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "cancelled during upgrade"))
+            }
             return
         }
     }
 
-    // MARK: - Public API (Raw TCP passthrough)
+    // MARK: - Public API
 
     func send(_ data: Data) async throws {
         try await transport.send(data)
     }
-
-    /// Receives raw data; the first call drains bytes buffered past the 101 response headers.
+    
     func receive() async throws -> Data? {
-        let buffered: Data? = state.withLock { state in
-            guard !state.leftoverBuffer.isEmpty else { return nil }
+        enum Buffered { case data(Data), empty, upgrading, closed, cancelled }
+        let buffered: Buffered = state.withLock { state in
+            switch state.phase {
+            case .upgrading: return .upgrading
+            case .closed: return .closed
+            case .cancelled: return .cancelled
+            case .open: break
+            }
+            guard !state.leftoverBuffer.isEmpty else { return .empty }
             let data = state.leftoverBuffer
             state.leftoverBuffer.removeAll(keepingCapacity: true)
-            return data
+            return .data(data)
         }
-        if let buffered {
-            return buffered
+        switch buffered {
+        case .data(let data):
+            return data
+        case .upgrading:
+            throw AnywhereError.proxy(.httpUpgrade, .notReady)
+        case .closed:
+            return nil
+        case .cancelled:
+            throw AnywhereError.transport(.terminated)
+        case .empty:
+            break
         }
 
         guard case .bytes(let data) = try await transport.receive(), !data.isEmpty else {
-            return nil // EOF
+            _ = state.withLock { $0.transition(to: .closed) }
+            return nil
         }
         return data
     }
 
     func cancel() {
         state.withLock {
-            $0.isConnected = false
+            $0.transition(to: .cancelled)
             $0.leftoverBuffer.removeAll()
         }
         transport.cancel()

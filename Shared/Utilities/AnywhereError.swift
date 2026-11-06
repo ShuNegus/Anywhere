@@ -8,45 +8,41 @@
 import Foundation
 
 nonisolated enum AnywhereError: Error {
+    case certificate(Certificate)
+    case diagnostics(Diagnostics)
     case dns(DNS)
+    case mitm(MITM)
+    case parse(Parse)
+    case proxy(Wire, Proxy)
+    case quic(QUIC)
+    case routing(Routing)
+    case store(Store)
+    case subscription(Subscription)
     case transport(Transport)
     case tls(TLS)
-    case quic(QUIC)
-    case proxy(Wire, Proxy)
-    case routing(Routing)
-    case mitm(MITM)
-    case certificate(Certificate)
-    case store(Store)
-    case parse(Parse)
-    case subscription(Subscription)
     case tunnel(Tunnel)
-    case diagnostics(Diagnostics)
     case wrapped(context: String, underlying: any Error)
-
-    // MARK: Wire
     
-    enum Wire: String, Sendable {
-        case direct = "Direct"
-        case socks5 = "SOCKS5"
-        case httpConnect = "HTTP"
-        case http1 = "HTTP/1"
-        case http2 = "HTTP/2"
-        case http3 = "HTTP/3"
-        case shadowsocks = "Shadowsocks"
-        case trojan = "Trojan"
-        case anyTLS = "AnyTLS"
-        case vless = "VLESS"
-        case vlessEncryption = "VLESS Encryption"
-        case sudoku = "Sudoku"
-        case naive = "Naive"
-        case hysteria = "Hysteria"
-        case nowhere = "Nowhere"
-        case webSocket = "WebSocket"
-        case grpc = "gRPC"
-        case xhttp = "XHTTP"
-        case httpUpgrade = "HTTPUpgrade"
-    }
+    // MARK: Certificate
 
+    enum Certificate: Sendable {
+        case keyGenerationFailed(detail: String)
+        case keychainWriteFailed(status: OSStatus)
+        case keychainReadFailed(status: OSStatus)
+        case missingCAComponents
+        case buildFailed(underlying: any Error)
+        case signingFailed(detail: String)
+        case publicKeyExportFailed
+        case invalidPublicKey
+        case asn1ParseFailed(detail: String)
+    }
+    
+    // MARK: Diagnostics
+
+    enum Diagnostics: Sendable, Equatable {
+        case latencyProbeFailed(status: String)
+    }
+    
     // MARK: DNS
 
     enum DNS: Sendable, Equatable {
@@ -55,97 +51,43 @@ nonisolated enum AnywhereError: Error {
         case malformedResponse
         case timedOut(host: String)
     }
-
-    // MARK: Transport
     
-    enum Transport: Sendable, Equatable {
-        enum Operation: String, Sendable {
-            case connect, send, receive, close
-        }
-        
-        case posix(Operation, errno: Int32)
-        case lwip(Operation, code: Int32)
-        case notConnected
-        case connectionFailed(endpoint: String?, detail: String)
-        case timedOut(Operation, endpoint: String?, detail: String?)
-        case terminated
-        /// A fatal `tcp_write` on the downlink (not backpressure — that retries silently).
-        case writeFailed(pending: Int, sndbuf: Int)
+    // MARK: MITM
+
+    enum MITM: Sendable, Equatable {
+        case notHTTP
+        case responseTooLarge(limit: Int)
+        case scriptBudgetExceeded(limit: Int)
+        case scriptStoreCapacityExceeded
+        case scriptStoreWriteFailed
+        case scriptMessageMalformed(detail: String)
+        case invalidScriptRequest
+        case upstreamHandshakeTimeout
+        case requestHeadersTooLarge
+        case needsHTTP1Fallback
+        case rewriteRulesCorrupted(BinaryPayload)
+        case profileServerBindFailed
     }
+    
+    // MARK: Parse
 
-    // MARK: TLS
+    enum Parse: Sendable, Equatable {
+        case invalidURL(String)
+        case proxyURI(ProxyURI)
+        case ajson(detail: String)
+        case yaml(detail: String)
+        case clashConfigMissingProxies
 
-    enum TLS: Sendable, Equatable {
-        case handshakeFailed(detail: String)
-        case certificateValidationFailed(detail: String)
-        case unsupportedVersion
-        case alert(level: UInt8, code: UInt8)
-        case unexpectedAlert
-        case helloRetryRequest
-        case record(Record)
-        case clientHello(ClientHello)
-        case ech(ECH)
-        case reality(Reality)
-        
-        enum Record: Sendable, Equatable {
-            case ciphertextTooShort
-            case emptyPlaintext
-            case missingContentType
-            case invalidPadding
-            case encryptionFailed
-            case ivGenerationFailed
-            case authenticationFailed
-            case macVerificationFailed
-            case malformed(detail: String)
-            case connectionUnavailable
-        }
-        
-        enum ClientHello: Sendable, Equatable {
-            case truncated
-            case notHandshake
-            case notClientHello
-            case lengthMismatch
-            case malformed(detail: String)
-        }
-
-        enum ECH: Sendable, Equatable {
-            case malformedConfigList
-            case malformedConfig
-            case malformedInnerHello
-            case noCompatibleConfig
-            case noCompatibleCipherSuite
-            case unsupportedKEM
-            case unsupportedKDF
-            case unsupportedAEAD
-            case invalidPublicKey
-            case hpkeSetupFailed
-            case sealFailed
-            case rejected(retryConfigList: Data?)
-        }
-
-        enum Reality: Sendable, Equatable {
-            case invalidPublicKey
-            case authenticationFailed
-            case decryptionFailed
+        enum ProxyURI: Sendable, Equatable {
+            case unsupportedScheme(String?)
+            case missingFields
+            case invalidValue(field: String, value: String)
+            case noPublicKeys
         }
     }
-
-    // MARK: QUIC
-
-    enum QUIC: Sendable, Equatable {
-        case connectionFailed(detail: String)
-        case handshakeFailed(detail: String)
-        case streamFailed(detail: String)
-        case streamReset(applicationCode: UInt64)
-        case streamClosedWithError(applicationCode: UInt64)
-        case datagramTooLarge(limit: Int)
-        case datagramQueueFull
-        case timedOut
-        case closed(graceful: Bool)
-    }
-
+    
     // MARK: Proxy
-    
+
     enum Proxy: Sendable, Equatable {
         case invalidConfiguration(detail: String)
         case notReady
@@ -168,7 +110,7 @@ nonisolated enum AnywhereError: Error {
         case datagramTooLarge(maxFrame: Int, headerSize: Int)
         case packetTooLarge
         case cipher(Cipher)
-        
+
         enum Cipher: Sendable, Equatable {
             case unsupportedMethod(String)
             case invalidKey
@@ -179,59 +121,56 @@ nonisolated enum AnywhereError: Error {
             case malformedHeader
         }
     }
+    
+    enum Wire: String, Sendable {
+        case anyTLS = "AnyTLS"
+        case direct = "Direct"
+        case grpc = "gRPC"
+        case http11 = "HTTP/1.1"
+        case http2 = "HTTP/2"
+        case http3 = "HTTP/3"
+        case httpConnect = "HTTP"
+        case httpUpgrade = "HTTPUpgrade"
+        case hysteria = "Hysteria"
+        case nowhere = "Nowhere"
+        case rfc = "RFC"
+        case shadowsocks = "Shadowsocks"
+        case socks5 = "SOCKS5"
+        case sudoku = "Sudoku"
+        case trojan = "Trojan"
+        case vless = "VLESS"
+        case vlessEncryption = "VLESS Encryption"
+        case webSocket = "WebSocket"
+        case xhttp = "XHTTP"
+    }
+    
+    // MARK: QUIC
 
+    enum QUIC: Sendable, Equatable {
+        case connectionFailed(detail: String)
+        case handshakeFailed(detail: String)
+        case streamFailed(detail: String)
+        case streamReset(applicationCode: UInt64)
+        case streamClosedWithError(applicationCode: UInt64)
+        case datagramTooLarge(limit: Int)
+        case datagramQueueFull
+        case timedOut
+        case closed(graceful: Bool)
+    }
+    
     // MARK: Routing
 
     enum Routing: Sendable, Equatable {
         case rejectedByRule(host: String)
         case dropped
         case payloadCorrupted(BinaryPayload)
-        case configurationMissing(host: String)
     }
     
-    enum BinaryPayload: Sendable, Equatable {
-        case badMagic
-        case unsupportedVersion
-        case truncated
-        case malformed
-    }
-
-    // MARK: MITM
-
-    enum MITM: Sendable, Equatable {
-        case notHTTP
-        case responseTooLarge(limit: Int)
-        case scriptBudgetExceeded(limit: Int)
-        case scriptStoreCapacityExceeded
-        case scriptStoreWriteFailed
-        case scriptMessageMalformed(detail: String)
-        case invalidScriptRequest
-        case upstreamHandshakeTimeout
-        case requestHeadersTooLarge
-        case needsHTTP1Fallback
-        case rewriteRulesCorrupted(BinaryPayload)
-        case profileServerBindFailed
-    }
-
-    // MARK: Certificate
-    
-    enum Certificate: Sendable {
-        case keyGenerationFailed(detail: String)
-        case keychainWriteFailed(status: OSStatus)
-        case keychainReadFailed(status: OSStatus)
-        case missingCAComponents
-        case buildFailed(underlying: any Error)
-        case signingFailed(detail: String)
-        case publicKeyExportFailed
-        case invalidPublicKey
-        case asn1ParseFailed(detail: String)
-    }
-
     // MARK: Store
-    
+
     enum Store: Sendable {
         enum Resource: String, Sendable {
-            case configurations, chains, subscriptions, certificates
+            case configurations, chains, groups, subscriptions, certificates
             case routingRuleSets, mitmRuleSets, routingDatabase
             case routingPayload, mitmPayload, turnPayload, scripts
         }
@@ -240,47 +179,104 @@ nonisolated enum AnywhereError: Error {
         case saveFailed(Resource, underlying: any Error)
         case missing(Resource)
         case corrupted(Resource, detail: String?)
-        case migrationFailed(file: String, underlying: any Error)
         case syncFailed(underlying: any Error)
     }
 
-    // MARK: Parse
-    
-    enum Parse: Sendable, Equatable {
-        case yaml(detail: String)
-        case clashConfigMissingProxies
-        case invalidURL(String)
-        case proxyURI(ProxyURI)
-
-        enum ProxyURI: Sendable, Equatable {
-            case unsupportedScheme(String?)
-            case missingFields
-            case invalidValue(field: String, value: String)
-            case noPublicKeys
-        }
-    }
-
     // MARK: Subscription
-    
+
     enum Subscription: Sendable {
         case invalidURL
         case noConfigurations
         case fetchFailed(underlying: any Error)
     }
 
+    // MARK: Transport
+
+    enum Transport: Sendable, Equatable {
+        enum Operation: String, Sendable {
+            case connect, send, receive, close
+        }
+
+        case posix(Operation, errno: Int32)
+        case notConnected
+        case connectionFailed(endpoint: String?, detail: String)
+        case timedOut(Operation, endpoint: String?, detail: String?)
+        case terminated
+        case writeFailed(pending: Int, sndbuf: Int)
+    }
+
+    // MARK: TLS
+
+    enum TLS: Sendable, Equatable {
+        case handshakeFailed(detail: String)
+        case certificateValidationFailed(detail: String)
+        case unsupportedVersion
+        case alert(level: UInt8, code: UInt8)
+        case unexpectedAlert
+        case helloRetryRequest
+        case record(Record)
+        case clientHello(ClientHello)
+        case ech(ECH)
+        case reality(Reality)
+
+        enum Record: Sendable, Equatable {
+            case ciphertextTooShort
+            case emptyPlaintext
+            case missingContentType
+            case invalidPadding
+            case encryptionFailed
+            case ivGenerationFailed
+            case authenticationFailed
+            case macVerificationFailed
+            case malformed(detail: String)
+            case connectionUnavailable
+        }
+
+        enum ClientHello: Sendable, Equatable {
+            case truncated
+            case notHandshake
+            case notClientHello
+            case lengthMismatch
+            case malformed(detail: String)
+        }
+
+        enum ECH: Sendable, Equatable {
+            case malformedConfigList
+            case malformedConfig
+            case malformedInnerHello
+            case noCompatibleConfig
+            case noCompatibleCipherSuite
+            case unsupportedKEM
+            case unsupportedKDF
+            case unsupportedAEAD
+            case invalidPublicKey
+            case hpkeSetupFailed
+            case sealFailed
+            case rejected(retryConfigList: Data?)
+            case tls12Negotiated
+        }
+
+        enum Reality: Sendable, Equatable {
+            case invalidPublicKey
+            case authenticationFailed
+            case decryptionFailed
+        }
+    }
+
+    enum BinaryPayload: Sendable, Equatable {
+        case badMagic
+        case unsupportedVersion
+        case truncated
+        case malformed
+    }
+
     // MARK: Tunnel
-    
+
     enum Tunnel: Sendable {
         case invalidConfiguration
         case settingsApplyFailed(underlying: any Error)
         case ipcFailed(underlying: any Error)
         case sessionUnavailable
-    }
-
-    // MARK: Diagnostics
-
-    enum Diagnostics: Sendable, Equatable {
-        case latencyProbeFailed(status: String)
     }
 }
 
@@ -290,7 +286,7 @@ nonisolated extension AnywhereError: LocalizedError {
     var errorDescription: String? {
         domainTag.isEmpty ? conciseDescription : "\(domainTag): \(conciseDescription)"
     }
-    
+
     var conciseDescription: String {
         switch self {
         case .dns(let f): f.failureDescription
@@ -308,6 +304,10 @@ nonisolated extension AnywhereError: LocalizedError {
         case .diagnostics(let f): f.failureDescription
         case .wrapped(let context, let underlying): "\(context): \(Self.describe(underlying))"
         }
+    }
+
+    var logLine: String {
+        domainTag.isEmpty ? conciseDescription : "[\(domainTag)] \(conciseDescription)"
     }
 
     private var domainTag: String {
@@ -345,7 +345,6 @@ nonisolated extension AnywhereError.Transport {
     var failureDescription: String {
         switch self {
         case .posix(let op, let errno): "\(op.rawValue) failed: \(String(cString: strerror(errno)))"
-        case .lwip(let op, let code): "\(op.rawValue) failed: \(Self.lwipName(code))"
         case .notConnected: "not connected"
         case .connectionFailed(let endpoint, let detail):
             "connect" + (endpoint.map { " to \($0)" } ?? "") + " failed: \(detail)"
@@ -354,29 +353,6 @@ nonisolated extension AnywhereError.Transport {
         case .terminated: "transport terminated"
         case .writeFailed(let pending, let sndbuf):
             "downlink write failed (pending \(pending), send buffer \(sndbuf))"
-        }
-    }
-    
-    static func lwipName(_ err: Int32) -> String {
-        switch err {
-        case 0:   "ERR_OK"
-        case -1:  "ERR_MEM (out of memory)"
-        case -2:  "ERR_BUF (buffer error)"
-        case -3:  "ERR_TIMEOUT (timed out)"
-        case -4:  "ERR_RTE (routing problem)"
-        case -5:  "ERR_INPROGRESS"
-        case -6:  "ERR_VAL (illegal value)"
-        case -7:  "ERR_WOULDBLOCK"
-        case -8:  "ERR_USE (address in use)"
-        case -9:  "ERR_ALREADY (already connecting)"
-        case -10: "ERR_ISCONN (already connected)"
-        case -11: "ERR_CONN (not connected)"
-        case -12: "ERR_IF (low-level netif error)"
-        case -13: "ERR_ABRT (aborted locally)"
-        case -14: "ERR_RST (reset by peer)"
-        case -15: "ERR_CLSD (connection closed)"
-        case -16: "ERR_ARG (illegal argument)"
-        default:  "lwIP err=\(err)"
         }
     }
 }
@@ -443,6 +419,7 @@ nonisolated extension AnywhereError.TLS.ECH {
         case .sealFailed: "HPKE seal failed"
         case .rejected(let retry):
             "ECH rejected by server" + (retry != nil ? " (retry configs provided)" : "")
+        case .tls12Negotiated: "server negotiated TLS 1.2, so ECH did not apply"
         }
     }
 }
@@ -527,7 +504,6 @@ nonisolated extension AnywhereError.Routing {
         case .rejectedByRule(let host): "rejected by routing rule: \(host)"
         case .dropped: "dropped by routing policy"
         case .payloadCorrupted(let issue): "routing payload corrupted (\(issue.label))"
-        case .configurationMissing(let host): "configuration for routing rule not found: \(host)"
         }
     }
 }
@@ -588,8 +564,6 @@ nonisolated extension AnywhereError.Store {
         case .missing(let resource): "\(resource.rawValue) not found"
         case .corrupted(let resource, let detail):
             "\(resource.rawValue) corrupted" + (detail.map { ": \($0)" } ?? "")
-        case .migrationFailed(let file, let underlying):
-            "failed to migrate \(file): \(AnywhereError.describe(underlying))"
         case .syncFailed(let underlying): "sync failed: \(AnywhereError.describe(underlying))"
         }
     }
@@ -598,10 +572,11 @@ nonisolated extension AnywhereError.Store {
 nonisolated extension AnywhereError.Parse {
     var failureDescription: String {
         switch self {
-        case .yaml(let detail): "YAML: \(detail)"
-        case .clashConfigMissingProxies: "missing 'proxies' key"
         case .invalidURL(let string): "invalid URL: \(string)"
         case .proxyURI(let f): f.failureDescription
+        case .ajson(let detail): "AJSON: \(detail)"
+        case .yaml(let detail): "YAML: \(detail)"
+        case .clashConfigMissingProxies: "missing 'proxies' key"
         }
     }
 }
@@ -655,16 +630,16 @@ nonisolated extension AnywhereError.Diagnostics {
 // MARK: - Classification
 
 nonisolated extension AnywhereError {
-    enum PeerClose {
-        case cascade
-        case reset
-    }
-
-    var peerClose: PeerClose? {
+    var isPeerClose: Bool {
         switch self {
-        case .transport(.posix(_, errno: EPIPE)): .cascade
-        case .transport(.posix(_, errno: ECONNRESET)): .reset
-        default: nil
+        case .transport(.posix(_, errno: EPIPE)),
+             .transport(.posix(_, errno: ECONNRESET)),
+             .quic(.closed(graceful: true)),
+             .proxy(_, .streamClosed), .proxy(_, .connectionClosed), .proxy(_, .goaway),
+             .proxy(_, .webSocketClosed(code: 1000, reason: _)):
+            true
+        default:
+            false
         }
     }
 
@@ -676,8 +651,7 @@ nonisolated extension AnywhereError {
         switch self {
         case .wrapped(_, let e),
              .certificate(.buildFailed(let e)),
-             .store(.loadFailed(_, let e)), .store(.saveFailed(_, let e)),
-             .store(.migrationFailed(_, let e)), .store(.syncFailed(let e)),
+             .store(.loadFailed(_, let e)), .store(.saveFailed(_, let e)), .store(.syncFailed(let e)),
              .subscription(.fetchFailed(let e)),
              .tunnel(.settingsApplyFailed(let e)), .tunnel(.ipcFailed(let e)):
             e
@@ -685,21 +659,16 @@ nonisolated extension AnywhereError {
             nil
         }
     }
-    var suggestedLogLevel: AnywhereLogger.Level {
+    var logLevel: AnywhereLogger.Level? {
         switch self {
         case .transport(.posix(_, errno: EPIPE)),
+             .transport(.terminated),
              .quic(.closed(graceful: true)),
              .tls(.helloRetryRequest),
              .mitm(.needsHTTP1Fallback),
              .routing(.dropped),
-             .proxy(.naive, _):
-            .debug
-        case .transport(.posix(_, errno: ECONNRESET)),
-             .routing(.rejectedByRule),
-             .proxy(_, .streamClosed), .proxy(_, .connectionClosed):
-            .info
-        case .routing(.configurationMissing):
-            .warning
+             .routing(.rejectedByRule):
+            nil
         default:
             .error
         }
@@ -715,7 +684,7 @@ nonisolated extension AnywhereError {
         default: AnywhereError.wrapped(context: context(), underlying: error)
         }
     }
-    
+
     static func describe(_ error: any Error) -> String {
         switch error {
         case let error as AnywhereError: error.conciseDescription
@@ -723,12 +692,30 @@ nonisolated extension AnywhereError {
         default: error.localizedDescription
         }
     }
-    static func severity(of error: any Error) -> AnywhereLogger.Level {
+    static func logDescription(_ error: any Error) -> String {
         switch error {
-        case let error as AnywhereError: error.suggestedLogLevel
-        case is CancellationError: .debug
+        case let error as AnywhereError: error.errorDescription ?? error.conciseDescription
+        default: describe(error)
+        }
+    }
+
+    static func logLevel(of error: any Error) -> AnywhereLogger.Level? {
+        switch error {
+        case let error as AnywhereError: error.logLevel
+        case is CancellationError: nil
+        case let error as URLError where error.code == .cancelled: nil
         default: .error
         }
+    }
+
+    static func isPeerClose(_ error: any Error) -> Bool {
+        (error as? AnywhereError)?.isPeerClose ?? false
+    }
+
+    static func isTermination(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        if case AnywhereError.transport(.terminated) = error { return true }
+        return false
     }
 }
 
@@ -736,20 +723,12 @@ nonisolated extension AnywhereError {
 
 nonisolated extension AnywhereLogger {
     func report(_ message: @autoclosure () -> String, error: any Error) {
-        emit("\(message()): \(AnywhereError.describe(error))", at: AnywhereError.severity(of: error))
-    }
-    
-    func report(_ error: any Error) {
-        emit((error as? AnywhereError)?.errorDescription ?? AnywhereError.describe(error),
-             at: AnywhereError.severity(of: error))
+        guard let level = AnywhereError.logLevel(of: error) else { return }
+        log("\(message()): \(AnywhereError.logDescription(error))", level: level)
     }
 
-    private func emit(_ line: String, at level: Level) {
-        switch level {
-        case .debug: debug(line)
-        case .info: info(line)
-        case .warning: warning(line)
-        case .error: self.error(line)
-        }
+    func report(_ error: any Error) {
+        guard let level = AnywhereError.logLevel(of: error) else { return }
+        log((error as? AnywhereError)?.logLine ?? AnywhereError.describe(error), level: level)
     }
 }

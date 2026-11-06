@@ -17,6 +17,8 @@ nonisolated protocol MITMByteLeg: AnyObject, Sendable {
 
     func send(_ data: Data) async throws
 
+    func send(contentsOf parts: [Data]) async throws
+
     func cancel()
 }
 
@@ -27,9 +29,23 @@ nonisolated final class PlaintextLeg: MITMByteLeg, Sendable {
 
     private let transport: any ByteTransport
 
-    private struct State {
+    private enum Phase: PhaseTransitionable {
+        case open
+        case cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.open, .cancelled):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .open
         var prepended = Data()
-        var cancelled = false
     }
     private let state = Mutex(State())
 
@@ -50,7 +66,7 @@ nonisolated final class PlaintextLeg: MITMByteLeg, Sendable {
                 state.prepended = Data()
                 return (data, false)
             }
-            return (nil, state.cancelled)
+            return (nil, state.phase == .cancelled)
         }
         if let buffered { return buffered }
         if isCancelled { return nil }
@@ -65,11 +81,23 @@ nonisolated final class PlaintextLeg: MITMByteLeg, Sendable {
         try await transport.send(data)
     }
 
-    func cancel() {
-        state.withLock { state in
-            state.cancelled = true
-            state.prepended = Data()
+    func send(contentsOf parts: [Data]) async throws {
+        if parts.count == 1, parts[0].startIndex == 0 {
+            try await transport.send(parts[0])
+            return
         }
+        var joined = Data(capacity: parts.reduce(0) { $0 + $1.count })
+        for part in parts { joined.append(part) }
+        try await transport.send(joined)
+    }
+
+    func cancel() {
+        let claimed = state.withLock { state -> Bool in
+            guard state.transition(to: .cancelled) else { return false }
+            state.prepended = Data()
+            return true
+        }
+        guard claimed else { return }
         transport.cancel()
     }
 }

@@ -15,53 +15,11 @@ struct AppIconView: View {
     }
     
     var body: some View {
-        if #available(iOS 26.0, *) {
-            Image(name)
-                .interpolation(.high)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 32, height: 32)
-                .clipShape(.rect(cornerRadius: 7))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [
-                                    .white.opacity(0.6),
-                                    .white.opacity(0.3),
-                                    .clear,
-                                    .clear
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.5
-                        )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [
-                                    .clear,
-                                    .clear,
-                                    .white.opacity(0.1),
-                                    .white.opacity(0.3)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.5
-                        )
-                )
-        }
-        else {
-            Image(name)
-                .interpolation(.high)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 32, height: 32)
-                .clipShape(.rect(cornerRadius: 7))
-        }
+        Image(name)
+            .interpolation(.high)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 30, height: 30)
+            .clipShape(.rect(cornerRadius: 8))
     }
 }

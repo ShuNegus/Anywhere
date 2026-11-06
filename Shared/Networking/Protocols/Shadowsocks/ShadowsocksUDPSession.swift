@@ -6,12 +6,10 @@
 //
 
 import Foundation
+import Synchronization
 import CryptoKit
 import CommonCrypto
 import Security
-import Synchronization
-
-nonisolated private let logger = AnywhereLogger(category: "ShadowsocksUDPSession")
 
 actor ShadowsocksUDPSession {
 
@@ -31,15 +29,18 @@ actor ShadowsocksUDPSession {
         let token: Token
         let port: UInt16
         var responseHosts: Set<String>
-        var hasLearnedSource: Bool
+        var hasLearnedSource = false
         let inbox: AsyncThrowingStream<Data, Error>.Continuation
 
-        init(token: Token, port: UInt16, responseHosts: Set<String>,
-             hasLearnedSource: Bool, inbox: AsyncThrowingStream<Data, Error>.Continuation) {
+        init(
+            token: Token,
+            port: UInt16,
+            responseHosts: Set<String>,
+            inbox: AsyncThrowingStream<Data, Error>.Continuation
+        ) {
             self.token = token
             self.port = port
             self.responseHosts = responseHosts
-            self.hasLearnedSource = hasLearnedSource
             self.inbox = inbox
         }
     }
@@ -49,12 +50,37 @@ actor ShadowsocksUDPSession {
         let port: UInt16
     }
 
-    private enum State {
+    private enum Phase: PhaseTransitionable {
         case idle
         case connecting
         case ready
         case failed(Error)
         case cancelled
+
+        var isTerminal: Bool {
+            switch self {
+            case .failed, .cancelled: true
+            case .idle, .connecting, .ready: false
+            }
+        }
+
+        var isCancelled: Bool {
+            if case .cancelled = self { true } else { false }
+        }
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .ready):
+                return true
+            case (_, .failed):
+                return !old.isTerminal
+            case (_, .cancelled):
+                return !old.isCancelled
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: - Immutable configuration
@@ -64,38 +90,38 @@ actor ShadowsocksUDPSession {
     private let serverPort: UInt16
 
     // MARK: - Mutable state
-    
+
     private let asyncTransport: UDPTransport
-    
+
     private let _isUsable = Atomic<Bool>(true)
-    private var _state: State = .idle
-    private var state: State {
-        get { _state }
-        set {
-            _state = newValue
-            switch newValue {
-            case .idle, .connecting, .ready: _isUsable.store(true, ordering: .relaxed)
-            case .failed, .cancelled: _isUsable.store(false, ordering: .relaxed)
-            }
+    private var phase: Phase = .idle
+
+    @discardableResult
+    private func transition(to new: Phase) -> Bool {
+        guard Phase.transition(&phase, to: new) else { return false }
+        switch new {
+        case .idle, .connecting, .ready: _isUsable.store(true, ordering: .relaxed)
+        case .failed, .cancelled: _isUsable.store(false, ordering: .relaxed)
         }
+        return true
     }
-    
+
     private var readyTask: Task<Void, Error>?
-    
+
     private var receiveTask: Task<Void, Never>?
 
     private var nextToken: Token = 0
     private var registrations: [Token: Registration] = [:]
     private var tokensByResponse: [ResponseKey: [Token]] = [:]
     private var tokensByPort: [UInt16: [Token]] = [:]
-    
+
     private var sessionID: UInt64 = 0
     private var packetIDCounter: UInt64 = 0
     private var outboundCipherKey: Data?
-    
+
     private var remoteSessionID: UInt64 = 0
     private var remoteCipherKey: Data?
-    
+
     private let pskHashes: [Data]
 
     // MARK: - Init
@@ -107,7 +133,7 @@ actor ShadowsocksUDPSession {
         self.serverHost = serverHost
         self.serverPort = serverPort
 
-        let asyncTransport = UDPTransport(host: serverHost, port: serverPort, resolvesViaProxyDNS: true)
+        let asyncTransport = UDPTransport(host: serverHost, port: serverPort, resolution: .proxies)
         self.asyncTransport = asyncTransport
 
         switch mode {
@@ -144,56 +170,39 @@ actor ShadowsocksUDPSession {
     }
 
     // MARK: - Public API
-    
+
     nonisolated var isUsable: Bool {
         _isUsable.load(ordering: .relaxed)
     }
-    
-    func register(
-        dstHost: String,
-        dstPort: UInt16,
-        responseHostHints: [String] = []
-    ) -> (token: Token, stream: AsyncThrowingStream<Data, Error>) {
+
+    func register(dstHost: String, dstPort: UInt16) -> (token: Token, stream: AsyncThrowingStream<Data, Error>) {
         nextToken += 1
         let token = nextToken
 
-        var hosts: Set<String> = [dstHost]
-        for hint in responseHostHints { hosts.insert(hint) }
-        
-        let pinned = hosts.count > 1
-        
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
         let registration = Registration(
             token: token,
             port: dstPort,
-            responseHosts: hosts,
-            hasLearnedSource: pinned,
+            responseHosts: [dstHost],
             inbox: continuation
         )
         registrations[token] = registration
-        for host in hosts {
-            tokensByResponse[ResponseKey(host: host, port: dstPort), default: []].append(token)
-        }
+        tokensByResponse[ResponseKey(host: dstHost, port: dstPort), default: []].append(token)
         tokensByPort[dstPort, default: []].append(token)
-
-        if case .idle = state {
+        
+        switch phase {
+        case .idle:
             startConnectIfNeeded()
+        case .failed(let error):
+            continuation.finish(throwing: error)
+        case .cancelled:
+            continuation.finish(throwing: AnywhereError.transport(.terminated))
+        case .connecting, .ready:
+            break
         }
         return (token, stream)
     }
 
-    func addResponseHints(token: Token, hints: [String]) {
-        guard let registration = registrations[token] else { return }
-        var inserted = false
-        for hint in hints where registration.responseHosts.insert(hint).inserted {
-            tokensByResponse[ResponseKey(host: hint, port: registration.port), default: []].append(token)
-            inserted = true
-        }
-        if inserted {
-            registration.hasLearnedSource = true
-        }
-    }
-    
     func unregister(token: Token) {
         guard let registration = registrations.removeValue(forKey: token) else { return }
         for host in registration.responseHosts {
@@ -202,7 +211,7 @@ actor ShadowsocksUDPSession {
         removeToken(token, from: &tokensByPort, key: registration.port)
         registration.inbox.finish()
     }
-    
+
     func send(
         token: Token,
         dstHost: String,
@@ -220,7 +229,7 @@ actor ShadowsocksUDPSession {
     deinit {
         asyncTransport.cancel()
     }
-    
+
     nonisolated func cancel() {
         _isUsable.store(false, ordering: .relaxed)
         asyncTransport.cancel()
@@ -228,8 +237,8 @@ actor ShadowsocksUDPSession {
     }
 
     private func performCancel() {
-        if case .cancelled = state { return }
-        state = .cancelled
+        if case .cancelled = phase { return }
+        transition(to: .cancelled)
         notifyAllFlows(error: AnywhereError.transport(.terminated))
         readyTask?.cancel()
         readyTask = nil
@@ -241,9 +250,9 @@ actor ShadowsocksUDPSession {
     }
 
     // MARK: - Connect
-    
+
     private func ensureReadyForSend() async throws {
-        switch state {
+        switch phase {
         case .ready:
             return
         case .failed(let error):
@@ -255,10 +264,10 @@ actor ShadowsocksUDPSession {
             try await task.value
         }
     }
-    
+
     @discardableResult
     private func startConnectIfNeeded() -> Task<Void, Error>? {
-        switch state {
+        switch phase {
         case .ready, .failed, .cancelled:
             return nil
         case .idle, .connecting:
@@ -271,35 +280,30 @@ actor ShadowsocksUDPSession {
             return task
         }
     }
-    
+
     private func performConnect() async throws {
-        if case .idle = state { state = .connecting }
+        transition(to: .connecting)
         do {
             try await asyncTransport.connect()
         } catch {
-            if case .cancelled = state { throw AnywhereError.transport(.terminated) }
-            state = .failed(error)
+            if case .cancelled = phase { throw AnywhereError.transport(.terminated) }
+            transition(to: .failed(error))
             asyncTransport.cancel()
             notifyAllFlows(error: error)
             throw error
         }
-        if case .cancelled = state {
+        guard transition(to: .ready) else {
             throw AnywhereError.transport(.terminated)
         }
-        state = .ready
         startReceiveLoop()
     }
 
     private func handleTransportError(_ error: Error) {
-        switch state {
-        case .cancelled, .failed: return
-        default: break
-        }
-        state = .failed(error)
+        guard transition(to: .failed(error)) else { return }
         asyncTransport.cancel()
         notifyAllFlows(error: error)
     }
-    
+
     private func startReceiveLoop() {
         let asyncTransport = self.asyncTransport
         receiveTask = Task { [weak self] in
@@ -313,7 +317,7 @@ actor ShadowsocksUDPSession {
             }
         }
     }
-    
+
     private func notifyAllFlows(error: Error) {
         for registration in registrations.values {
             registration.inbox.finish(throwing: error)
@@ -328,7 +332,6 @@ actor ShadowsocksUDPSession {
         do {
             decoded = try decryptPacket(data)
         } catch {
-            logger.debug("[SS-UDP] Decrypt error: \(error.localizedDescription)")
             return
         }
 
@@ -339,7 +342,7 @@ actor ShadowsocksUDPSession {
             registration.inbox.yield(decoded.payload)
             return
         }
-        
+
         if let tokens = tokensByPort[decoded.port] {
             let target = firstRegistration(in: tokens, where: { !$0.hasLearnedSource })
                 ?? firstRegistration(in: tokens)
@@ -353,7 +356,6 @@ actor ShadowsocksUDPSession {
                 return
             }
         }
-        logger.debug("[SS-UDP] No flow for reply from \(decoded.host):\(decoded.port); dropped")
     }
 
     private func firstRegistration(in tokens: [Token]) -> Registration? {
@@ -391,7 +393,7 @@ actor ShadowsocksUDPSession {
             return try encryptSS2022ChaCha(payload: payload, dstHost: dstHost, dstPort: dstPort, psk: psk)
         }
     }
-    
+
     private func encryptSS2022AES(
         payload: Data,
         dstHost: String,
@@ -546,7 +548,7 @@ actor ShadowsocksUDPSession {
             return try parseServerUDPBody(innerBody)
         }
     }
-    
+
     private func parseServerUDPBody(_ body: Data) throws -> (host: String, port: UInt16, payload: Data) {
         guard body.count >= 1 + 8 + 8 + 2 else {
             throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed))
@@ -561,7 +563,7 @@ actor ShadowsocksUDPSession {
         _ = withUnsafeMutableBytes(of: &epochBE) { pointer in
             body[offset..<offset+8].copyBytes(to: pointer)
         }
-        let epoch = Int64(UInt64(bigEndian: epochBE))
+        let epoch = Int64(clamping: UInt64(bigEndian: epochBE))
         let now = Int64(Date().timeIntervalSince1970)
         if abs(now - epoch) > 30 {
             throw AnywhereError.proxy(.shadowsocks, .cipher(.staleTimestamp))
@@ -581,6 +583,7 @@ actor ShadowsocksUDPSession {
         guard body.endIndex - offset >= 2 else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
         let paddingLen = Int(UInt16(body[offset]) << 8 | UInt16(body[offset + 1]))
         offset += 2
+        guard body.endIndex - offset >= paddingLen else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
         offset += paddingLen
 
         guard let parsed = ShadowsocksProtocol.decodeUDPPacket(data: Data(body[offset...])) else {

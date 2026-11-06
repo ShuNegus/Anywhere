@@ -6,25 +6,26 @@
 //
 
 import Foundation
-import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "FlowSlot")
 
 nonisolated final class FlowSlot: Sendable {
-    
+
     private let context: String
-    private let released = Atomic<Bool>(false)
+    private let released = OneShotLatch()
 
     init(context: String) {
         self.context = context
     }
-    
+
     func release() {
-        released.store(true, ordering: .relaxed)
+        if !released.claim() {
+            logger.error("\(context): Flow slot released twice")
+        }
     }
 
     deinit {
-        guard !released.load(ordering: .relaxed) else { return }
-        logger.error("\(context) deallocated without release — teardown never ran; a cancel path has regressed.")
+        guard !released.isClaimed else { return }
+        logger.error("\(context): Flow slot leaked")
     }
 }

@@ -9,48 +9,47 @@ import Foundation
 import Observation
 import SwiftUI
 
-nonisolated private let logger = AnywhereLogger(category: "SubscriptionStore")
-
 @MainActor
 @Observable
 class SubscriptionStore {
-    static let shared = SubscriptionStore()
-
     private(set) var subscriptions: [Subscription] = []
     private var tombstones: [Subscription] = []
+
+    @ObservationIgnored private let syncStore: SyncStore
+    @ObservationIgnored private var loadedItems: [Data]?
     /// Backup route (TURN) status per subscription, for the icon next to its name.
     /// Device-local and outside iCloud sync: it reflects this device's last fetch.
     private(set) var turnAvailability: [UUID: TurnAvailability] = TurnAvailabilityPersistence.load()
-    
-    @ObservationIgnored private var loadedBlob: Data?
+
     @ObservationIgnored private var mutationEpoch = 0
-    
+
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    private init() {
-        let data = JSONBlobStore.shared.load(.subscriptions)
-        loadedBlob = data
-        let split = Self.decodeSplit(from: data)
+    init(syncStore: SyncStore) {
+        self.syncStore = syncStore
+        let items = syncStore.loadItems(.subscriptions)
+        loadedItems = items
+        let split = Self.decodeSplit(from: items)
         subscriptions = split.live
         tombstones = split.tombstones
     }
 
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                () -> (data: Data?, live: [Subscription], tombstones: [Subscription])? in
-                let data = JSONBlobStore.shared.load(.subscriptions)
-                guard data != previous else { return nil }
-                let split = Self.decodeSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [Subscription], tombstones: [Subscription])? in
+                let items = syncStore.loadItems(.subscriptions)
+                guard items != previous else { return nil }
+                let split = Self.decodeSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             subscriptions = outcome.live
             tombstones = outcome.tombstones
             return
@@ -67,22 +66,17 @@ class SubscriptionStore {
         subscriptions.append(stamped)
         save()
     }
-
-    func update(_ subscription: Subscription) {
-        if let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) {
-            var stamped = subscription
-            stamped.updatedAt = SyncStamp.after(subscriptions[index])
-            subscriptions[index] = stamped
-            save()
-        }
+    
+    private func mutate(id: UUID, _ apply: (inout Subscription) -> Void) {
+        guard let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        var record = subscriptions[index]
+        apply(&record)
+        record.updatedAt = SyncStamp.after(subscriptions[index])
+        subscriptions[index] = record
+        save()
     }
     
-    func delete(_ subscription: Subscription, configurationStore: ConfigurationStore? = nil) {
-        let configurationStore = configurationStore ?? .shared
-        configurationStore.deleteConfigurations(for: subscription.id)
-        TurnMetadataStore.shared.removeMetadata(forSubscription: subscription.id)
-        setTurnAvailability(nil, for: subscription.id)
-        SubscriptionAutoRefresher.shared.subscriptionDeleted(subscription.id)
+    func delete(_ subscription: Subscription) {
         subscriptions.removeAll { $0.id == subscription.id }
         recordTombstone(subscription)
         save()
@@ -95,13 +89,8 @@ class SubscriptionStore {
 
     // MARK: - Persistence
     
-    nonisolated private static func decodeSplit(from data: Data?) -> (live: [Subscription], tombstones: [Subscription]) {
-        guard let data else { return ([], []) }
-        guard let all = JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) else {
-            JSONBlobStore.quarantine(.subscriptions, data)
-            return ([], [])
-        }
-        return Tombstone.split(all)
+    nonisolated private static func decodeSplit(from items: [Data]) -> (live: [Subscription], tombstones: [Subscription]) {
+        Tombstone.split(SyncCodec.decodeItems(Subscription.self, key: .subscriptions, payloads: items))
     }
     
     private func recordTombstone(_ subscription: Subscription) {
@@ -118,18 +107,12 @@ class SubscriptionStore {
 
     private func save() {
         mutationEpoch += 1
-        let snapshot = subscriptions + tombstones
+        let live = subscriptions
+        let snapshot = live + tombstones
         let previous = saveTask
-        saveTask = Task.detached {
+        saveTask = Task.detached { [syncStore] in
             await previous?.value
-            do {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                let data = try encoder.encode(snapshot)
-                JSONBlobStore.shared.save(.subscriptions, data: data)
-            } catch {
-                logger.report(AnywhereError.store(.saveFailed(.subscriptions, underlying: error)))
-            }
+            syncStore.save(.subscriptions, items: SyncCodec.encodeItems(snapshot), order: SyncCodec.order(of: live))
         }
     }
 }
@@ -160,7 +143,7 @@ extension SubscriptionStore {
         return TurnAvailabilityPolicy.availability(of: metadata, hasManualVKLink: hasManualLink)
     }
 
-    fileprivate func setTurnAvailability(_ value: TurnAvailability?, for id: UUID) {
+    func setTurnAvailability(_ value: TurnAvailability?, for id: UUID) {
         guard turnAvailability[id] != value else { return }
         turnAvailability[id] = value
         TurnAvailabilityPersistence.save(turnAvailability)
@@ -192,11 +175,12 @@ extension SubscriptionStore {
         guard let subId = configuration.subscriptionId else { return nil }
         return subscriptions.first { $0.id == subId }
     }
-    
-    var pickerSections: [PickerSection] {
-        let configStore = ConfigurationStore.shared
-        return subscriptions.compactMap { subscription in
-            let configs = configStore.configurations(for: subscription)
+
+    /// One section per subscription for the home screen's server list, with the backup
+    /// route status of the subscription and the servers it reaches.
+    func pickerSections(configurationStore: ConfigurationStore) -> [PickerSection] {
+        subscriptions.compactMap { subscription in
+            let configs = configurationStore.configurations(for: subscription)
             guard !configs.isEmpty else { return nil }
             let marked = TurnAvailabilityPolicy.marksServers(
                 hosts: configs.map(\.serverAddress),
@@ -213,79 +197,26 @@ extension SubscriptionStore {
         }
     }
 
-    func toggleCollapsed(_ subscription: Subscription) {
-        var updated = subscription
-        updated.collapsed.toggle()
-        update(updated)
-    }
-
     func rename(_ subscription: Subscription, to newName: String) {
-        var updated = subscription
-        updated.name = newName
-        updated.isNameCustomized = true
-        update(updated)
+        mutate(id: subscription.id) {
+            $0.name = newName
+            $0.isNameCustomized = true
+        }
     }
 
-    func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration], turn: TurnMetadata? = nil, push: SubscriptionPushInfo? = nil, turnOutcome: TurnFetchOutcome? = nil) {
-        add(subscription)
-        applyTurnOutcome(turnOutcome ?? (turn.map { .loaded($0) } ?? .failed), for: subscription.id)
-        SubscriptionAutoRefresher.shared.subscriptionFetched(subscription.id, push: push)
-        let tagged = newConfigurations.map { configuration in
-            ProxyConfiguration(
-                id: configuration.id, name: configuration.name,
-                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
-                subscriptionId: subscription.id,
-                outbound: configuration.outbound
-            )
-        }
-        ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: tagged)
-    }
     
-    func refresh(_ subscription: Subscription) async throws {
-        let result = try await SubscriptionFetcher.fetch(url: subscription.url)
-        
-        let oldConfigurations = ConfigurationStore.shared.configurations(for: subscription)
-        var oldByName: [String: [ProxyConfiguration]] = [:]
-        for old in oldConfigurations {
-            oldByName[old.name, default: []].append(old)
-        }
-        var oldNameCursor: [String: Int] = [:]
-
-        var newConfigurations: [ProxyConfiguration] = []
-        for configuration in result.configurations {
-            let name = configuration.name
-            let cursor = oldNameCursor[name, default: 0]
-            let id: UUID
-            if let group = oldByName[name], cursor < group.count {
-                id = group[cursor].id
-                oldNameCursor[name] = cursor + 1
-            } else {
-                id = configuration.id
+    func applyRefreshResult(_ result: SubscriptionFetcher.Result, to subscriptionId: UUID) {
+        mutate(id: subscriptionId) { record in
+            record.lastUpdate = Date()
+            record.upload = result.upload ?? record.upload
+            record.download = result.download ?? record.download
+            record.total = result.total ?? record.total
+            record.expire = result.expire ?? record.expire
+            record.iconLight = result.iconLight
+            record.iconDark = result.iconDark
+            if let name = result.name, !record.isNameCustomized {
+                record.name = name
             }
-            newConfigurations.append(ProxyConfiguration(
-                id: id, name: configuration.name,
-                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
-                subscriptionId: subscription.id,
-                outbound: configuration.outbound
-            ))
         }
-
-        ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: newConfigurations)
-
-        // A refresh that comes back without a `turn` block clears the stale one, so a
-        // relay withdrawn server-side stops being dialled. A failed fetch keeps it.
-        applyTurnOutcome(result.turnOutcome, for: subscription.id)
-        SubscriptionAutoRefresher.shared.subscriptionFetched(subscription.id, push: result.push)
-
-        var updated = subscription
-        updated.lastUpdate = Date()
-        updated.upload = result.upload ?? subscription.upload
-        updated.download = result.download ?? subscription.download
-        updated.total = result.total ?? subscription.total
-        updated.expire = result.expire ?? subscription.expire
-        if let name = result.name, !updated.isNameCustomized {
-            updated.name = name
-        }
-        update(updated)
     }
 }

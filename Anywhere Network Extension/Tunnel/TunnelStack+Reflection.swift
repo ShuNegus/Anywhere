@@ -6,94 +6,24 @@
 //
 
 import Foundation
+import AnywhereIP
 
 extension TunnelStack {
+    nonisolated enum Reflector {
+        private static let target: UInt32 = {
+            var raw = in_addr()
+            inet_pton(AF_INET, TunnelAddress.reflection, &raw)
+            return UInt32(bigEndian: raw.s_addr)
+        }()
 
-    // MARK: - Reflection
-    //
-    // Stateless src⇄dst swap written back into the TUN; symmetric, so both legs
-    // hit this branch with no NAT table. A pure swap leaves every checksum
-    // valid: the IPv4 header sums the same words, TCP/UDP/ICMPv6 pseudo-headers
-    // sum src+dst either way, and ICMPv4 doesn't cover addresses.
-
-    /// Published through the reflector Mutex on change, read once per inbound batch.
-    struct Reflector {
-        /// Packed `b0<<24 | b1<<16 | b2<<8 | b3`, matching the per-packet compare.
-        let ipv4Addresses: [UInt32]
-        let ipv6Addresses: [SIMD16<UInt8>]
-
-        var isActive: Bool { !ipv4Addresses.isEmpty || !ipv6Addresses.isEmpty }
-
-        static let inactive = Reflector(v4: [], v6: [])
-
-        private init(v4: [UInt32], v6: [SIMD16<UInt8>]) {
-            self.ipv4Addresses = v4
-            self.ipv6Addresses = v6
-        }
-
-        init(addresses: [String]) {
-            var v4: [UInt32] = []
-            var v6: [SIMD16<UInt8>] = []
-            for raw in addresses {
-                let trimmedAddress = raw.trimmingCharacters(in: .whitespaces)
-                guard !trimmedAddress.isEmpty else { continue }
-                if trimmedAddress.contains(":") {
-                    var a6 = in6_addr()
-                    if inet_pton(AF_INET6, trimmedAddress, &a6) == 1 {
-                        var bytes = SIMD16<UInt8>()
-                        withUnsafeBytes(of: &a6) { buffer in
-                            for i in 0..<16 { bytes[i] = buffer[i] }
-                        }
-                        v6.append(bytes)
-                    }
-                } else {
-                    var a4 = in_addr()
-                    if inet_pton(AF_INET, trimmedAddress, &a4) == 1 {
-                        // in_addr is network byte order, matching the header.
-                        let packed: UInt32 = withUnsafeBytes(of: &a4) { buffer in
-                            UInt32(buffer[0]) << 24 | UInt32(buffer[1]) << 16 | UInt32(buffer[2]) << 8 | UInt32(buffer[3])
-                        }
-                        v4.append(packed)
-                    }
-                }
+        static func reflect(_ packet: UnsafeRawBufferPointer) -> OutboundPacket? {
+            guard packet.count >= 20, packet[0] >> 4 == 4 else { return nil }
+            let destination = UInt32(packet[16]) << 24 | UInt32(packet[17]) << 16 | UInt32(packet[18]) << 8 | UInt32(packet[19])
+            guard destination == target else { return nil }
+            return OutboundPacket(byteCount: packet.count, isIPv6: false) { reflected in
+                reflected.copyMemory(from: packet)
+                for i in 12..<16 { reflected.swapAt(i, i + 4) }
             }
-            self.ipv4Addresses = v4
-            self.ipv6Addresses = v6
-        }
-
-        /// Returns a src⇄dst-swapped copy if the destination matches; nil routes
-        /// normally. Ports, payload, and checksums are untouched.
-        func reflect(_ packet: Data) -> (data: Data, isIPv6: Bool)? {
-            // nil = no match; false = IPv4 match; true = IPv6 match.
-            let match: Bool? = packet.withUnsafeBytes { raw -> Bool? in
-                guard let p = raw.bindMemory(to: UInt8.self).baseAddress, raw.count >= 1 else { return nil }
-                switch (p[0] >> 4) & 0x0F {
-                case 4:
-                    guard raw.count >= 20 else { return nil }
-                    let destination = UInt32(p[16]) << 24 | UInt32(p[17]) << 16 | UInt32(p[18]) << 8 | UInt32(p[19])
-                    return ipv4Addresses.contains(destination) ? false : nil
-                case 6:
-                    guard raw.count >= 40 else { return nil }
-                    var destination = SIMD16<UInt8>()
-                    for i in 0..<16 { destination[i] = p[24 + i] }
-                    return ipv6Addresses.contains(destination) ? true : nil
-                default:
-                    return nil
-                }
-            }
-            guard let isIPv6 = match else { return nil }
-
-            // Swap on a copy: IPv4 src [12,16) ⇄ dst [16,20); IPv6 src [8,24) ⇄ dst [24,40).
-            var out = packet
-            out.withUnsafeMutableBytes { raw in
-                guard let p = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-                if isIPv6 {
-                    for i in 0..<16 { swap(&p[8 + i], &p[24 + i]) }
-                } else {
-                    for i in 0..<4 { swap(&p[12 + i], &p[16 + i]) }
-                }
-            }
-            return (out, isIPv6)
         }
     }
 }

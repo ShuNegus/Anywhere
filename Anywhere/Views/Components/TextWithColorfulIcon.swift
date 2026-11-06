@@ -13,18 +13,27 @@ struct TextWithColorfulIcon<F, B>: View where F : ShapeStyle, B : ShapeStyle {
     let systemName: String
     let foregroundStyle: F
     let backgroundStyle: B
+    
+    init(title: String.LocalizationValue, comment: StaticString? = nil, systemName: String, foregroundStyle: F, backgroundStyle: B) {
+        self.title = title
+        self.comment = comment
+        self.systemName = systemName
+        self.foregroundStyle = foregroundStyle
+        self.backgroundStyle = backgroundStyle
+    }
 
     var body: some View {
         HStack {
             Image(systemName: systemName)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 19, height: 19)
+                .frame(width: 18, height: 18)
                 .foregroundStyle(foregroundStyle)
                 .padding(5)
                 .background(backgroundStyle)
-                .clipShape(.rect(cornerRadius: 7))
+                .clipShape(.rect(cornerRadius: 8))
             Text(String(localized: title, comment: comment))
+                .minimumScaleFactor(0.1)
         }
     }
 }
@@ -35,6 +44,14 @@ struct TextWithColorfulIconAndCustomImage<F, B>: View where F : ShapeStyle, B : 
     let imageName: String
     let foregroundStyle: F
     let backgroundStyle: B
+    
+    init(title: String.LocalizationValue, comment: StaticString? = nil, imageName: String, foregroundStyle: F, backgroundStyle: B) {
+        self.title = title
+        self.comment = comment
+        self.imageName = imageName
+        self.foregroundStyle = foregroundStyle
+        self.backgroundStyle = backgroundStyle
+    }
 
     var body: some View {
         HStack {
@@ -43,12 +60,13 @@ struct TextWithColorfulIconAndCustomImage<F, B>: View where F : ShapeStyle, B : 
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 19, height: 19)
+                .frame(width: 18, height: 18)
                 .foregroundStyle(foregroundStyle)
                 .padding(5)
                 .background(backgroundStyle)
-                .clipShape(.rect(cornerRadius: 7))
+                .clipShape(.rect(cornerRadius: 8))
             Text(String(localized: title, comment: comment))
+                .minimumScaleFactor(0.1)
         }
     }
 }

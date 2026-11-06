@@ -7,17 +7,12 @@
 
 import Compression
 import Foundation
+import zlib
 
 nonisolated private let logger = AnywhereLogger(category: "MITMBodyCodec")
 
-/// `Content-Encoding` decoders so body rules operate on plaintext. Decode-only:
-/// after rewriting we emit identity, always implicitly accepted (RFC 7231 §5.3.4).
 nonisolated enum MITMBodyCodec {
-
     static let maxBufferedBodyBytes: Int = 4 * 1024 * 1024
-
-    /// Max stacked `Content-Encoding` codings; a long crafted `gzip, gzip, …`
-    /// chain is a CPU-amplification DoS. Longer chains are treated as unsupported.
     static let maxCodecChainLength = 4
 
     enum Codec: Equatable {
@@ -29,16 +24,15 @@ nonisolated enum MITMBodyCodec {
 
     struct Plan: Equatable {
         let codecs: [Codec]
-        let supported: Bool
+        let isSupported: Bool
 
         var requiresDecompression: Bool {
-            supported && codecs.contains { $0 != .identity }
+            isSupported && codecs.contains { $0 != .identity }
         }
 
-        static let identity = Plan(codecs: [.identity], supported: true)
+        static let identity = Plan(codecs: [.identity], isSupported: true)
     }
 
-    /// Decoding plan for a `Content-Encoding` header value; nil/empty maps to identity.
     static func plan(for contentEncoding: String?) -> Plan {
         guard let raw = contentEncoding, !raw.isEmpty else { return .identity }
         let tokens = raw
@@ -47,7 +41,7 @@ nonisolated enum MITMBodyCodec {
             .filter { !$0.isEmpty }
         if tokens.isEmpty { return .identity }
         var codecs: [Codec] = []
-        var supported = true
+        var isSupported = true
         for token in tokens {
             switch token {
             case "identity":
@@ -59,22 +53,17 @@ nonisolated enum MITMBodyCodec {
             case "br":
                 codecs.append(.brotli)
             default:
-                supported = false
+                isSupported = false
             }
         }
         if codecs.count > maxCodecChainLength {
-            supported = false
+            isSupported = false
         }
-        return Plan(codecs: codecs, supported: supported)
+        return Plan(codecs: codecs, isSupported: isSupported)
     }
 
-    /// Content-codings we can decode — the set `constrainedAcceptEncoding` clamps a request's
-    /// `Accept-Encoding` to.
     static let decodableContentCodings: Set<String> = ["gzip", "x-gzip", "deflate", "br", "identity"]
 
-    /// Clamps `Accept-Encoding` to ``decodableContentCodings`` (drops `zstd`, `*`, …) so a
-    /// buffered body rule isn't defeated by an undecodable `Content-Encoding`. Empty result
-    /// falls back to `identity`; `;q=` weights are preserved.
     static func constrainedAcceptEncoding(_ value: String) -> String {
         let kept = value
             .split(separator: ",")
@@ -87,9 +76,8 @@ nonisolated enum MITMBodyCodec {
         return kept.isEmpty ? "identity" : kept.joined(separator: ", ")
     }
 
-    /// Decompresses in reverse-of-apply order; nil if any codec fails or the plan is unsupported.
     static func decompress(_ data: Data, plan: Plan, host: String) -> Data? {
-        guard plan.supported else { return nil }
+        guard plan.isSupported else { return nil }
         var current = data
         for codec in plan.codecs.reversed() {
             switch codec {
@@ -98,19 +86,19 @@ nonisolated enum MITMBodyCodec {
             case .gzip:
                 let (decoded, failure) = gunzip(current)
                 guard let next = decoded else {
-                    logger.warning("\(host): gzip decode failed — \(failure?.description ?? "unknown") (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("[MITM] \(host): gzip decode failed" + (failure.map { ": \($0)" } ?? ""))
                     return nil
                 }
                 current = next
             case .deflate:
                 guard let next = inflateDeflate(current) else {
-                    logger.warning("\(host): deflate decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("[MITM] \(host): deflate decode failed")
                     return nil
                 }
                 current = next
             case .brotli:
                 guard let next = streamDecode(current, algorithm: COMPRESSION_BROTLI) else {
-                    logger.warning("\(host): brotli decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("[MITM] \(host): brotli decode failed")
                     return nil
                 }
                 current = next
@@ -119,15 +107,8 @@ nonisolated enum MITMBodyCodec {
         return current
     }
 
-    /// Leading bytes as hex for failure logs; capped at 4 bytes so a mislabeled
-    /// identity body can't spill plaintext.
-    private static func headFingerprint(_ data: Data, maxBytes: Int = 4) -> String {
-        data.prefix(maxBytes).map { String(format: "%02x", $0) }.joined(separator: " ")
-    }
+    // MARK: - Single-codec encode/decode
 
-    // MARK: - Single-codec encode/decode (JS `Anywhere.codec` bridge)
-
-    /// Single-codec decode for the JS `Anywhere.codec` bridge; output capped at `maxBufferedBodyBytes`.
     static func decode(_ data: Data, codec: Codec) -> Data? {
         switch codec {
         case .identity: return data
@@ -137,8 +118,6 @@ nonisolated enum MITMBodyCodec {
         }
     }
 
-    /// Single-codec encode for the JS `Anywhere.codec` bridge. gzip emits a single
-    /// member; deflate emits raw DEFLATE — what servers actually send despite RFC 1950.
     static func encode(_ data: Data, codec: Codec) -> Data? {
         switch codec {
         case .identity:
@@ -157,65 +136,53 @@ nonisolated enum MITMBodyCodec {
 
     private enum GzipFailure: CustomStringConvertible {
         case firstMember(GzipMemberFailure)
-        /// Decompression-bomb guard tripped, not a malformed stream.
         case capExceeded
-        /// Trailer mismatch — effectively always a concatenated multi-member body.
         case multiMember
-        /// A member after the first failed to decode — returning the decoded prefix would pass
-        /// off a partial body as complete, so fail closed.
         case trailingMember(GzipMemberFailure)
 
         var description: String {
             switch self {
             case .firstMember(let reason): return reason.description
-            case .capExceeded:             return "output exceeded \(maxBufferedBodyBytes) B cap"
-            case .multiMember:             return "multi-member gzip unsupported; forwarding verbatim"
-            case .trailingMember(let reason): return "gzip member after the first failed (\(reason)); forwarding verbatim"
+            case .capExceeded:             return "output too large"
+            case .multiMember:             return "multi-member gzip unsupported"
+            case .trailingMember(let reason): return "trailing member: \(reason)"
             }
         }
     }
 
     private enum GzipMemberFailure: CustomStringConvertible {
-        case tooShort(available: Int)
+        case tooShort
         case badMagic(UInt8, UInt8, UInt8)
         case truncatedHeaderField(String)
-        case deflate(status: String, consumed: Int, of: Int, produced: Int)
+        case deflate(status: String)
 
         var description: String {
             switch self {
-            case .tooShort(let n):
-                return "gzip member too short (\(n) B, need ≥18)"
-            case .badMagic(let a, let b, let c):
-                return String(format: "not gzip — magic %02x %02x %02x (want 1f 8b 08)", a, b, c)
+            case .tooShort:
+                return "member too short"
+            case .badMagic(let byte0, let byte1, let byte2):
+                return String(format: "bad magic %02x %02x %02x", byte0, byte1, byte2)
             case .truncatedHeaderField(let field):
-                return "truncated \(field) header field"
-            case .deflate(let status, let consumed, let total, let produced):
-                return "deflate \(status) after \(consumed)/\(total) B in, \(produced) B out"
+                return "truncated \(field) field"
+            case .deflate(let status):
+                return "deflate \(status)"
             }
         }
     }
 
-    /// `capExceeded` stays distinct from `failure` so gunzip aborts the whole
-    /// body (bomb guard) instead of treating it as a recoverable trailing-member failure.
     private enum GzipMemberOutcome {
-        /// `consumed` is the member's total wire span.
         case success(decoded: Data, consumed: Int)
         case failure(GzipMemberFailure)
         case capExceeded
     }
 
-    /// Decodes a gzip body (RFC 1952). The raw-deflate decoder emits only member 1, so the
-    /// trailer check catches the multi-member case. `allowMultiMember` returns every member;
-    /// otherwise fails closed on a multi-member trailer mismatch (forwards verbatim).
     private static func gunzip(_ data: Data, allowMultiMember: Bool = false) -> (decoded: Data?, failure: GzipFailure?) {
         var combined = Data()
         var cursor = data.startIndex
         let end = data.endIndex
         while cursor < end {
-            // Budget each member against the running total so peak memory stays near the cap.
             switch gunzipOneMember(data, from: cursor, producedSoFar: combined.count) {
             case .capExceeded:
-                logger.warning("gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                 return (nil, .capExceeded)
             case .failure(let reason):
                 return combined.isEmpty ? (nil, .firstMember(reason)) : (nil, .trailingMember(reason))
@@ -225,8 +192,6 @@ nonisolated enum MITMBodyCodec {
             }
         }
         if allowMultiMember { return (combined, nil) }
-        // Multi-member detection via the whole-body trailer pair (RFC 1952 §2.3.1): a member-1-only
-        // decode of a multi-member body fails the ISIZE/CRC-32 check. On mismatch, forward verbatim.
         guard gzipTrailerISIZE(data) == UInt32(truncatingIfNeeded: combined.count),
               gzipTrailerCRC32(data) == crc32(combined) else {
             return (nil, .multiMember)
@@ -234,8 +199,6 @@ nonisolated enum MITMBodyCodec {
         return (combined, nil)
     }
 
-    /// Little-endian ISIZE (RFC 1952 §2.3.1) from the last 4 bytes; 0 for a
-    /// too-short body, which then mismatches and fails closed.
     private static func gzipTrailerISIZE(_ data: Data) -> UInt32 {
         guard data.count >= 4 else { return 0 }
         let endIndex = data.endIndex
@@ -245,8 +208,6 @@ nonisolated enum MITMBodyCodec {
             | (UInt32(data[data.index(endIndex, offsetBy: -1)]) << 24)
     }
 
-    /// Little-endian CRC-32 (RFC 1952 §2.3.1): the 4 bytes preceding ISIZE;
-    /// 0 for a too-short body, which then mismatches and fails closed.
     private static func gzipTrailerCRC32(_ data: Data) -> UInt32 {
         guard data.count >= 8 else { return 0 }
         let endIndex = data.endIndex
@@ -262,54 +223,50 @@ nonisolated enum MITMBodyCodec {
         producedSoFar: Int
     ) -> GzipMemberOutcome {
         let end = data.endIndex
-        // Minimum: 10-byte fixed header + 8-byte trailer.
         let available = data.distance(from: offset, to: end)
-        guard available >= 18 else { return .failure(.tooShort(available: available)) }
+        guard available >= 18 else { return .failure(.tooShort) }
         let magicByte0 = data[offset]
-        let b1 = data[data.index(offset, offsetBy: 1)]
-        let b2 = data[data.index(offset, offsetBy: 2)]
-        guard magicByte0 == 0x1F, b1 == 0x8B, b2 == 0x08 else {
-            return .failure(.badMagic(magicByte0, b1, b2))
+        let magicByte1 = data[data.index(offset, offsetBy: 1)]
+        let magicByte2 = data[data.index(offset, offsetBy: 2)]
+        guard magicByte0 == 0x1F, magicByte1 == 0x8B, magicByte2 == 0x08 else {
+            return .failure(.badMagic(magicByte0, magicByte1, magicByte2))
         }
         let flags = data[data.index(offset, offsetBy: 3)]
         var index = data.index(offset, offsetBy: 10)
-        if flags & 0x04 != 0 { // FEXTRA
+        if flags & 0x04 != 0 {
             guard data.distance(from: index, to: end) >= 2 else { return .failure(.truncatedHeaderField("FEXTRA")) }
-            let xlen = Int(data[index]) | (Int(data[data.index(index, offsetBy: 1)]) << 8)
-            // Distance-check first: index(_:offsetBy:) past end can trap.
-            guard data.distance(from: index, to: end) >= 2 + xlen else { return .failure(.truncatedHeaderField("FEXTRA")) }
-            index = data.index(index, offsetBy: 2 + xlen)
+            let extraLength = Int(data[index]) | (Int(data[data.index(index, offsetBy: 1)]) << 8)
+            guard data.distance(from: index, to: end) >= 2 + extraLength else { return .failure(.truncatedHeaderField("FEXTRA")) }
+            index = data.index(index, offsetBy: 2 + extraLength)
         }
-        if flags & 0x08 != 0 { // FNAME (NUL-terminated)
+        if flags & 0x08 != 0 {
             while index < end, data[index] != 0 { index = data.index(after: index) }
             guard index < end else { return .failure(.truncatedHeaderField("FNAME")) }
             index = data.index(after: index)
         }
-        if flags & 0x10 != 0 { // FCOMMENT (NUL-terminated)
+        if flags & 0x10 != 0 {
             while index < end, data[index] != 0 { index = data.index(after: index) }
             guard index < end else { return .failure(.truncatedHeaderField("FCOMMENT")) }
             index = data.index(after: index)
         }
-        if flags & 0x02 != 0 { // FHCRC
+        if flags & 0x02 != 0 {
             guard data.distance(from: index, to: end) >= 2 else { return .failure(.truncatedHeaderField("FHCRC")) }
             index = data.index(index, offsetBy: 2)
         }
-        let deflateInput = data.subdata(in: index..<end)
+        let deflateInput = data[index..<end]
         let decoded: Data
         let deflateConsumed: Int
         switch streamDecodeMember(deflateInput, algorithm: COMPRESSION_ZLIB, budgetUsed: producedSoFar) {
-        case .success(let d, let c):
-            decoded = d
-            deflateConsumed = c
-        case .failure(let status, let consumedInput, let producedOutput):
-            return .failure(.deflate(status: status, consumed: consumedInput, of: deflateInput.count, produced: producedOutput))
+        case .success(let output, let consumed):
+            decoded = output
+            deflateConsumed = consumed
+        case .failure(let status):
+            return .failure(.deflate(status: status))
         case .capExceeded:
             return .capExceeded
         }
         let trailerStart = data.index(index, offsetBy: deflateConsumed)
         let trailerAvailable = data.distance(from: trailerStart, to: end)
-        // <8 trailer bytes: trailer truncated or swallowed by the raw-deflate
-        // decoder (its consumed count can run into it). The payload is whole — accept.
         guard trailerAvailable >= 8 else {
             return .success(decoded: decoded, consumed: data.distance(from: offset, to: end))
         }
@@ -318,38 +275,28 @@ nonisolated enum MITMBodyCodec {
         return .success(decoded: decoded, consumed: consumed)
     }
 
-    // MARK: - deflate (RFC 7230 §4.2.2)
+    // MARK: - deflate
 
-    /// Tries raw deflate first (what most servers actually send despite RFC 1950),
-    /// then falls back to zlib-wrapped.
     private static func inflateDeflate(_ data: Data) -> Data? {
-        // Empty input fails closed rather than silently blanking the body.
         guard !data.isEmpty else { return nil }
         if let raw = streamDecode(data, algorithm: COMPRESSION_ZLIB) {
             return raw
         }
-        // zlib-wrapped fallback: strip 2-byte header + 4-byte adler32 footer.
-        // Require >6 bytes or the strip yields an empty slice "successfully" decoded blank.
         guard data.count > 6 else { return nil }
-        // FDICT (FLG bit 5, RFC 1950 §2.2): a 4-byte DICTID follows the header so the 2-byte strip
-        // would be wrong, and a preset dictionary isn't supported anyway. Fail closed.
-        let flg = data[data.index(data.startIndex, offsetBy: 1)]
-        guard flg & 0x20 == 0 else { return nil }
+        let flags = data[data.index(data.startIndex, offsetBy: 1)]
+        guard flags & 0x20 == 0 else { return nil }
         let body = data.subdata(in: (data.startIndex + 2)..<(data.endIndex - 4))
         return streamDecode(body, algorithm: COMPRESSION_ZLIB)
     }
 
     // MARK: - Streaming decoder
 
-    /// Failure carries decoder progress (truncated vs corrupt stream);
-    /// `capExceeded` is the bomb guard, distinct from a genuine error.
     private enum StreamDecodeOutcome {
         case success(decoded: Data, consumed: Int)
-        case failure(status: String, consumedInput: Int, producedOutput: Int)
-        case capExceeded(producedOutput: Int)
+        case failure(status: String)
+        case capExceeded
     }
 
-    /// Streaming decode; nil on error or when output would exceed `maxBufferedBodyBytes`.
     private static func streamDecode(_ data: Data, algorithm: compression_algorithm) -> Data? {
         if case .success(let decoded, _) = streamDecodeMember(data, algorithm: algorithm) {
             return decoded
@@ -357,8 +304,6 @@ nonisolated enum MITMBodyCodec {
         return nil
     }
 
-    /// Like `streamDecode` but reports consumed-input count and failure progress.
-    /// Does not log — failure may be expected (`inflateDeflate` probes raw deflate first).
     private static func streamDecodeMember(
         _ data: Data,
         algorithm: compression_algorithm,
@@ -370,7 +315,7 @@ nonisolated enum MITMBodyCodec {
 
         var status = compression_stream_init(stream, COMPRESSION_STREAM_DECODE, algorithm)
         guard status == COMPRESSION_STATUS_OK else {
-            return .failure(status: "init-failed", consumedInput: 0, producedOutput: 0)
+            return .failure(status: "init-failed")
         }
         defer { compression_stream_destroy(stream) }
 
@@ -380,7 +325,7 @@ nonisolated enum MITMBodyCodec {
 
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> StreamDecodeOutcome in
             guard let inputBase = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return .failure(status: "no-base-address", consumedInput: 0, producedOutput: 0)
+                return .failure(status: "no-base-address")
             }
             stream.pointee.src_ptr = inputBase
             stream.pointee.src_size = data.count
@@ -390,15 +335,14 @@ nonisolated enum MITMBodyCodec {
             var output = Data()
             let flags = Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
             while true {
+                let sourceBefore = stream.pointee.src_size
                 status = compression_stream_process(stream, flags)
                 switch status {
                 case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
-                        // budgetUsed bounds *cumulative* multi-member output.
                         if budgetUsed + output.count + written > maxBufferedBodyBytes {
-                            logger.warning("decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting")
-                            return .capExceeded(producedOutput: output.count)
+                            return .capExceeded
                         }
                         output.append(buffer, count: written)
                     }
@@ -406,23 +350,22 @@ nonisolated enum MITMBodyCodec {
                         let consumed = data.count - stream.pointee.src_size
                         return .success(decoded: output, consumed: consumed)
                     }
-                    if stream.pointee.dst_size == 0 {
-                        stream.pointee.dst_ptr = buffer
-                        stream.pointee.dst_size = bufferSize
+                    stream.pointee.dst_ptr = buffer
+                    stream.pointee.dst_size = bufferSize
+                    if written == 0 && stream.pointee.src_size == sourceBefore {
+                        return .failure(status: "stalled")
                     }
                 case COMPRESSION_STATUS_ERROR:
-                    return .failure(status: "error", consumedInput: data.count - stream.pointee.src_size, producedOutput: output.count)
+                    return .failure(status: "error")
                 default:
-                    return .failure(status: "unexpected", consumedInput: data.count - stream.pointee.src_size, producedOutput: output.count)
+                    return .failure(status: "unexpected")
                 }
             }
         }
     }
 
-    // MARK: - Streaming encoder (JS codec bridge)
+    // MARK: - Streaming encoder
 
-    /// Streaming encode; nil on error or when output would exceed `maxBufferedBodyBytes` (cap
-    /// mirrors the decode path so a script can't inflate memory by recompressing oversized input).
     private static func streamEncode(_ data: Data, algorithm: compression_algorithm) -> Data? {
         let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
         defer { stream.deallocate() }
@@ -435,12 +378,9 @@ nonisolated enum MITMBodyCodec {
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { buffer.deallocate() }
 
-        // Helper so empty input (nil base address from withUnsafeBytes) still
-        // produces a valid empty stream instead of nil.
-        func run(srcBase: UnsafePointer<UInt8>?, srcCount: Int) -> Data? {
-            // src_size 0 means src_ptr is never read; buffer is a safe placeholder.
-            stream.pointee.src_ptr = srcBase ?? UnsafePointer(buffer)
-            stream.pointee.src_size = srcCount
+        func run(sourceBase: UnsafePointer<UInt8>?, sourceCount: Int) -> Data? {
+            stream.pointee.src_ptr = sourceBase ?? UnsafePointer(buffer)
+            stream.pointee.src_size = sourceCount
             stream.pointee.dst_ptr = buffer
             stream.pointee.dst_size = bufferSize
 
@@ -453,7 +393,6 @@ nonisolated enum MITMBodyCodec {
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
                         if output.count + written > maxBufferedBodyBytes {
-                            logger.warning("encode output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                             return nil
                         }
                         output.append(buffer, count: written)
@@ -474,54 +413,39 @@ nonisolated enum MITMBodyCodec {
         }
 
         if data.isEmpty {
-            return run(srcBase: nil, srcCount: 0)
+            return run(sourceBase: nil, sourceCount: 0)
         }
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Data? in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return nil
             }
-            return run(srcBase: base, srcCount: data.count)
+            return run(sourceBase: base, sourceCount: data.count)
         }
     }
 
-    // MARK: - gzip framing (RFC 1952)
+    // MARK: - gzip framing
 
-    /// Wraps raw DEFLATE in a single gzip member: 10-byte fixed header, body,
-    /// 8-byte trailer (CRC32 of the uncompressed input + ISIZE, little-endian).
     private static func gzipWrap(_ deflated: Data, original: Data) -> Data {
         var out = Data(capacity: 10 + deflated.count + 8)
-        // ID1 ID2 CM FLG | MTIME(4)=0 | XFL=0 OS=0xFF(unknown)
         out.append(contentsOf: [0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF])
         out.append(deflated)
         let crc = crc32(original)
         let isize = UInt32(truncatingIfNeeded: original.count)
-        out.append(contentsOf: [
-            UInt8(crc & 0xFF), UInt8((crc >> 8) & 0xFF),
-            UInt8((crc >> 16) & 0xFF), UInt8((crc >> 24) & 0xFF),
-            UInt8(isize & 0xFF), UInt8((isize >> 8) & 0xFF),
-            UInt8((isize >> 16) & 0xFF), UInt8((isize >> 24) & 0xFF),
-        ])
+        out.append(
+            contentsOf: [
+                UInt8(crc & 0xFF), UInt8((crc >> 8) & 0xFF),
+                UInt8((crc >> 16) & 0xFF), UInt8((crc >> 24) & 0xFF),
+                UInt8(isize & 0xFF), UInt8((isize >> 8) & 0xFF),
+                UInt8((isize >> 16) & 0xFF), UInt8((isize >> 24) & 0xFF),
+            ]
+        )
         return out
     }
 
-    /// CRC-32 (reflected, polynomial 0xEDB88320); the Compression framework
-    /// computes no checksum for raw DEFLATE, and the gzip trailer needs one.
     private static func crc32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
-        for byte in data {
-            let index = Int((crc ^ UInt32(byte)) & 0xFF)
-            crc = crc32Table[index] ^ (crc >> 8)
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: Bytef.self) else { return 0 }
+            return UInt32(truncatingIfNeeded: crc32_z(0, base, raw.count))
         }
-        return crc ^ 0xFFFF_FFFF
     }
-
-    private static let crc32Table: [UInt32] = {
-        (0..<256).map { i -> UInt32 in
-            var c = UInt32(i)
-            for _ in 0..<8 {
-                c = (c & 1) != 0 ? (0xEDB8_8320 ^ (c >> 1)) : (c >> 1)
-            }
-            return c
-        }
-    }()
 }

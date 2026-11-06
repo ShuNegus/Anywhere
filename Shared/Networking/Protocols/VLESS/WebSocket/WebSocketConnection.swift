@@ -22,22 +22,40 @@ nonisolated final class WebSocketConnection: Sendable {
 
     private let configuration: WebSocketConfiguration
 
-    private struct ConnectionState {
-        var isConnected = false
-        var upgraded = false
+    private enum Phase: PhaseTransitionable {
+        case upgrading
+        case open
+        case closed
+        case cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.upgrading, .open):
+                return true
+            case (_, .closed), (_, .cancelled):
+                return old != .closed && old != .cancelled
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct ConnectionState: PhaseHolding {
+        var phase: Phase = .upgrading
         var receiveBuffer = Data()
-        var heartbeatTask: Task<Void, Never>?
+        var heartbeatDeadline: DeadlineToken?
     }
 
     private let state: Mutex<ConnectionState>
-
-    /// Caps receive buffer growth (1 MB) against a misbehaving server.
+    
     private static let maxReceiveBufferSize = 1_048_576
+
+    private static let maxResponseHeaderSize = 65_536
 
     static let chromeUserAgent = ProxyUserAgent.chrome
 
     var isConnected: Bool {
-        state.withLock { $0.isConnected }
+        state.withLock { $0.phase == .open }
     }
 
     // MARK: - Initializers
@@ -45,7 +63,7 @@ nonisolated final class WebSocketConnection: Sendable {
     init(transport: any ByteTransport, configuration: WebSocketConfiguration) {
         self.configuration = configuration
         self.transport = transport
-        self.state = Mutex(ConnectionState(isConnected: true))
+        self.state = Mutex(ConnectionState())
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {
@@ -57,7 +75,7 @@ nonisolated final class WebSocketConnection: Sendable {
     }
 
     // MARK: - HTTP Upgrade Handshake
-    
+
     func performUpgrade(earlyData: Data? = nil) async throws {
         try await withDialDeadline(Self.upgradeDeadline, onExpiry: {
             self.cancel()
@@ -123,11 +141,14 @@ nonisolated final class WebSocketConnection: Sendable {
                 throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "Empty response from server"))
             }
 
-            let headerData: Data? = self.state.withLock { state in
+            let headerData: Data? = try self.state.withLock { state in
                 state.receiveBuffer.append(data)
 
                 let headerEnd: Data = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
                 guard let range = state.receiveBuffer.range(of: headerEnd) else {
+                    if state.receiveBuffer.count > Self.maxResponseHeaderSize {
+                        throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "response headers too large"))
+                    }
                     return nil
                 }
 
@@ -150,30 +171,40 @@ nonisolated final class WebSocketConnection: Sendable {
                 throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "Expected HTTP 101, got: \(firstLine)"))
             }
 
-            self.state.withLock { $0.upgraded = true }
+            let opened: Bool = self.state.withLock { $0.transition(to: .open) }
+            guard opened else {
+                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "cancelled during upgrade"))
+            }
             self.startHeartbeat()
             return
         }
     }
 
     // MARK: - Public API
-
-    /// Sends data as a binary WebSocket frame (masked, opcode 0x02).
+    
     func send(_ data: Data) async throws {
         let frame = buildFrame(opcode: 0x02, payload: data)
         try await transport.send(frame)
     }
-
-    /// Receives one application-data frame; `nil` signals a clean close (EOF). Ping/Pong/Close
-    /// control frames are handled inline (auto-Pong, Close acknowledgement) without surfacing.
+    
     func receive() async throws -> Data? {
+        switch state.withLock({ $0.phase }) {
+        case .upgrading:
+            throw AnywhereError.proxy(.webSocket, .notReady)
+        case .closed:
+            return nil
+        case .cancelled:
+            throw AnywhereError.transport(.terminated)
+        case .open:
+            break
+        }
         while true {
             if let result = state.withLock({ tryExtractFrame(&$0) }) {
                 switch result {
                 case .binary(let data):
+                    if data.isEmpty { continue }
                     return data
                 case .ping(let payload):
-                    // RFC 6455: echo payload in Pong (best-effort), then keep reading.
                     let pongFrame = buildFrame(opcode: 0x0A, payload: payload)
                     try? await transport.send(pongFrame)
                     continue
@@ -185,17 +216,17 @@ nonisolated final class WebSocketConnection: Sendable {
                     closePayload.append(UInt8(code & 0xFF))
                     let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
                     try? await transport.send(closeFrame)
-                    state.withLock { $0.isConnected = false }
+                    _ = state.withLock { $0.transition(to: .closed) }
                     if code == 1000 || code == 1005 {
                         return nil
                     }
                     throw AnywhereError.proxy(.webSocket, .webSocketClosed(code: code, reason: reason))
                 }
             }
-
-            // No complete frame buffered: read more bytes.
+            
             guard case .bytes(let data) = try await transport.receive(), !data.isEmpty else {
-                return nil // EOF
+                _ = state.withLock { $0.transition(to: .closed) }
+                return nil
             }
 
             let overflow: Bool = state.withLock { state in
@@ -214,50 +245,57 @@ nonisolated final class WebSocketConnection: Sendable {
 
     func cancel() {
         state.withLock {
-            $0.isConnected = false
+            $0.transition(to: .cancelled)
             $0.receiveBuffer.removeAll()
-            $0.heartbeatTask?.cancel()
-            $0.heartbeatTask = nil
+            $0.heartbeatDeadline?.cancel()
+            $0.heartbeatDeadline = nil
         }
         transport.cancel()
     }
 
     deinit {
-        // Reclaim the heartbeat loop if dropped without cancel(); Task.cancel() is thread-safe.
-        state.withLock { $0.heartbeatTask?.cancel() }
+        state.withLock { $0.heartbeatDeadline?.cancel() }
     }
 
-    // MARK: - Heartbeat (Ping Sender)
-
-    /// Periodic Ping sender (heartbeat); stops when a send fails.
+    // MARK: - Heartbeat
+    
     private func startHeartbeat() {
         let period = configuration.heartbeatPeriod
         guard period > 0 else { return }
 
-        let task = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(period))
-                guard !Task.isCancelled, let self, self.isConnected else { return }
-                let pingFrame = self.buildFrame(opcode: 0x09, payload: Data())
-                do {
-                    try await self.transport.send(pingFrame)
-                } catch {
-                    return   // stop the heartbeat on send failure
-                }
-            }
+        state.withLock { state in
+            guard state.phase == .open, state.heartbeatDeadline == nil else { return }
+            state.heartbeatDeadline = scheduleHeartbeat(period: period)
         }
-        state.withLock { $0.heartbeatTask = task }
+    }
+
+    private func scheduleHeartbeat(period: UInt32) -> DeadlineToken {
+        TickScheduler.shared.schedule(in: .seconds(period), precision: .relaxed) { [weak self] in
+            guard let self else { return }
+            Task { await self.heartbeatFired(period: period) }
+        }
+    }
+
+    private func heartbeatFired(period: UInt32) async {
+        guard isConnected else { return }
+        let pingFrame = buildFrame(opcode: 0x09, payload: Data())
+        do {
+            try await transport.send(pingFrame)
+        } catch {
+            return
+        }
+        state.withLock { state in
+            guard state.phase == .open, state.heartbeatDeadline != nil else { return }
+            state.heartbeatDeadline = scheduleHeartbeat(period: period)
+        }
     }
 
     // MARK: - Frame Building (Client → Server, MUST be masked)
 
     private func buildFrame(opcode: UInt8, payload: Data) -> Data {
         var frame = Data()
-
-        // First byte: 0x80 sets FIN bit, low nibble is the opcode.
         frame.append(0x80 | opcode)
-
-        // 0x80 on length byte sets the mask bit; client frames MUST be masked (RFC 6455 5.3).
+        
         let length = payload.count
         if length <= 125 {
             frame.append(UInt8(length) | 0x80)
@@ -275,8 +313,7 @@ nonisolated final class WebSocketConnection: Sendable {
         var maskKey = [UInt8](repeating: 0, count: 4)
         _ = SecRandomCopyBytes(kSecRandomDefault, 4, &maskKey)
         frame.append(contentsOf: maskKey)
-
-        // XOR-masked payload — append then mask in-place to avoid a temporary copy
+        
         let maskOffset = frame.count
         frame.append(payload)
         frame.withUnsafeMutableBytes { pointer in
@@ -297,8 +334,7 @@ nonisolated final class WebSocketConnection: Sendable {
         case pong(Data)
         case close(UInt16, String)
     }
-
-    /// Tries to extract a complete frame from `receiveBuffer`. Call inside `state.withLock`.
+    
     private func tryExtractFrame(_ state: inout ConnectionState) -> FrameResult? {
         guard state.receiveBuffer.count >= 2 else { return nil }
         let receiveBuffer = state.receiveBuffer
@@ -321,6 +357,11 @@ nonisolated final class WebSocketConnection: Sendable {
                 payloadLength = (payloadLength << 8) | UInt64(receiveBuffer[receiveBuffer.startIndex + 2 + i])
             }
             headerSize = 10
+        }
+        
+        guard payloadLength <= UInt64(Self.maxReceiveBufferSize) else {
+            state.receiveBuffer = Data()
+            return .close(1009, "frame too large")
         }
 
         if isMasked {
@@ -349,8 +390,7 @@ nonisolated final class WebSocketConnection: Sendable {
             let payloadStart = receiveBuffer.startIndex + headerSize
             payload = receiveBuffer.subdata(in: payloadStart..<payloadStart + Int(payloadLength))
         }
-
-        // Copying the remainder into a new Data releases the original backing store.
+        
         if totalFrameSize >= receiveBuffer.count {
             state.receiveBuffer = Data()
         } else {
@@ -359,10 +399,10 @@ nonisolated final class WebSocketConnection: Sendable {
 
         let opcode = byte0 & 0x0F
         switch opcode {
-        case 0x01, 0x02: // Text or Binary
+        case 0x01, 0x02:
             return .binary(payload)
-        case 0x08: // Close
-            var code: UInt16 = 1005 // No status code
+        case 0x08:
+            var code: UInt16 = 1005
             var reason = ""
             if payload.count >= 2 {
                 code = UInt16(payload[0]) << 8 | UInt16(payload[1])
@@ -371,9 +411,9 @@ nonisolated final class WebSocketConnection: Sendable {
                 }
             }
             return .close(code, reason)
-        case 0x09: // Ping
+        case 0x09:
             return .ping(payload)
-        case 0x0A: // Pong
+        case 0x0A:
             return .pong(payload)
         default:
             return .binary(payload)

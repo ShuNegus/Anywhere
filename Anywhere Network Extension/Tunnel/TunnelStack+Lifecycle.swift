@@ -6,16 +6,22 @@
 //
 
 import Foundation
-import NetworkExtension
 import Synchronization
+@preconcurrency import NetworkExtension
+import AnywhereIP
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Lifecycle")
 
 extension TunnelStack {
 
     // MARK: - Lifecycle
-    
-    func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) async {
+
+    func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) async -> Bool {
+        guard transition(to: .starting) else { return false }
+        let epoch = claimStartEpoch()
+        TransportReclaim.unsealAll()
+        makeFreshDutyCycleStreams()
+        purgeOutputBuffer()
         AnywhereLogger.installLogSink { [weak self] message, level in
             let logLevel: TunnelLogLevel
             switch level {
@@ -25,24 +31,28 @@ extension TunnelStack {
             }
             self?.appendLog(message, level: logLevel)
         }
-        self.packetFlow = packetFlow
+        attachPacketFlow(packetFlow)
         self.configuration = configuration
 
         let udpPlane = UDPPlane(stack: self)
         self.udpPlane = udpPlane
 
-        running.store(true, ordering: .relaxed)
-
         var precompiledRouting: DomainRouter.CompiledRouting?
         if Self.effectiveProxyMode(settings: TunnelSettings.load(), network: networkContext) == .rule {
             precompiledRouting = await domainRouter.compileRoutingConfiguration()
         }
-        configureRuntime(for: configuration, precompiledRouting: precompiledRouting)
 
-        installLwipCallbacks()
-        lwip_bridge_init()
-        startTimeoutTimer()
-        
+        guard phase == .starting, epoch == startEpoch else {
+            if epoch == startEpoch {
+                attachPacketFlow(nil)
+                self.configuration = nil
+                self.udpPlane = nil
+            }
+            return false
+        }
+        configureRuntime(for: configuration, precompiledRouting: precompiledRouting)
+        bringUpDataPlane(configuration: configuration)
+
         rootTask = Task { await self.run(packetFlow: packetFlow, udpPlane: udpPlane) }
 
         #if canImport(Turn)
@@ -58,13 +68,14 @@ extension TunnelStack {
         }
         #endif
 
-        logger.debug("[TunnelStack] Started")
+        transition(to: .running)
 
         CertificatePolicy.startObserving()
+        return true
     }
 
     // MARK: - Task tree
-    
+
     private func run(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         await withDiscardingTaskGroup { group in
             group.addTask { [planeCommands] in
@@ -78,17 +89,14 @@ extension TunnelStack {
             }
         }
     }
-    
+
     private func runDutyCycle(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         await withDiscardingTaskGroup { group in
-            group.addTask { [outputKick] in
-                for await _ in outputKick {
-                    await self.drainOutputLoop(packetFlow: packetFlow)
-                }
-            }
             group.addTask { await self.runReadLoop(packetFlow: packetFlow, udpPlane: udpPlane) }
+            group.addTask { await self.runOutputWriter() }
             group.addTask { await self.runSettingsObserver() }
             group.addTask { await self.runUDPCleanupLoop(udpPlane: udpPlane) }
+            group.addTask { await self.runTCPIdleSweep() }
             for await job in self.nurseryJobs {
                 switch job {
                 case .deferredRestart(let configuration, let revalidateMode, let delay, let generation):
@@ -105,130 +113,147 @@ extension TunnelStack {
             group.cancelAll()
         }
     }
-    
+
     private func finishShutdown() {
-        shutdownInternal()
+        TransportReclaim.sealAll()
         #if canImport(Turn)
         // TURN pools are bound to the tunnel session; a new session must not inherit them.
         TurnDialerRegistry.shared.reset()
         #endif
-        lwip_bridge_set_host_ctx(nil)
+        tearDownDataPlane(tcp: .graceful)
+        purgeOutputBuffer()
+        attachPacketFlow(nil)
         OutboundConnector.setRoutingContext(nil)
-        fakeIPPool.reset()
+        syntheticAddressPool.reset()
         connectionRouter.clearRejectMarks()
         ConnectionMetrics.shared.setDefaultServer(nil)
         configuration = nil
         finishPlaneCommands()
     }
-    
+
     func stop() async {
-        running.store(false, ordering: .relaxed)
+        switch phase {
+        case .idle, .stopped:
+            return
+        case .stopping:
+            await withCheckedContinuation { stopWaiters.append($0) }
+            return
+        case .starting, .running:
+            break
+        }
+        transition(to: .stopping)
         nurseryJobContinuation.finish()
         await rootTask?.value
         rootTask = nil
         AnywhereLogger.installLogSink(nil)
+        transition(to: .stopped)
+        let waiters = stopWaiters
+        stopWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
     
-    func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
-        logger.info("[VPN] Configuration switched")
+    func applyConfiguration(_ newConfiguration: ProxyConfiguration) {
+        guard phase == .running, newConfiguration != configuration else { return }
         #if canImport(Turn)
         TurnDialerRegistry.shared.reset()
         #endif
         restartStack(configuration: newConfiguration)
     }
-    
-    func handleWake() {
-        guard running.load(ordering: .relaxed), let configuration else { return }
-        logger.info("[VPN] Device wake")
-        invalidateOutboundState(configuration: configuration)
-    }
-    
+
     /// Auto mode flipped to TURN mid-session: existing flows were built on direct dials
     /// that the network is now censoring, so they are closed and the pools reclaimed.
-    /// The stack itself keeps running — only the outbound state is stale.
+    /// The stack itself keeps running; only the data plane is rebuilt.
     func handleTurnRouteChanged() {
-        guard running.load(ordering: .relaxed), let configuration else { return }
+        guard phase == .running, let configuration else { return }
         logger.info("[VPN] TURN route changed, rebuilding outbound state")
-        invalidateOutboundState(configuration: configuration)
+        tearDownDataPlane(tcp: .silent)
+        bringUpDataPlane(configuration: configuration)
     }
 
-    func suspendOutbound() {
-        guard running.load(ordering: .relaxed) else { return }
-        logger.info("[VPN] Path offline/sleep")
-
-        reclaimAllOutboundPools()
-        reclaimInstanceTransports(rebuildMultiplexerPool: false)
+    func sleep() {
+        guard phase == .running, let configuration else { return }
+        tearDownDataPlane(tcp: .silent)
+        bringUpDataPlane(configuration: configuration)
     }
-    
-    func updateNetworkContext(isWiFi: Bool, isCellular: Bool, ssid: String?) {
-        guard running.load(ordering: .relaxed), let configuration else { return }
 
-        let context = NetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: ssid)
+    func updateNetworkContext(_ context: NetworkContext) {
         guard context != networkContext else { return }
         networkContext = context
 
+        guard phase == .running, let configuration else { return }
         let newEffective = computeEffectiveProxyMode()
         guard newEffective != proxyMode else { return }
-        logger.info("[VPN] Trusted-network policy: effective mode \(proxyMode.rawValue) → \(newEffective.rawValue) (Wi-Fi=\(isWiFi), cellular=\(isCellular), SSID=\(ssid ?? "—"))")
         restartStack(configuration: configuration, revalidateMode: true)
     }
-    
-    private func invalidateOutboundState(configuration: ProxyConfiguration) {
-        closeAllActiveTCP()
-        reclaimAllOutboundPools()
-        reclaimInstanceTransports(rebuildMultiplexerPool: true)
+
+    // MARK: - Data plane
+
+    private enum TCPTeardown {
+        case graceful
+        case silent
     }
     
-    private func closeAllActiveTCP() {
-        lwip_bridge_for_each_tcp { arg in
-            guard let arg else { return }
-            BridgeContext.unretained(arg, as: TCPConnection.self).assumeIsolated { $0.close() }
+    private func bringUpDataPlane(configuration: ProxyConfiguration) {
+        guard !dataPlaneUp else {
+            logger.error("[TunnelStack] Data plane already up")
+            return
         }
+        dataPlaneUp = true
+        let ipStack = makeIPStack()
+        self.ipStack = ipStack
+        liveIPStack.withLock { $0 = ipStack }
+        startIPStackTick()
+        submitPlaneCommand(.setMultiplexerPool(configuration.makeUDPMultiplexerPool()))
     }
     
+    private func tearDownDataPlane(tcp: TCPTeardown) {
+        guard dataPlaneUp else { return }
+        dataPlaneUp = false
+        liveIPStack.withLock { $0 = nil }
+
+        ipStackTick?.cancel()
+        ipStackTick = nil
+
+        ipStackAbortContext.store(.teardown, ordering: .relaxed)
+        switch tcp {
+        case .graceful:
+            purgeOutputBuffer()
+            closeAllActiveTCP()
+            dataPlaneGeneration.wrappingAdd(1, ordering: .acquiringAndReleasing)
+        case .silent:
+            dataPlaneGeneration.wrappingAdd(1, ordering: .acquiringAndReleasing)
+            purgeOutputBuffer()
+            discardAllActiveTCP()
+        }
+
+        reclaimAllOutboundPools()
+        submitPlaneCommand(.reclaim)
+
+        ipStack?.shutdown()
+        ipStack = nil
+        tcpConnections.withLock { $0.removeAll() }
+        ipStackAbortContext.store(.none, ordering: .relaxed)
+    }
+
+    private func closeAllActiveTCP() {
+        for connection in ipStack?.connections() ?? [] { connection.close() }
+    }
+
+    private func discardAllActiveTCP() {
+        for connection in ipStack?.connections() ?? [] { connection.discard() }
+    }
+
     private func reclaimAllOutboundPools() {
         TransportReclaim.reclaimAll()
         MITMScriptHTTP2Pool.shared.reclaim()
     }
-    
-    private func reclaimInstanceTransports(rebuildMultiplexerPool: Bool) {
-        let rebuiltMultiplexerPool: VLESSVisionUDPMultiplexerPool?
-        if rebuildMultiplexerPool, let configuration, configuration.outboundProtocol == .vless {
-            rebuiltMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration)
-        } else {
-            rebuiltMultiplexerPool = nil
-        }
-        submitPlaneCommand(.reclaim(replacementMultiplexerPool: rebuiltMultiplexerPool))
-    }
-    
-    private func shutdownInternal() {
-        lwipTick?.cancel()
-        lwipTick = nil
 
-        outputBuffer.withLock { buffer in
-            buffer.packets.removeAll(keepingCapacity: true)
-            buffer.protocols.removeAll(keepingCapacity: true)
-            for r in buffer.releases {
-                r.fn(r.ctx)
-            }
-            buffer.releases.removeAll(keepingCapacity: true)
-            buffer.drainInFlight = false
-        }
+    // MARK: - Restart
 
-        reclaimAllOutboundPools()
-        reclaimInstanceTransports(rebuildMultiplexerPool: false)
-
-        isTearingDown.store(true, ordering: .relaxed)
-        lwip_bridge_shutdown()
-        isTearingDown.store(false, ordering: .relaxed)
-        FlowGauge.publishTCPTable(0)
-        logger.debug("[TunnelStack] Shutdown complete")
-    }
-    
     private func restartStack(configuration: ProxyConfiguration, revalidateMode: Bool = false) {
         if revalidateMode, deferredRestartScheduled { return }
 
-        let now = CFAbsoluteTimeGetCurrent()
+        let now = MonotonicClock.now
         let elapsed = now - lastRestartTime
 
         if elapsed < TunnelConstants.restartThrottleInterval {
@@ -239,57 +264,56 @@ extension TunnelStack {
                 configuration: configuration, revalidateMode: revalidateMode,
                 delay: delay, generation: deferredRestartGeneration
             ))
-            logger.debug("[TunnelStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
             return
         }
 
         restartStackNow(configuration: configuration)
     }
-    
+
     private func runDeferredRestart(
         configuration: ProxyConfiguration,
         revalidateMode: Bool,
         delay: TimeInterval,
         generation: Int
     ) async {
-        try? await Task.sleep(for: .seconds(delay))
-        guard !Task.isCancelled else { return }
+        try? await Task.sleep(seconds: delay, precision: .relaxed)
         guard generation == deferredRestartGeneration else { return }
         deferredRestartScheduled = false
-        guard running.load(ordering: .relaxed) else { return }
+        guard !Task.isCancelled, phase == .running else { return }
         if revalidateMode, computeEffectiveProxyMode() == proxyMode { return }
         restartStackNow(configuration: configuration)
     }
-    
+
     private func restartStackNow(configuration: ProxyConfiguration) {
+        guard phase == .running else { return }
         deferredRestartGeneration += 1
         deferredRestartScheduled = false
-        lastRestartTime = CFAbsoluteTimeGetCurrent()
+        lastRestartTime = MonotonicClock.now
 
-        shutdownInternal()
-        
+        tearDownDataPlane(tcp: .graceful)
+
         connectionRouter.clearRejectMarks()
 
         self.configuration = configuration
         configureRuntime(for: configuration)
-        installLwipCallbacks()
-        lwip_bridge_init()
-        startTimeoutTimer()
-        logger.debug("[TunnelStack] Restarted")
+        bringUpDataPlane(configuration: configuration)
     }
 
     // MARK: - Settings Observation
-    
+
     private func runSettingsObserver() async {
+        let activeConfiguration = AWNotificationCenter.Notification.activeConfigurationChanged as String
         let settings = AWNotificationCenter.Notification.tunnelSettingsChanged as String
         let routing = AWNotificationCenter.Notification.routingChanged as String
         let mitm = AWNotificationCenter.Notification.mitmChanged as String
         for await name in DarwinNotificationConcurrencyBridge.names([
+            AWNotificationCenter.Notification.activeConfigurationChanged,
             AWNotificationCenter.Notification.tunnelSettingsChanged,
             AWNotificationCenter.Notification.routingChanged,
             AWNotificationCenter.Notification.mitmChanged
         ]) {
             switch name {
+            case activeConfiguration: handleActiveConfigurationChanged()
             case settings: handleSettingsChanged()
             case routing: await handleRoutingChanged()
             case mitm: handleMITMChanged()
@@ -298,74 +322,65 @@ extension TunnelStack {
         }
     }
 
+    private func handleActiveConfigurationChanged() {
+        guard phase == .running else { return }
+        let active: ProxyConfiguration?
+        do {
+            active = try ActiveConfiguration.load()
+        } catch {
+            logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
+            return
+        }
+        guard let active else { return }
+        applyConfiguration(active)
+    }
+
     private func handleSettingsChanged() {
-        guard running.load(ordering: .relaxed), let configuration else { return }
+        DNSHosts.shared.invalidate()
+        guard phase == .running, let configuration else { return }
 
         let old = settings
         let new = TunnelSettings.load()
         guard new != old else { return }
         settings = new
+        
+        publishUDPConfig()
 
         if new.quicPolicy != old.quicPolicy {
-            logger.info("[VPN] QUIC policy changed: \(old.quicPolicy.rawValue) -> \(new.quicPolicy.rawValue)")
-        }
-        if new.blockUDP != old.blockUDP {
-            logger.info("[VPN] Block UDP changed: \(old.blockUDP) -> \(new.blockUDP)")
-        }
-        if new.blockWebRTC != old.blockWebRTC {
-            logger.info("[VPN] Block WebRTC changed: \(old.blockWebRTC) -> \(new.blockWebRTC)")
+            submitPlaneCommand(.revalidateQUIC)
         }
         if new.preventDNSLeak != old.preventDNSLeak {
-            logger.info("[VPN] Prevent DNS Leak changed: \(old.preventDNSLeak) -> \(new.preventDNSLeak)")
             connectionRouter.preventDNSLeak.store(new.preventDNSLeak, ordering: .relaxed)
         }
-        if new.reflectionEnabled != old.reflectionEnabled || new.reflectionAddresses != old.reflectionAddresses {
-            logger.info("[VPN] Reflection changed: enabled=\(new.reflectionEnabled), addresses=\(new.reflectionAddresses)")
-            publishReflector()
+        if new.reflectionEnabled != old.reflectionEnabled {
+            publishReflectionEnabled()
         }
-        if new.ipRuleDNSUpstream != old.ipRuleDNSUpstream {
-            logger.info("[VPN] IP-rule DNS changed")
-            RuleResolver.shared.setUpstream(new.ipRuleDNSUpstream)
-        }
-        if new.interceptExemptDNSServers != old.interceptExemptDNSServers {
-            logger.info("[VPN] DNS interception exemptions changed: \(new.interceptExemptDNSServers.sorted())")
-        }
-        publishUDPConfig()
-        
-        if new.tunnelIncludedRoutes != old.tunnelIncludedRoutes || new.tunnelExcludedRoutes != old.tunnelExcludedRoutes {
-            logger.info("[VPN] Custom routes changed: included=\(new.tunnelIncludedRoutes), excluded=\(new.tunnelExcludedRoutes)")
+        let tunnelRoutesChanged = new.tunnelIncludedRoutes != old.tunnelIncludedRoutes
+            || new.tunnelExcludedRoutes != old.tunnelExcludedRoutes
+            || new.hideVPNIcon != old.hideVPNIcon
+            || new.reflectionEnabled != old.reflectionEnabled
+        if tunnelRoutesChanged {
             requestReapplyTunnelSettings()
         }
 
-        let proxyModeChanged = computeEffectiveProxyMode() != proxyMode
-        let hideVPNIconChanged = new.hideVPNIcon != old.hideVPNIcon
-        let advertiseIPv6ToAppsChanged = new.advertiseIPv6ToApps != old.advertiseIPv6ToApps
-
-        guard proxyModeChanged || hideVPNIconChanged || advertiseIPv6ToAppsChanged else {
-            return
+        if computeEffectiveProxyMode() != proxyMode {
+            restartStack(configuration: configuration)
         }
-
-        logger.info("[VPN] Settings changed")
-        
-        if advertiseIPv6ToAppsChanged || hideVPNIconChanged {
-            requestReapplyTunnelSettings()
-        }
-
-        restartStack(configuration: configuration)
     }
-    
+
     private func handleRoutingChanged() async {
-        guard running.load(ordering: .relaxed) else { return }
+        guard phase == .running else { return }
         guard proxyMode == .rule else { return }
-        logger.info("[VPN] Routing changed")
-        domainRouter.install(await domainRouter.compileRoutingConfiguration())
+        let compiled = await domainRouter.compileRoutingConfiguration()
+        guard phase == .running, proxyMode == .rule else { return }
+        domainRouter.install(compiled)
         connectionRouter.clearRejectMarks()
     }
-    
+
     private func handleMITMChanged() {
-        guard running.load(ordering: .relaxed) else { return }
-        logger.info("[VPN] MITM settings changed")
+        guard phase == .running else { return }
         loadMITMSetting()
         publishUDPConfig()
+        submitPlaneCommand(.revalidateQUIC)
     }
 }

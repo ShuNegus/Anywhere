@@ -44,3 +44,6 @@ Frameworks/Turn.xcframework/
 
 # Rules database (not redistributed; see LocalPackages/AnywhereRules/README.md)
 LocalPackages/AnywhereRules/Sources/AnywhereRules/Resources/Rules.db
+# Swift Package Manager (local packages)
+.build/
+.swiftpm/
