@@ -46,7 +46,9 @@ struct MainTabView: View {
         tabView
             .onAppear {
                 captchaMonitor.setActive(isCaptchaWatchActive)
-                requestCaptchaNotificationsIfWatching(isCaptchaWatchActive)
+                // Messages from the service arrive as visible pushes, so ask once on
+                // first launch rather than only when the captcha watch starts.
+                Task { await TurnNotifications.requestAuthorizationIfNeeded() }
             }
             .onChange(of: isCaptchaWatchActive) { _, newValue in
                 captchaMonitor.setActive(newValue)

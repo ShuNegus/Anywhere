@@ -58,12 +58,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    /// No banner while the user is already looking at the app — the monitor's sheet is
-    /// the right surface, and this also covers a race on the foreground flag.
+    /// No captcha banner while the user is already looking at the app — the monitor's
+    /// sheet is the right surface, and this also covers a race on the foreground flag.
+    /// Messages from the service are shown even then: there is no other surface for them.
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        []
+        if SubscriptionAutoRefresher.isMessagePush(notification.request.content.userInfo) {
+            return [.banner, .list, .sound]
+        }
+        return []
     }
 }

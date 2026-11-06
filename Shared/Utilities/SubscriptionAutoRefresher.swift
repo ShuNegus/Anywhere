@@ -177,4 +177,10 @@ final class SubscriptionAutoRefresher {
         guard let payload = userInfo["anywhere"] as? [String: Any] else { return false }
         return (payload["action"] as? String) == "refresh_subscription"
     }
+
+    /// `true` for a visible message sent from the admin bot (`anywhere.action == message`).
+    nonisolated static func isMessagePush(_ userInfo: [AnyHashable: Any]) -> Bool {
+        guard let payload = userInfo["anywhere"] as? [String: Any] else { return false }
+        return (payload["action"] as? String) == "message"
+    }
 }

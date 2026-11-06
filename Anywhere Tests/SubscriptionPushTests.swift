@@ -142,4 +142,18 @@ struct SubscriptionPushTests {
         #expect(iCloudMatches == false)
         #expect(otherMatches == false)
     }
+
+    @Test func recognisesMessagePushSeparately() {
+        let message: [AnyHashable: Any] = [
+            "aps": ["alert": ["title": "T", "body": "B"]] as [String: Any],
+            "anywhere": ["action": "message"],
+        ]
+        let refresh: [AnyHashable: Any] = ["anywhere": ["action": "refresh_subscription", "rev": 1] as [String: Any]]
+        let messageIsMessage = SubscriptionAutoRefresher.isMessagePush(message)
+        let messageIsRefresh = SubscriptionAutoRefresher.isRefreshPush(message)
+        let refreshIsMessage = SubscriptionAutoRefresher.isMessagePush(refresh)
+        #expect(messageIsMessage)
+        #expect(messageIsRefresh == false)
+        #expect(refreshIsMessage == false)
+    }
 }
