@@ -31,7 +31,7 @@ struct ContentView: View {
     
     var body: some View {
         if onboardingCompleted {
-            HomeView()
+            MainTabView()
                 .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
                     DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                         AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)

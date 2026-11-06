@@ -33,10 +33,26 @@ enum DebugBackupRouteSeed {
         }
     }()
 
-    static func runIfRequested() {
+    /// Seeds the demo through the same operation a real subscription add goes through,
+    /// so the stored TURN outcome drives the icon exactly as in the field.
+    /// `-demoProMode YES|NO` and `-demoTab <home|dashboard|proxies|toolbox|settings>`:
+    /// for screenshots of the settings and Pro tabs without tapping.
+    static var demoProMode: Bool? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-demoProMode"), i + 1 < args.count else { return nil }
+        return args[i + 1] == "YES"
+    }
+
+    static var demoTab: String? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-demoTab"), i + 1 < args.count else { return nil }
+        return args[i + 1]
+    }
+
+    static func runIfRequested(operations: Operations) {
         guard ProcessInfo.processInfo.arguments.contains(launchArgument) else { return }
         AWCore.setOnboardingCompleted(true)
-        guard SubscriptionStore.shared.subscriptions.isEmpty else { return }
+        guard operations.subscriptions.store.subscriptions.isEmpty else { return }
 
         func configs(_ servers: [(String, String)]) -> [ProxyConfiguration] {
             servers.compactMap { name, host in
@@ -51,26 +67,26 @@ enum DebugBackupRouteSeed {
                 })
             )
         }
+        func add(_ name: String, _ url: String, _ servers: [(String, String)], turn: TurnMetadata?) {
+            let subscription = Subscription(name: name, url: url, lastUpdate: .now)
+            let result = SubscriptionFetcher.Result(
+                configurations: configs(servers), stableKeys: [:], name: nil,
+                upload: nil, download: nil, total: nil, expire: nil,
+                turn: turn, push: nil, turnOutcome: .loaded(turn),
+                iconLight: nil, iconDark: nil
+            )
+            operations.subscriptions.add(subscription, result: result)
+        }
 
-        let store = SubscriptionStore.shared
-        let main = Subscription(name: "Demo VPN", url: "https://demo.invalid/a", lastUpdate: .now)
-        let mainRelay = relay(["usa1.demo.invalid", "by.demo.invalid"], link: "https://demo.invalid/call/join/demo")
-        store.add(main,
-                  configurations: configs([("🇺🇸 USA 1", "usa1.demo.invalid"),
-                                           ("🇳🇱 Netherlands 1", "nl1.demo.invalid"),
-                                           ("🇧🇾 Belarus", "by.demo.invalid")]),
-                  turn: mainRelay, turnOutcome: .loaded(mainRelay))
-
-        let noLink = Subscription(name: "Резервная подписка", url: "https://demo.invalid/b", lastUpdate: .now)
-        let noLinkRelay = relay(["jp.demo.invalid"], link: nil)
-        store.add(noLink,
-                  configurations: configs([("🇯🇵 Japan", "jp.demo.invalid")]),
-                  turn: noLinkRelay, turnOutcome: .loaded(noLinkRelay))
-
-        let plain = Subscription(name: "Без обхода", url: "https://demo.invalid/c", lastUpdate: .now)
-        store.add(plain,
-                  configurations: configs([("🇩🇪 Germany", "de.demo.invalid")]),
-                  turnOutcome: .loaded(nil))
+        add("Demo VPN", "https://demo.invalid/a",
+            [("🇺🇸 USA 1", "usa1.demo.invalid"), ("🇳🇱 Netherlands 1", "nl1.demo.invalid"), ("🇧🇾 Belarus", "by.demo.invalid")],
+            turn: relay(["usa1.demo.invalid", "by.demo.invalid"], link: "https://demo.invalid/call/join/demo"))
+        add("Резервная подписка", "https://demo.invalid/b",
+            [("🇯🇵 Japan", "jp.demo.invalid")],
+            turn: relay(["jp.demo.invalid"], link: nil))
+        add("Без обхода", "https://demo.invalid/c",
+            [("🇩🇪 Germany", "de.demo.invalid")],
+            turn: nil)
     }
 }
 #endif

@@ -4,6 +4,22 @@
     "" : {
       "shouldTranslate" : false
     },
+    "AD Blocking" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AD Blocking"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Блокировка рекламы"
+          }
+        }
+      }
+    },
     "Add or refresh a subscription that advertises TURN relays." : {
       "localizations" : {
         "en" : {
@@ -48,6 +64,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Счётчики появятся, когда VPN подключится и заработает реле."
+          }
+        }
+      }
+    },
+    "Home" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Home"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Главная"
+          }
+        }
+      }
+    },
+    "Settings" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройки"
+          }
+        }
+      }
+    },
+    "Utilities" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Utilities"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Утилиты"
           }
         }
       }
@@ -880,6 +944,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Решить капчу"
+          }
+        }
+      }
+    },
+    "settings.proMode.footer" : {
+      "comment" : "Подпись под тумблером Pro Mode, когда он включён",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dashboard, Proxies and Toolbox tabs are shown."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Показаны вкладки «Панель мониторинга», «Прокси» и «Инструменты»."
+          }
+        }
+      }
+    },
+    "settings.section.app" : {
+      "comment" : "Заголовок раздела настроек приложения",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Приложение"
           }
         }
       }

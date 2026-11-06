@@ -10,7 +10,11 @@ import NetworkExtension
 
 struct HomeView: View {
     @Environment(AppSettings.self) private var settings
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(Operations.self) private var operations
+    @Environment(TunnelController.self) private var tunnel
+    @Environment(TurnSessionModel.self) private var turnSession
+    @Environment(ProxySelection.self) private var selection
+    @Environment(LatencyCenter.self) private var latency
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
@@ -39,10 +43,15 @@ struct HomeView: View {
         #if DEBUG
         if let demo = DebugBackupRouteSeed.demoStage { return demo.isConnected }
         #endif
-        return viewModel.vpnStatus == .connected
+        return tunnel.rawStatus == .connected
     }
 
-    private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning || viewModel.isPreflighting }
+    private var isTransitioning: Bool { tunnel.rawStatus.isTransitioning || turnSession.isPreflighting }
+
+    /// Same rule as upstream's power button, plus our TURN preflight.
+    private var isPowerButtonDisabled: Bool {
+        isLoading || !configStore.hasConfigurations || isTransitioning || !tunnel.isManagerReady
+    }
 
     /// Stage for the connection graph. The route comes from the setting (in `.auto`,
     /// from the probe's verdict); the captcha monitor stays in as an independent signal
@@ -52,26 +61,26 @@ struct HomeView: View {
         if let demo = DebugBackupRouteSeed.demoStage { return demo }
         #endif
         return ConnectionStage.resolve(
-            status: viewModel.status,
-            isPreflighting: viewModel.isPreflighting,
+            status: tunnel.status,
+            isPreflighting: turnSession.isPreflighting,
             // A session forced through TURN (power button held) walks the bypass branch
             // whatever the setting says.
-            turnMode: viewModel.turnForcedInSession ? .on : (settings.turnFeatureEnabled ? settings.turnMode : nil),
-            autoDecision: viewModel.turnAutoDecisionValue,
-            turnPhase: viewModel.turnPhase,
-            turnUsable: viewModel.turnPool?.usable,
+            turnMode: turnSession.turnForcedInSession ? .on : (settings.turnFeatureEnabled ? settings.turnMode : nil),
+            autoDecision: turnSession.turnAutoDecisionValue,
+            turnPhase: turnSession.turnPhase,
+            turnUsable: turnSession.turnPool?.usable,
             captchaPending: captchaMonitor.captchaWaiting,
-            captchaSeen: viewModel.captchaSeenInSession,
-            failure: viewModel.connectionFailure,
-            bypassUnavailable: viewModel.bypassUnavailableReason,
-            bypassNeededWhileOff: viewModel.bypassNeededWhileOff,
-            runtimeBypassFailure: viewModel.runtimeBypassFailure
+            captchaSeen: turnSession.captchaSeenInSession,
+            failure: turnSession.connectionFailure,
+            bypassUnavailable: turnSession.bypassUnavailableReason,
+            bypassNeededWhileOff: turnSession.bypassNeededWhileOff,
+            runtimeBypassFailure: turnSession.runtimeBypassFailure
         )
     }
 
     var body: some View {
         ZStack {
-            BackgroundGradient(isConnected: isConnected)
+            HomeBackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
 
             stackedLayout
@@ -82,27 +91,30 @@ struct HomeView: View {
             }
         }
         .overlay(alignment: .bottom) { tabBarScrim }
-        .colorScheme(settings.homeColorScheme.colorSceme)
+        // The home screen is always the dark gradient.
+        .colorScheme(.dark)
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                 AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+                    .environment(operations)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
-                configStore.add(configuration); viewModel.selectIfNone(configuration)
+                operations.configurations.add(configuration)
+                operations.selection.selectIfNone(configuration)
             }
         }
         .sheet(isPresented: $showingStatsSheet) {
             statsSheet
         }
         .alert("VPN Error", isPresented: Binding(
-            get: { viewModel.startError != nil },
-            set: { if !$0 { viewModel.startError = nil } }
+            get: { tunnel.startError != nil },
+            set: { if !$0 { tunnel.startError = nil } }
         )) {
-            Button("OK") { viewModel.startError = nil }
+            Button("OK") { tunnel.startError = nil }
         } message: {
-            Text(viewModel.startError ?? "")
+            Text(tunnel.startError ?? "")
         }
         .alert("Update Failed", isPresented: Binding(
             get: { subscriptionRefreshError != nil },
@@ -128,7 +140,7 @@ struct HomeView: View {
             presenting: subscriptionPendingDeletion
         ) { subscription in
             Button("Delete", role: .destructive) {
-                subscriptionStore.delete(subscription, configurationStore: configStore)
+                operations.subscriptions.delete(subscription)
                 subscriptionPendingDeletion = nil
             }
             Button("Cancel", role: .cancel) { subscriptionPendingDeletion = nil }
@@ -141,9 +153,9 @@ struct HomeView: View {
         }
         // The sheet fires ahead of the next phase poll, so the latch lives here.
         .onChange(of: captchaMonitor.captchaWaiting) { _, waiting in
-            if waiting { viewModel.noteCaptchaSeen() }
+            if waiting { turnSession.noteCaptchaSeen() }
         }
-        .onChange(of: viewModel.isManagerReady, initial: true) { _, ready in
+        .onChange(of: tunnel.isManagerReady, initial: true) { _, ready in
             guard ready, !connectionEffectsEnabled else { return }
             Task { @MainActor in connectionEffectsEnabled = true }
         }
@@ -200,8 +212,8 @@ struct HomeView: View {
             if configStore.hasConfigurations {
                 ConnectionGraphSection(
                     stage: stage,
-                    pool: viewModel.turnPool,
-                    serverName: viewModel.selectedConfiguration?.name
+                    pool: turnSession.turnPool,
+                    serverName: selection.selectedConfiguration?.name
                 )
                 Spacer().frame(height: 18)
             }
@@ -240,9 +252,7 @@ struct HomeView: View {
 
     /// Fades the rows out under the tab bar instead of letting them cut off (SPEC.md §2).
     private var tabBarScrim: some View {
-        let base = isConnected
-            ? color(settings.connectedBackgroundEndData, default: .connectedBackgroundEnd)
-            : color(settings.disconnectedBackgroundEndData, default: .disconnectedBackgroundEnd)
+        let base: Color = isConnected ? .connectedBackgroundEnd : .disconnectedBackgroundEnd
         // Pinned to the physical bottom edge: the overlay itself ends at the safe area
         // (above the tab bar), so the band is stretched by that inset to keep its top
         // where it was and run all the way down under the tab bar.
@@ -265,29 +275,23 @@ struct HomeView: View {
         .allowsHitTesting(false)
     }
 
-    private func color(_ data: Data?, default fallback: Color) -> Color {
-        data.flatMap(Color.init(archivedData:)) ?? fallback
-    }
-
     private var powerButton: some View {
         PowerButton(
             isConnected: isConnected,
             isTransitioning: isTransitioning,
             isLoading: isLoading,
-            isDisabled: isLoading
-                || !configStore.hasConfigurations
-                || viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations),
+            isDisabled: isPowerButtonDisabled,
             animatesChanges: connectionEffectsEnabled,
-            isTurnForced: viewModel.turnForcedInSession
+            isTurnForced: turnSession.turnForcedInSession
         ) {
             guard !isLoading, configStore.hasConfigurations else { return }
             withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                viewModel.toggleVPN()
+                operations.tunnel.toggle()
             }
         } longPressAction: {
             guard !isLoading, configStore.hasConfigurations else { return }
             withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                viewModel.connectForcingTurn()
+                operations.tunnel.connectForcingTurn()
             }
         }
     }
@@ -297,48 +301,48 @@ struct HomeView: View {
     private static let standaloneSectionId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     private static let chainsSectionId = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
-    /// The same three sources the old `Menu` listed.
+    /// Standalone configurations, chains, then one section per subscription.
     private var pickerSections: [PickerSection] {
         var result: [PickerSection] = []
-        if !configStore.standalonePickerItems.isEmpty {
-            result.append(PickerSection(
-                id: Self.standaloneSectionId,
-                header: nil,
-                items: configStore.standalonePickerItems
-            ))
+        let standalone = configStore.configurations
+            .filter { $0.subscriptionId == nil }
+            .map { PickerItem(id: $0.id, name: $0.name) }
+        if !standalone.isEmpty {
+            result.append(PickerSection(id: Self.standaloneSectionId, header: nil, items: standalone))
         }
-        if !chainStore.pickerItems.isEmpty {
+        let chains = chainStore.chains.map { PickerItem(id: $0.id, name: $0.name) }
+        if !chains.isEmpty {
             result.append(PickerSection(
                 id: Self.chainsSectionId,
                 header: String(localized: "Chains"),
-                items: chainStore.pickerItems
+                items: chains
             ))
         }
-        result.append(contentsOf: subscriptionStore.pickerSections)
+        result.append(contentsOf: subscriptionStore.pickerSections(configurationStore: configStore))
         return result
     }
 
     /// Chain latencies live in their own dictionary; the list keys everything by row id.
     private var listLatencies: [UUID: LatencyResult] {
-        viewModel.latencyResults.merging(viewModel.chainLatencyResults) { current, _ in current }
+        latency.latencyResults.merging(latency.chainLatencyResults) { current, _ in current }
     }
 
     private var isMeasuringLatencies: Bool {
-        viewModel.latencyResults.values.contains(.testing)
-            || viewModel.chainLatencyResults.values.contains(.testing)
+        latency.latencyResults.values.contains(.testing)
+            || latency.chainLatencyResults.values.contains(.testing)
     }
 
     /// A selected chain is resolved into a configuration with a brand new id, so the
     /// chain's own id is what the row matches on.
     private var selectedRowId: UUID? {
-        viewModel.selectedChainId ?? viewModel.selectedConfiguration?.id
+        selection.selectedChainId ?? selection.selectedConfiguration?.id
     }
 
     private func select(id: UUID) {
         if let chain = chainStore.chains.first(where: { $0.id == id }) {
-            viewModel.selectChain(chain, configurations: configStore.configurations)
+            operations.selection.selectChain(chain, configurations: configStore.configurations)
         } else if let configuration = configStore.configurations.first(where: { $0.id == id }) {
-            viewModel.selectedConfiguration = configuration
+            operations.selection.select(configuration)
         }
     }
 
@@ -355,11 +359,8 @@ struct HomeView: View {
                 isMeasuring: isMeasuringLatencies,
                 onSelect: { select(id: $0) },
                 onMeasure: {
-                    viewModel.testLatencies(for: configStore.configurations)
-                    viewModel.testAllChainLatencies(
-                        chains: chainStore.chains,
-                        configurations: configStore.configurations
-                    )
+                    operations.latency.testAll(configStore.configurations)
+                    operations.latency.testChains(chainStore.chains)
                 },
                 onAddSubscription: { showingAddSheet = true },
                 onDeleteSubscription: { id in
@@ -379,7 +380,7 @@ struct HomeView: View {
         refreshingSubscription = id
         Task {
             do {
-                try await subscriptionStore.refresh(subscription)
+                try await operations.subscriptions.refresh(subscription)
             } catch {
                 subscriptionRefreshError = error.localizedDescription
             }
@@ -407,7 +408,7 @@ struct HomeView: View {
             HStack(spacing: 5) {
                 // A failed stage keeps the node red; the label goes back to the raw
                 // tunnel status so it does not claim "Connecting" forever.
-                Text(stage.isFailed ? viewModel.status.localizedText : stage.statusText)
+                Text(stage.isFailed ? tunnel.status.localizedText : stage.statusText)
                     .font(.system(size: 17, weight: .semibold))
                 if isConnected {
                     Text(verbatim: "›")
@@ -427,37 +428,19 @@ struct HomeView: View {
 
 // MARK: - Background
 
-private struct BackgroundGradient: View {
-    @Environment(AppSettings.self) private var settings
-
+/// Our home gradient (mockup): blue when connected, graphite otherwise. Named
+/// `HomeBackgroundGradient` to stay clear of upstream's theme-driven `BackgroundGradient`.
+private struct HomeBackgroundGradient: View {
     let isConnected: Bool
 
     var body: some View {
         if isConnected {
-            LinearGradient(
-                colors: [
-                    color(settings.connectedBackgroundStartData, default: .connectedBackgroundStart),
-                    color(settings.connectedBackgroundEndData, default: .connectedBackgroundEnd),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .transition(.blurReplace)
+            LinearGradient(colors: [.connectedBackgroundStart, .connectedBackgroundEnd], startPoint: .top, endPoint: .bottom)
+                .transition(.blurReplace)
         } else {
-            LinearGradient(
-                colors: [
-                    color(settings.disconnectedBackgroundStartData, default: .disconnectedBackgroundStart),
-                    color(settings.disconnectedBackgroundEndData, default: .disconnectedBackgroundEnd),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .transition(.blurReplace)
+            LinearGradient(colors: [.disconnectedBackgroundStart, .disconnectedBackgroundEnd], startPoint: .top, endPoint: .bottom)
+                .transition(.blurReplace)
         }
-    }
-
-    private func color(_ data: Data?, default fallback: Color) -> Color {
-        data.flatMap(Color.init(archivedData:)) ?? fallback
     }
 }
 
@@ -558,58 +541,21 @@ private struct PowerButton: View {
     }
 }
 
-private struct ProminentCapsule<Content: View>: View {
-    private let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        if #available(iOS 27.0, *) {
-            content
-                .padding(16)
-                .contentShape(Capsule())
-                .glassEffect(.regular.interactive(), in: .capsule)
-        } else if #available(iOS 26.0, *) {
-            content
-                .padding(16)
-                .contentShape(Capsule())
-                .glassEffect(.clear.interactive(), in: .capsule)
-        } else {
-            content
-                .padding(16)
-                .contentShape(Capsule())
-                .background(
-                    Capsule()
-                        .fill(.white.opacity(0.2))
-                )
-        }
-    }
-}
-
 // MARK: - Previews
 
 #if DEBUG
-#Preview("Connected") {
-    let settings = AppSettings.shared
-    
-    let viewModel = VPNViewModel()
-    viewModel.selectedConfiguration = ProxyConfiguration(
-        name: "🇺🇸 Los Angeles",
-        serverAddress: "203.0.113.10",
-        serverPort: 443,
-        outbound: .socks5(username: nil, password: nil)
-    )
-    viewModel.vpnStatus = .connected
-
+#Preview("Disconnected") {
+    let container = AppContainer.preview()
     return HomeView()
-        .environment(settings)
-        .environment(viewModel)
-        .environment(ConfigurationStore.shared)
-        .environment(ChainStore.shared)
-        .environment(SubscriptionStore.shared)
-        .environment(ConnectionStatsModel.previewSeeded())
-        .colorScheme(.dark)
+        .environment(AppSettings())
+        .environment(Operations(container: container))
+        .environment(container.tunnel)
+        .environment(container.turnSession)
+        .environment(container.selection)
+        .environment(container.latency)
+        .environment(container.configurationStore)
+        .environment(container.chainStore)
+        .environment(container.subscriptionStore)
+        .environment(container.stats)
 }
 #endif

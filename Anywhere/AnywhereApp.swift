@@ -20,11 +20,20 @@ struct AnywhereApp: App {
     @State private var deepLinkManager = DeepLinkManager()
 
     init() {
+        #if DEBUG
+        // Simulator demo for screenshots: skip onboarding so the seeded home shows.
+        if ProcessInfo.processInfo.arguments.contains(DebugBackupRouteSeed.launchArgument) {
+            AWCore.setOnboardingCompleted(true)
+        }
+        #endif
         let container = AppContainer()
         container.start()
         let operations = Operations(container: container)
 
         let settings = AppSettings()
+        #if DEBUG
+        if let pro = DebugBackupRouteSeed.demoProMode { settings.proModeEnabled = pro }
+        #endif
         settings.onTunnelBehaviorChange = { [weak tunnel = container.tunnel] in
             tunnel?.reconnect()
         }
