@@ -292,7 +292,7 @@ struct AddProxyView: View {
                     total: result.total,
                     expire: result.expire
                 )
-                subscriptionStore.add(subscription, configurations: result.configurations, turn: result.turn)
+                subscriptionStore.add(subscription, configurations: result.configurations, turn: result.turn, push: result.push)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription

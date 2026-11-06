@@ -25,6 +25,15 @@ struct AnywhereApp: App {
         }
         .onChange(of: scenePhase) { _, newValue in
             AWCore.setAppInForeground(newValue == .active)
+            switch newValue {
+            case .active:
+                // Launch lands here too: the first transition is into `.active`.
+                Task { await SubscriptionAutoRefresher.shared.run(reason: "activation") }
+            case .background:
+                SubscriptionBackgroundRefresh.schedule()
+            default:
+                break
+            }
         }
     }
 }

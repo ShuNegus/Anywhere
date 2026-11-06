@@ -17,14 +17,13 @@ nonisolated struct SubscriptionFetcher {
         let download: Int64?
         let total: Int64?
         let expire: Date?
-        /// TURN relays advertised by the same endpoint, fetched separately. Always `nil`
-        /// for subscriptions that do not serve a sing-box document.
+        /// TURN relays advertised next to the subscription, fetched separately (see
+        /// `fetchTurnEndpoint`). `nil` when the server offers no `turn` block.
         let turn: TurnMetadata?
+        /// Revision and push endpoints from the same response. `nil` when the server
+        /// offers no `push` block.
+        let push: SubscriptionPushInfo?
     }
-
-    /// Remnawave renders a sing-box document — the only representation that carries the
-    /// `turn` block — when the client identifies itself as sing-box.
-    private static let singBoxUserAgent = "SFI/1.0 (iOS; sing-box 1.14.0)"
 
     static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
         guard let url = URL(string: urlString) else {
@@ -62,9 +61,9 @@ nonisolated struct SubscriptionFetcher {
         let profileTitle = parseProfileTitle(from: httpResponse)
         let userInfo = parseSubscriptionUserInfo(from: httpResponse)
 
-        // Second, optional request to the same URL: the sing-box rendering is the only
-        // one that carries the `turn` block. Never fatal — see fetchTurnMetadata.
-        let turn = await fetchTurnMetadata(url: url, withRemnawaveHWID: withRemnawaveHWID)
+        // Second, optional request for the `turn` and `push` blocks. Never fatal — see
+        // fetchTurnEndpoint.
+        let (turn, push) = await fetchTurnEndpoint(url: url, withRemnawaveHWID: withRemnawaveHWID)
 
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
@@ -89,7 +88,8 @@ nonisolated struct SubscriptionFetcher {
                 download: userInfo.download,
                 total: userInfo.total,
                 expire: userInfo.expire,
-                turn: turn
+                turn: turn,
+                push: push
             )
         }
 
@@ -110,48 +110,92 @@ nonisolated struct SubscriptionFetcher {
             download: userInfo.download,
             total: userInfo.total,
             expire: userInfo.expire,
-            turn: turn
+            turn: turn,
+            push: push
         )
     }
 
-    // MARK: - TURN Metadata
+    // MARK: - TURN Metadata and Push
 
-    /// Asks the same endpoint for its sing-box rendering and keeps only the `turn` block.
+    /// Fetches the `turn` and `push` blocks for a subscription.
     ///
-    /// Entirely best-effort: a non-JSON body, a missing `turn` block, an HTTP error or a
-    /// dead network all yield `nil`, and the subscription is added exactly as before.
-    /// Only an outright cancellation is allowed to propagate — and it does so as `nil`,
-    /// because the caller's own request has already succeeded by this point.
-    private static func fetchTurnMetadata(url: URL, withRemnawaveHWID: Bool) async -> TurnMetadata? {
-        guard AWCore.getTurnFeatureEnabled() else { return nil }
+    /// Asks the dedicated `<subscription>/turn` endpoint, served next to the subscription:
+    /// it returns `{"turn": {...}, "push": {...}}` with only the user's own relays. There is
+    /// deliberately no fallback to the sing-box rendering of the subscription — that one
+    /// lists every relay, not just the user's, and sing-box subscriptions are being retired.
+    ///
+    /// The `push` block (revision + push endpoints) is read even with the TURN feature
+    /// off; only the `turn` block is dropped then.
+    ///
+    /// Entirely best-effort: a non-JSON body, missing blocks, an HTTP error or a dead
+    /// network all yield `nil`s, and the subscription is added exactly as before.
+    private static func fetchTurnEndpoint(url: URL, withRemnawaveHWID: Bool) async -> (TurnMetadata?, SubscriptionPushInfo?) {
+        guard let endpoint = turnEndpointURL(for: url) else { return (nil, nil) }
 
-        var request = URLRequest(url: url)
-        request.setValue(singBoxUserAgent, forHTTPHeaderField: "User-Agent")
+        var request = URLRequest(url: endpoint)
         request.timeoutInterval = 15
         if withRemnawaveHWID {
             request.setValue(AWCore.getRemnawaveHWID(), forHTTPHeaderField: "x-hwid")
         }
 
-        let allowInsecure = AWCore.getAllowInsecure()
         let data: Data
+        let response: URLResponse
         do {
-            if let viaUpstream = try await fetchViaConfiguredDNS(request, allowInsecure: allowInsecure) {
-                data = viaUpstream.0
-            } else if allowInsecure {
-                let session = URLSession(configuration: .default, delegate: InsecureSessionDelegate(), delegateQueue: nil)
-                defer { session.finishTasksAndInvalidate() }
-                data = try await session.data(for: request).0
-            } else {
-                data = try await URLSession.shared.data(for: request).0
-            }
+            (data, response) = try await send(request)
         } catch {
             logger.debug("TURN metadata probe failed: \(error.localizedDescription)")
-            return nil
+            return (nil, nil)
         }
 
-        guard let metadata = TurnMetadata.extract(fromSingBoxJSON: data) else { return nil }
-        logger.debug("TURN metadata: \(metadata.servers.count) server(s)")
-        return metadata
+        if let status = (response as? HTTPURLResponse)?.statusCode, !(200...299).contains(status) {
+            return (nil, nil)
+        }
+        let push = SubscriptionPushInfo.extract(from: data)
+        let turn = AWCore.getTurnFeatureEnabled() ? TurnMetadata.extract(fromSingBoxJSON: data) : nil
+        logger.debug("TURN metadata: \(turn?.servers.count ?? 0) server(s), push: \(push != nil)")
+        return (turn, push)
+    }
+
+    /// `https://host/<id>` → `https://host/<id>/turn`; query kept, fragment dropped.
+    /// `nil` for anything that is not an http(s) URL with a non-empty path.
+    static func turnEndpointURL(for url: URL) -> URL? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty else {
+            return nil
+        }
+        var path = components.percentEncodedPath
+        while path.hasSuffix("/") { path.removeLast() }
+        guard !path.isEmpty else { return nil }
+        components.percentEncodedPath = path + "/turn"
+        components.fragment = nil
+        return components.url
+    }
+
+    // MARK: - Transport
+
+    /// Performs a request the same way the subscription itself is fetched: through the
+    /// configured DNS upstream when one is set, honouring "allow insecure", with the
+    /// app's `Anywhere` user agent unless the request sets its own.
+    ///
+    /// The DNS-upstream path speaks GET only (`ResolvedHostFetcher` writes the request
+    /// line itself), so other methods always go through `URLSession`.
+    static func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        var request = request
+        if request.value(forHTTPHeaderField: "User-Agent") == nil {
+            request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
+        }
+        let allowInsecure = AWCore.getAllowInsecure()
+        let isGET = (request.httpMethod ?? "GET").uppercased() == "GET"
+        if isGET, let viaUpstream = try await fetchViaConfiguredDNS(request, allowInsecure: allowInsecure) {
+            return viaUpstream
+        } else if allowInsecure {
+            let session = URLSession(configuration: .default, delegate: InsecureSessionDelegate(), delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            return try await session.data(for: request)
+        } else {
+            return try await URLSession.shared.data(for: request)
+        }
     }
 
     // MARK: - Configured DNS

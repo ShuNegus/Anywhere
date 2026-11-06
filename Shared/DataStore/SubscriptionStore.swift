@@ -78,6 +78,7 @@ class SubscriptionStore {
         let configurationStore = configurationStore ?? .shared
         configurationStore.deleteConfigurations(for: subscription.id)
         TurnMetadataStore.shared.removeMetadata(forSubscription: subscription.id)
+        SubscriptionAutoRefresher.shared.subscriptionDeleted(subscription.id)
         subscriptions.removeAll { $0.id == subscription.id }
         recordTombstone(subscription)
         save()
@@ -161,11 +162,12 @@ extension SubscriptionStore {
         update(updated)
     }
 
-    func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration], turn: TurnMetadata? = nil) {
+    func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration], turn: TurnMetadata? = nil, push: SubscriptionPushInfo? = nil) {
         add(subscription)
         if let turn {
             TurnMetadataStore.shared.setMetadata(turn, forSubscription: subscription.id)
         }
+        SubscriptionAutoRefresher.shared.subscriptionFetched(subscription.id, push: push)
         let tagged = newConfigurations.map { configuration in
             ProxyConfiguration(
                 id: configuration.id, name: configuration.name,
@@ -211,6 +213,7 @@ extension SubscriptionStore {
         // A refresh that comes back without a `turn` block clears the stale one, so a
         // relay withdrawn server-side stops being dialled.
         TurnMetadataStore.shared.setMetadata(result.turn, forSubscription: subscription.id)
+        SubscriptionAutoRefresher.shared.subscriptionFetched(subscription.id, push: result.push)
 
         var updated = subscription
         updated.lastUpdate = Date()
