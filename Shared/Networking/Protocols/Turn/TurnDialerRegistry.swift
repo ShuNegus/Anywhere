@@ -33,7 +33,8 @@ nonisolated final class TurnDialerRegistry: Sendable {
     /// Whether TURN should be used at all right now. In `.auto` this follows the
     /// autopilot's verdict, so flows go direct until a probe says the network is censored.
     static var isActive: Bool {
-        guard AWCore.getTurnActiveForSession(), !effectiveVKLink().isEmpty else { return false }
+        guard AWCore.getTurnActiveForSession(), !AWCore.getTurnSuppressed(),
+              !effectiveVKLink().isEmpty else { return false }
         switch AWCore.getEffectiveTurnMode() {
         case .off: return false
         case .on: return true
@@ -144,8 +145,16 @@ nonisolated final class TurnDialerRegistry: Sendable {
     }
 
     /// Live counts for the settings screen, keyed by relay host.
+    ///
+    /// The app polls this every second while connected, so it is also where pools are
+    /// closed once the app gives up on TURN for the session (`AWCore.getTurnSuppressed`):
+    /// otherwise they would keep logging in to VK and asking for captchas for nothing.
     func statistics() -> [TurnHostStatistics] {
-        state.withLock { $0.dialers }
+        if AWCore.getTurnSuppressed() {
+            reset()
+            return []
+        }
+        return state.withLock { $0.dialers }
             .values
             .map {
                 TurnHostStatistics(

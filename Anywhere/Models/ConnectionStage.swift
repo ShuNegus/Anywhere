@@ -42,7 +42,7 @@ nonisolated enum ConnectionGraphNode: Int, CaseIterable, Identifiable, Sendable 
         case .whitelistCheck:
             return String(localized: "graph.node.whitelistCheck", defaultValue: "Checking Restrictions", comment: "Узел графа: проба на блокировку")
         case .turnTunnel:
-            return String(localized: "graph.node.turnTunnel", defaultValue: "Opening TURN Tunnel", comment: "Узел графа: обход через TURN")
+            return String(localized: "graph.node.turnTunnel", defaultValue: "Backup Route", comment: "Узел графа: резервный путь (TURN)")
         case .captcha:
             return String(localized: "graph.node.captcha", defaultValue: "Solving Captcha", comment: "Узел графа: капча VK")
         case .connected:
@@ -146,14 +146,23 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
     case connectedViaTurn(captchaSolved: Bool)
     /// Обход не понадобился, работаем напрямую через VPN.
     case connectedDirect
+    /// Обход был нужен, но им не воспользоваться — подключены напрямую, сайты могут
+    /// не открываться. Причина показывается в графе и у иконки подписки.
+    case connectedWithoutTurn(TurnUnavailableReason)
     /// Подключение встало на конкретном узле.
     case failed(ConnectionFailure)
 
     var isConnected: Bool {
         switch self {
-        case .connectedViaTurn, .connectedDirect: return true
+        case .connectedViaTurn, .connectedDirect, .connectedWithoutTurn: return true
         default: return false
         }
+    }
+
+    /// Подключены без нужного обхода — статус под кнопкой красный.
+    var lacksBypass: Bool {
+        if case .connectedWithoutTurn = self { return true }
+        return false
     }
 
     var isFailed: Bool {
@@ -169,7 +178,7 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
     /// Маршрут пошёл (или идёт) в обход блокировки.
     var usesBypassBranch: Bool {
         switch self {
-        case .turnTunnel, .captcha, .connectedViaTurn: return true
+        case .turnTunnel, .captcha, .connectedViaTurn, .connectedWithoutTurn: return true
         case .failed(let failure):                     return failure.node.isOnBypassBranch
         default:                                       return false
         }
@@ -185,7 +194,8 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
         case .turnTunnel:        return .turnTunnel
         case .captcha:           return .captcha
         case .connectedViaTurn,
-             .connectedDirect:   return .connected
+             .connectedDirect,
+             .connectedWithoutTurn: return .connected
         case .failed(let failure): return failure.node
         }
     }
@@ -198,6 +208,12 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
         if self == .connectedDirect {
             return !node.isOnBypassBranch
         }
+        // Без обхода маршрут дошёл до проверки белых списков (а при проваленной капче —
+        // ещё и до туннеля), дальше пути нет: «Подключено напрямую» остаётся полым.
+        if case .connectedWithoutTurn(let reason) = self {
+            if reason == .captchaFailed, node == .turnTunnel { return true }
+            return node.rawValue <= ConnectionGraphNode.whitelistCheck.rawValue
+        }
         guard let current = currentNode else { return false }
         return node.rawValue <= current.rawValue
     }
@@ -205,6 +221,18 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
     func state(of node: ConnectionGraphNode) -> ConnectionNodeState {
         if case .failed(let failure) = self, node == failure.node {
             return .failed
+        }
+        if case .connectedWithoutTurn(let reason) = self {
+            switch node {
+            case .networkCheck, .vpnConnect: return .done
+            // Обход был нужен, а его нет — проверка «не прошла».
+            case .whitelistCheck:            return .failed
+            case .turnTunnel:
+                if reason == .serverNotCovered { return .off }
+                return reason == .captchaFailed ? .done : .failed
+            case .captcha:                   return reason == .captchaFailed ? .failed : .off
+            case .connected:                 return .off
+            }
         }
         if case .connectedViaTurn(let solved) = self, node == .captcha, !solved {
             return .skipped
@@ -225,8 +253,26 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
         return isReached(from) && isReached(to)
     }
 
+    /// Подпись узла в развёрнутом графе: без обхода узлы несут причину.
+    func title(of node: ConnectionGraphNode, pool: TurnPoolSummary?) -> String {
+        guard case .connectedWithoutTurn(let reason) = self else { return node.title(pool: pool) }
+        switch node {
+        case .turnTunnel where reason != .captchaFailed:
+            return "\(node.title) · \(reason.nodeText)"
+        case .captcha where reason == .captchaFailed:
+            return reason.nodeText
+        case .connected:
+            return String(localized: "graph.node.connectedDirectNoBypass", defaultValue: "Connected Directly · Sites May Not Open", comment: "Узел графа: подключены напрямую без резервного пути")
+        default:
+            return node.title
+        }
+    }
+
     /// Текст под кнопкой питания — берётся из существующего `VPNStatus`.
     var statusText: String {
+        if lacksBypass {
+            return String(localized: "status.connectedWithoutBypass", defaultValue: "Connected Without Backup Route", comment: "Под кнопкой питания: подключены напрямую, резервный путь был нужен, но недоступен")
+        }
         if isConnected { return VPNStatus.connected.localizedText }
         if isBusy { return VPNStatus.connecting.localizedText }
         return VPNStatus.disconnected.localizedText
@@ -301,7 +347,10 @@ nonisolated extension ConnectionStage {
         turnUsable: Bool? = nil,
         captchaPending: Bool,
         captchaSeen: Bool,
-        failure: ConnectionFailure?
+        failure: ConnectionFailure?,
+        bypassUnavailable: TurnUnavailableReason? = nil,
+        bypassNeededWhileOff: Bool = false,
+        runtimeBypassFailure: TurnUnavailableReason? = nil
     ) -> ConnectionStage {
 
         // Провал перебивает всё: он живёт дольше статуса, который его вызвал.
@@ -324,6 +373,15 @@ nonisolated extension ConnectionStage {
             break
         }
 
+        // Обход не поднялся вовремя: трафик уже идёт напрямую.
+        if let runtimeBypassFailure { return .connectedWithoutTurn(runtimeBypassFailure) }
+
+        // Режим «Выкл», а прифлайт показал, что без обхода сайты закрыты.
+        if turnMode == .off {
+            if bypassNeededWhileOff, let bypassUnavailable { return .connectedWithoutTurn(bypassUnavailable) }
+            return .connectedDirect
+        }
+
         // Расширение возвращает `startTunnel` рано: узлы 3–5 проходятся уже
         // после того, как система сообщила `.connected`.
         switch route(turnMode: turnMode, autoDecision: autoDecision) {
@@ -332,6 +390,9 @@ nonisolated extension ConnectionStage {
         case .undecided:
             return .whitelistCheck
         case .turn:
+            // Обход нужен, но выбранным сервером им не воспользоваться — расширение
+            // уже пустило трафик напрямую.
+            if let bypassUnavailable { return .connectedWithoutTurn(bypassUnavailable) }
             // Туннель уже возит трафик: капча, которую ядро просит ради новых пиров,
             // этап не отменяет — она видна подписью у «Подключено».
             if turnUsable == true {

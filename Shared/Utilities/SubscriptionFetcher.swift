@@ -23,6 +23,9 @@ nonisolated struct SubscriptionFetcher {
         /// Revision and push endpoints from the same response. `nil` when the server
         /// offers no `push` block.
         let push: SubscriptionPushInfo?
+        /// How the `/turn` request ended — tells «no backup route» apart from «could not
+        /// load it» and «subscription not found» for the status icon.
+        var turnOutcome: TurnFetchOutcome = .failed
     }
 
     static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
@@ -63,7 +66,8 @@ nonisolated struct SubscriptionFetcher {
 
         // Second, optional request for the `turn` and `push` blocks. Never fatal — see
         // fetchTurnEndpoint.
-        let (turn, push) = await fetchTurnEndpoint(url: url, withRemnawaveHWID: withRemnawaveHWID)
+        let (turnOutcome, push) = await fetchTurnEndpoint(url: url, withRemnawaveHWID: withRemnawaveHWID)
+        let turn: TurnMetadata? = if case .loaded(let metadata) = turnOutcome { metadata } else { nil }
 
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
@@ -89,7 +93,8 @@ nonisolated struct SubscriptionFetcher {
                 total: userInfo.total,
                 expire: userInfo.expire,
                 turn: turn,
-                push: push
+                push: push,
+                turnOutcome: turnOutcome
             )
         }
 
@@ -111,7 +116,8 @@ nonisolated struct SubscriptionFetcher {
             total: userInfo.total,
             expire: userInfo.expire,
             turn: turn,
-            push: push
+            push: push,
+            turnOutcome: turnOutcome
         )
     }
 
@@ -129,8 +135,8 @@ nonisolated struct SubscriptionFetcher {
     ///
     /// Entirely best-effort: a non-JSON body, missing blocks, an HTTP error or a dead
     /// network all yield `nil`s, and the subscription is added exactly as before.
-    private static func fetchTurnEndpoint(url: URL, withRemnawaveHWID: Bool) async -> (TurnMetadata?, SubscriptionPushInfo?) {
-        guard let endpoint = turnEndpointURL(for: url) else { return (nil, nil) }
+    private static func fetchTurnEndpoint(url: URL, withRemnawaveHWID: Bool) async -> (TurnFetchOutcome, SubscriptionPushInfo?) {
+        guard let endpoint = turnEndpointURL(for: url) else { return (.failed, nil) }
 
         var request = URLRequest(url: endpoint)
         request.timeoutInterval = 15
@@ -144,16 +150,29 @@ nonisolated struct SubscriptionFetcher {
             (data, response) = try await send(request)
         } catch {
             logger.debug("TURN metadata probe failed: \(error.localizedDescription)")
-            return (nil, nil)
+            return (.failed, nil)
         }
+        return outcome(data: data, status: (response as? HTTPURLResponse)?.statusCode)
+    }
 
-        if let status = (response as? HTTPURLResponse)?.statusCode, !(200...299).contains(status) {
-            return (nil, nil)
+    /// Classifies a `/turn` response. The `turn` block is kept even with the TURN
+    /// feature switched off: a session forced through TURN still needs the relays.
+    ///
+    /// Only our server answers `/turn` with JSON. A non-JSON answer (an HTML 404 from a
+    /// third-party subscription host) means the server knows nothing of a backup route,
+    /// which is «none», not a failure; a 5xx or no answer at all is a failure.
+    static func outcome(data: Data, status: Int?) -> (TurnFetchOutcome, SubscriptionPushInfo?) {
+        let isJSON = (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
+        if let status, status >= 500 { return (.failed, nil) }
+        if let status, !(200...299).contains(status) {
+            if !isJSON { return (.loaded(nil), nil) }
+            return (status == 404 ? .notFound : .failed, nil)
         }
+        guard isJSON else { return (.loaded(nil), nil) }
         let push = SubscriptionPushInfo.extract(from: data)
-        let turn = AWCore.getTurnFeatureEnabled() ? TurnMetadata.extract(fromSingBoxJSON: data) : nil
+        let turn = TurnMetadata.extract(fromSingBoxJSON: data)
         logger.debug("TURN metadata: \(turn?.servers.count ?? 0) server(s), push: \(push != nil)")
-        return (turn, push)
+        return (.loaded(turn), push)
     }
 
     /// `https://host/<id>` → `https://host/<id>/turn`; query kept, fragment dropped.

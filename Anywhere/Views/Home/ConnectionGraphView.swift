@@ -43,8 +43,11 @@ struct ConnectionGraphView: View {
             ForEach(ConnectionGraphNode.allCases) { node in
                 dot(for: node)
             }
-            ForEach(ConnectionGraphNode.allCases) { node in
-                label(for: node)
+            // Подписи не шире графа: причина без резервного пути бывает длинной.
+            GeometryReader { geometry in
+                ForEach(ConnectionGraphNode.allCases) { node in
+                    label(for: node, width: max(0, geometry.size.width - Self.labelX))
+                }
             }
         }
         .frame(height: Self.height)
@@ -181,13 +184,14 @@ struct ConnectionGraphView: View {
 
     // MARK: - Подписи
 
-    private func label(for node: ConnectionGraphNode) -> some View {
+    private func label(for node: ConnectionGraphNode, width: CGFloat) -> some View {
         let state = stage.state(of: node)
-        return Text(node.title(pool: pool))
+        return Text(stage.title(of: node, pool: pool))
             .font(.system(size: 13, weight: state == .current || state == .failed ? .semibold : .regular))
-            .foregroundStyle(labelColor(for: state))
+            .foregroundStyle(stage.lacksBypass && state == .failed ? TurnStatusPalette.warningText : labelColor(for: state))
             .lineLimit(1)
-            .fixedSize()
+            .minimumScaleFactor(0.7)
+            .frame(width: width, alignment: .leading)
             .offset(x: Self.labelX, y: Self.center(of: node).y - 8)
     }
 
@@ -221,7 +225,8 @@ struct ConnectionGraphView: View {
                 [ConnectionStage.idle, .networkCheck, .vpnConnect, .whitelistCheck,
                  .turnTunnel, .captcha, .connectedViaTurn(captchaSolved: true),
                  .connectedViaTurn(captchaSolved: false), .connectedDirect,
-                 .failed(.turnTimeout)],
+                 .connectedWithoutTurn(.noVkLink), .connectedWithoutTurn(.captchaFailed),
+                 .connectedWithoutTurn(.serverNotCovered), .failed(.turnTimeout)],
                 id: \.self
             ) { stage in
                 ConnectionGraphView(stage: stage)

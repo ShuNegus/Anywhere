@@ -56,7 +56,10 @@ struct HomeView: View {
             turnUsable: viewModel.turnPool?.usable,
             captchaPending: captchaMonitor.captchaWaiting,
             captchaSeen: viewModel.captchaSeenInSession,
-            failure: viewModel.connectionFailure
+            failure: viewModel.connectionFailure,
+            bypassUnavailable: viewModel.bypassUnavailableReason,
+            bypassNeededWhileOff: viewModel.bypassNeededWhileOff,
+            runtimeBypassFailure: viewModel.runtimeBypassFailure
         )
     }
 
@@ -188,7 +191,11 @@ struct HomeView: View {
 
             // Without a subscription there is nowhere to connect, so no graph either.
             if configStore.hasConfigurations {
-                ConnectionGraphSection(stage: stage, pool: viewModel.turnPool)
+                ConnectionGraphSection(
+                    stage: stage,
+                    pool: viewModel.turnPool,
+                    serverName: viewModel.selectedConfiguration?.name
+                )
                 Spacer().frame(height: 24)
             }
 
@@ -354,7 +361,8 @@ struct HomeView: View {
                     subscriptionPendingDeletion = subscriptionStore.subscriptions.first { $0.id == id }
                 },
                 onRefreshSubscription: { refreshSubscription(id: $0) },
-                refreshingSubscription: refreshingSubscription
+                refreshingSubscription: refreshingSubscription,
+                backupRouteMode: settings.turnMode
             )
         }
     }
@@ -398,7 +406,8 @@ struct HomeView: View {
                         .font(.caption2)
                 }
             }
-            .foregroundStyle(.secondary)
+            // Connected, but without the backup route it needed: say so in red.
+            .foregroundStyle(stage.lacksBypass ? AnyShapeStyle(TurnStatusPalette.warningText) : AnyShapeStyle(.secondary))
         }
         .buttonStyle(.plain)
         .disabled(!isConnected)

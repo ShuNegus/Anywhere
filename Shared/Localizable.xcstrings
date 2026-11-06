@@ -4,6 +4,23 @@
     "" : {
       "shouldTranslate" : false
     },
+    "graph.node.connectedDirectNoBypass" : {
+      "comment" : "Узел графа: подключены напрямую без резервного пути",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected Directly · Sites May Not Open"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено напрямую · Сайты могут не открываться"
+          }
+        }
+      }
+    },
     "home.power.forceTurnAction" : {
       "comment" : "VoiceOver-действие кнопки питания: подключиться через TURN",
       "localizations" : {
@@ -38,6 +55,23 @@
         }
       }
     },
+    "status.connectedWithoutBypass" : {
+      "comment" : "Под кнопкой питания: подключены напрямую, резервный путь был нужен, но недоступен",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected Without Backup Route"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено без резервного пути"
+          }
+        }
+      }
+    },
     "Tunnels proxy traffic through a VK Calls relay before it reaches the server, so the connection looks like an ordinary call. Auto probes the network first and only tunnels when the direct path is blocked. Holding the power button for two seconds connects through TURN once, whatever the mode." : {
       "localizations" : {
         "en" : {
@@ -67,6 +101,567 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Обновить подписку"
+          }
+        }
+      }
+    },
+    "turn.icon.a11yHint" : {
+      "comment" : "VoiceOver: по тапу — пояснение",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Details"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подробнее"
+          }
+        }
+      }
+    },
+    "turn.icon.available.a11y" : {
+      "comment" : "VoiceOver: резервный путь есть",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup route available"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Резервный путь есть"
+          }
+        }
+      }
+    },
+    "turn.icon.available.auto" : {
+      "comment" : "Поповер: режим Авто",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Available for this subscription. It turns on by itself if your carrier blocks the regular connection."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Есть у этой подписки. Включится сам, если оператор заблокирует обычное подключение."
+          }
+        }
+      }
+    },
+    "turn.icon.available.off" : {
+      "comment" : "Поповер: режим Выкл",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Available for this subscription. Currently turned off in Settings."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Есть у этой подписки. Сейчас выключен в настройках."
+          }
+        }
+      }
+    },
+    "turn.icon.available.on" : {
+      "comment" : "Поповер: режим Вкл",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Available for this subscription. Used on every connection."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Есть у этой подписки. Используется при каждом подключении."
+          }
+        }
+      }
+    },
+    "turn.icon.available.title" : {
+      "comment" : "Поповер иконки: резервный путь есть",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup route"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Резервный путь"
+          }
+        }
+      }
+    },
+    "turn.icon.none.a11y" : {
+      "comment" : "VoiceOver: резервного пути нет",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No backup route"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Резервного пути нет"
+          }
+        }
+      }
+    },
+    "turn.icon.none.message" : {
+      "comment" : "Поповер иконки: резервного пути нет — текст",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This subscription connects directly only."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Эта подписка подключается только напрямую."
+          }
+        }
+      }
+    },
+    "turn.icon.none.title" : {
+      "comment" : "Поповер иконки: резервного пути нет",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No backup route"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Резервного пути нет"
+          }
+        }
+      }
+    },
+    "turn.reason.captchaFailed.node" : {
+      "comment" : "Узел графа: проверка VK не пройдена",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VK check not passed · connect again"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Проверка VK не пройдена · подключитесь ещё раз"
+          }
+        }
+      }
+    },
+    "turn.reason.captchaFailed.row" : {
+      "comment" : "Строка графа: не удалось пройти проверку VK",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VK check was not passed"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось пройти проверку VK"
+          }
+        }
+      }
+    },
+    "turn.reason.disabled.node" : {
+      "comment" : "Узел графа: отключён в настройках",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Turned off in Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отключён в настройках"
+          }
+        }
+      }
+    },
+    "turn.reason.disabled.row" : {
+      "comment" : "Строка графа: резервный путь отключён в настройках",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup route is turned off in Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Резервный путь отключён в настройках"
+          }
+        }
+      }
+    },
+    "turn.reason.linkRejected.message" : {
+      "comment" : "Поповер: текст",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update the subscription ↻ to get a new one."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Обновите подписку ↻ — придёт новая."
+          }
+        }
+      }
+    },
+    "turn.reason.linkRejected.node" : {
+      "comment" : "Узел графа: ссылка устарела",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Link expired · update the subscription ↻"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ссылка устарела · обновите подписку ↻"
+          }
+        }
+      }
+    },
+    "turn.reason.linkRejected.row" : {
+      "comment" : "Строка графа: ссылка на звонок VK устарела",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VK call link has expired"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ссылка на звонок VK устарела"
+          }
+        }
+      }
+    },
+    "turn.reason.linkRejected.title" : {
+      "comment" : "Поповер: заголовок",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VK call link has expired"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ссылка на звонок VK устарела"
+          }
+        }
+      }
+    },
+    "turn.reason.loadFailed.message" : {
+      "comment" : "Поповер: текст",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The server did not respond. Check your internet connection and update the subscription ↻."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сервер не ответил. Проверьте интернет и обновите подписку ↻."
+          }
+        }
+      }
+    },
+    "turn.reason.loadFailed.node" : {
+      "comment" : "Узел графа: настройки не загрузились",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not loaded · update the subscription ↻"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не загрузились · обновите подписку ↻"
+          }
+        }
+      }
+    },
+    "turn.reason.loadFailed.row" : {
+      "comment" : "Строка графа: настройки резервного пути не загрузились",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup route settings failed to load"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройки резервного пути не загрузились"
+          }
+        }
+      }
+    },
+    "turn.reason.loadFailed.title" : {
+      "comment" : "Поповер: заголовок",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup route settings failed to load"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройки резервного пути не загрузились"
+          }
+        }
+      }
+    },
+    "turn.reason.notFound.message" : {
+      "comment" : "Поповер: текст",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "It may have expired or been deleted. Renew it in the bot and update ↻."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Возможно, она закончилась или удалена. Продлите её в боте и обновите ↻."
+          }
+        }
+      }
+    },
+    "turn.reason.notFound.node" : {
+      "comment" : "Узел графа: подписка не найдена",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscription not found · renew it in the bot"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подписка не найдена · продлите в боте"
+          }
+        }
+      }
+    },
+    "turn.reason.notFound.row" : {
+      "comment" : "Строка графа: подписка не найдена",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscription not found"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подписка не найдена"
+          }
+        }
+      }
+    },
+    "turn.reason.notFound.title" : {
+      "comment" : "Поповер: заголовок",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscription not found"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подписка не найдена"
+          }
+        }
+      }
+    },
+    "turn.reason.noVkLink.message" : {
+      "comment" : "Поповер: текст",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The backup route does not work without it. Update the subscription ↻; if that does not help, contact support."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Без неё резервный путь не работает. Обновите подписку ↻; не поможет — напишите в поддержку."
+          }
+        }
+      }
+    },
+    "turn.reason.noVkLink.node" : {
+      "comment" : "Узел графа: нет ссылки на звонок VK",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No VK call link · contact support"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет ссылки на звонок VK · напишите в поддержку"
+          }
+        }
+      }
+    },
+    "turn.reason.noVkLink.row" : {
+      "comment" : "Строка графа: нет ссылки на звонок VK",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No VK call link"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет ссылки на звонок VK"
+          }
+        }
+      }
+    },
+    "turn.reason.noVkLink.title" : {
+      "comment" : "Поповер: заголовок",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No VK call link"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет ссылки на звонок VK"
+          }
+        }
+      }
+    },
+    "turn.reason.runtimeFailed.node" : {
+      "comment" : "Узел графа: резервный путь не поднялся",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Did not start · connect again"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не поднялся · подключитесь ещё раз"
+          }
+        }
+      }
+    },
+    "turn.reason.runtimeFailed.row" : {
+      "comment" : "Строка графа: резервный путь не поднялся",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup route did not start"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Резервный путь не поднялся"
+          }
+        }
+      }
+    },
+    "turn.reason.serverNotCovered.node" : {
+      "comment" : "Узел графа: у сервера нет резервного пути",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not on this server · choose one with a backup route"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет у этого сервера · выберите сервер с резервным путём"
+          }
+        }
+      }
+    },
+    "turn.reason.serverNotCovered.row" : {
+      "comment" : "Строка графа: у выбранного сервера нет резервного пути (имя сервера)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ has no backup route — choose another server"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "У %@ нет резервного пути — выберите другой сервер"
           }
         }
       }
@@ -7990,13 +8585,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Connected via TURN"
+            "value" : "Connected via Backup Route"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Подключено через обход"
+            "value" : "Подключено через резервный путь"
           }
         }
       }
@@ -8160,13 +8755,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Opening TURN Tunnel"
+            "value" : "Backup Route"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Открытие TURN-туннеля"
+            "value" : "Резервный путь"
           }
         }
       }

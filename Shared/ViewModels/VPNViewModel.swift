@@ -50,6 +50,12 @@ class VPNViewModel {
     /// The step the connection died on. Deliberately outlives the `.disconnected` that
     /// follows a failure — the red node has to stay on screen.
     private(set) var connectionFailure: ConnectionFailure?
+    /// The backup route (TURN) was needed but did not come up in time: the app gave up
+    /// on it for this session and traffic goes direct. Shown in red, never as an alert.
+    private(set) var runtimeBypassFailure: TurnUnavailableReason?
+    /// Mode «Off», and the pre-flight probe found the direct route censored — the backup
+    /// route would have been needed.
+    private(set) var bypassNeededWhileOff = false
     var startError: String?
     /// A reachability probe is running ahead of the tunnel; the button stays busy so a
     /// second tap cannot start the VPN behind the check.
@@ -567,6 +573,11 @@ class VPNViewModel {
             return
         }
 
+        // Already gave up on the backup route for this session.
+        if runtimeBypassFailure != nil { return }
+        // Nothing to wait for: the selected server cannot go through it at all.
+        if bypassUnavailableReason != nil { turnRouteSince = nil; return }
+
         let mode = AWCore.getTurnActiveForSession() ? AWCore.getEffectiveTurnMode() : nil
         guard ConnectionStage.route(turnMode: mode, autoDecision: turnAutoDecisionValue) == .turn else {
             turnRouteSince = nil
@@ -592,10 +603,41 @@ class VPNViewModel {
             return
         }
         if inCaptcha {
-            if now - since > Self.captchaAutoDeadline { noteFailure(.captchaTimeout) }
+            if now - since > Self.captchaAutoDeadline { giveUpOnBypass(inCaptcha: true) }
         } else if now - since > Self.turnReadyDeadline {
-            noteFailure(.turnTimeout)
+            giveUpOnBypass(inCaptcha: false)
         }
+    }
+
+    /// The backup route did not come up in time: route the rest of the session direct
+    /// (the extension stops dialling TURN and closes its pools) and say why, in red.
+    private func giveUpOnBypass(inCaptcha: Bool) {
+        let reason = TurnAvailabilityPolicy.runtimeReason(inCaptcha: inCaptcha)
+        logger.info("Backup route did not come up (\(reason.rawValue)); continuing direct")
+        AWCore.setTurnSuppressed(true)
+        runtimeBypassFailure = reason
+        turnRouteSince = nil
+    }
+
+    /// Why the selected server cannot use the backup route right now, if it were needed.
+    /// `nil` — it can (or the subscription never had one and nobody asked for it).
+    var bypassUnavailableReason: TurnUnavailableReason? {
+        guard let configuration = selectedConfiguration,
+              configuration.chain?.isEmpty ?? true else { return nil }
+        let forced = turnForcedInSession
+        let mode: TurnMode? = forced ? .on : (AWCore.getTurnFeatureEnabled() ? AWCore.getTurnMode() : nil)
+        let subscriptionId = configuration.subscriptionId
+        let manual = AWCore.getTurnVKLink().trimmingCharacters(in: .whitespacesAndNewlines)
+        let shipped = TurnMetadataStore.shared.subscriptionVKLink()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return TurnAvailabilityPolicy.connectionReason(
+            mode: mode,
+            forced: forced,
+            availability: subscriptionId.flatMap { SubscriptionStore.shared.backupRoute(for: $0) },
+            metadata: subscriptionId.flatMap { TurnMetadataStore.shared.metadata(forSubscription: $0) },
+            serverHost: configuration.serverAddress,
+            hasVKLink: !manual.isEmpty || !shipped.isEmpty
+        )
     }
 
     private func stopTurnPhaseWatch() {
@@ -670,18 +712,10 @@ class VPNViewModel {
 
     /// Connects through TURN whatever the TURN mode or the master switch says — the
     /// power button held for two seconds. Reconnects when the tunnel is already up.
-    /// Refuses with an error when the selected server has no TURN relay or no VK link
-    /// is known, rather than silently connecting directly.
+    /// Without a usable relay or VK link it still connects — directly — and the status
+    /// says in red why the backup route is missing (`bypassUnavailableReason`).
     func connectForcingTurn() {
-        guard let configuration = selectedConfiguration else { return }
-        guard Self.isTurnAvailable(for: configuration) else {
-            startError = String(
-                localized: "vpn.error.turnUnavailable",
-                defaultValue: "TURN is not available for this server: the subscription lists no relay for it, or no VK Calls link is set.",
-                comment: "Долгое нажатие на кнопку: TURN для выбранного сервера недоступен"
-            )
-            return
-        }
+        guard selectedConfiguration != nil else { return }
         switch vpnStatus {
         case .connected, .connecting, .reasserting:
             if AWCore.getTurnForced() { return } // already going through TURN
@@ -692,17 +726,6 @@ class VPNViewModel {
         default:
             break
         }
-    }
-
-    /// The selected server has a usable TURN relay in a subscription and there is a VK
-    /// link to dial with — what the extension will need to open the tunnel.
-    static func isTurnAvailable(for configuration: ProxyConfiguration) -> Bool {
-        guard let server = TurnMetadataStore.shared.server(for: configuration.serverAddress),
-              server.isUsable else { return false }
-        let manual = AWCore.getTurnVKLink().trimmingCharacters(in: .whitespacesAndNewlines)
-        let shipped = TurnMetadataStore.shared.subscriptionVKLink()?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return !manual.isEmpty || !shipped.isEmpty
     }
 
     /// - Parameter forceTurn: route this session through TURN whatever the mode says.
@@ -719,11 +742,14 @@ class VPNViewModel {
         captchaSeenInSession = false
         userRequestedDisconnect = false
         sessionReachedConnected = false
+        runtimeBypassFailure = nil
+        bypassNeededWhileOff = false
+        AWCore.setTurnSuppressed(false)
 
         Task { [self] in
-            // Auto mode is the only one that probes: it is also the only one that has to
-            // tell "no network" apart from "censored network", and refusing to start on a
-            // dead network beats a tunnel that silently carries nothing.
+            // Auto mode probes to decide the route: it also has to tell "no network"
+            // apart from "censored network", and refusing to start on a dead network
+            // beats a tunnel that silently carries nothing.
             if AWCore.getTurnActiveForSession(), AWCore.getEffectiveTurnMode() == .auto {
                 isPreflighting = true
                 let verdict = await ConnectivityProbe.classify(profile: .preflight)
@@ -735,6 +761,13 @@ class VPNViewModel {
                     noteFailure(.noNetwork)
                     return
                 }
+            } else if AWCore.getTurnFeatureEnabled(), !forceTurn, AWCore.getTurnMode() == .off {
+                // Mode «Off» never uses the backup route, but should say so when it would
+                // have been needed. Informational only: the connect goes ahead either way.
+                isPreflighting = true
+                let verdict = await ConnectivityProbe.classify(profile: .preflight)
+                isPreflighting = false
+                bypassNeededWhileOff = verdict == .blocked
             }
 
             // Resolves on DNSResolver's worker queue, off both the main actor and

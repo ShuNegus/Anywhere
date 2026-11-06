@@ -39,7 +39,8 @@ nonisolated final class TurnCaptchaNotifier: Sendable {
     private static func loop() async {
         var wasReachable = false
         while !Task.isCancelled {
-            guard AWCore.getTurnActiveForSession(), AWCore.getEffectiveTurnMode() != .off else {
+            guard AWCore.getTurnActiveForSession(), AWCore.getEffectiveTurnMode() != .off,
+                  !AWCore.getTurnSuppressed() else {
                 if wasReachable {
                     clearNotification()
                     wasReachable = false

@@ -118,6 +118,7 @@ nonisolated final class AWCore {
         static let turnFeatureEnabled = "turnFeatureEnabled"
         static let turnMode = "turnMode"
         static let turnForced = "turnForced"
+        static let turnSuppressed = "turnSuppressed"
         static let turnPeers = "turnPeers"
         static let turnVKLink = "turnVKLink"
         static let voyagerMembership = "voyagerMembership"
@@ -762,6 +763,17 @@ nonisolated final class AWCore {
 
     static func setTurnForced(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.turnForced)
+    }
+
+    /// The app gave up on TURN for this session (the tunnel did not come up in time):
+    /// new flows go direct instead of each waiting out the dialer's deadline. Cleared on
+    /// every connect. Read by the extension, so it lives in the app group.
+    static func getTurnSuppressed() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.turnSuppressed)
+    }
+
+    static func setTurnSuppressed(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.turnSuppressed)
     }
 
     /// Whether any TURN behaviour applies at all: the feature is on, or this session

@@ -13,6 +13,8 @@ struct ConnectionGraphCollapsedView: View {
     let stage: ConnectionStage
     /// См. ``ConnectionGraphView/pool``.
     var pool: TurnPoolSummary? = nil
+    /// Имя выбранного сервера — для причины «у сервера нет резервного пути».
+    var serverName: String? = nil
 
     // MARK: - Геометрия (SPEC.md 3.5)
 
@@ -39,7 +41,7 @@ struct ConnectionGraphCollapsedView: View {
             miniGraph
             Text(summary)
                 .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.68))
+                .foregroundStyle(summaryColor)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -156,6 +158,14 @@ struct ConnectionGraphCollapsedView: View {
 
     // MARK: - Текст
 
+    /// Причина без резервного пути — красным; «у сервера нет» — обычным белым.
+    private var summaryColor: Color {
+        if case .connectedWithoutTurn(let reason) = stage, reason.isAlarming {
+            return TurnStatusPalette.warningText
+        }
+        return .white.opacity(0.68)
+    }
+
     private var summary: String {
         switch stage {
         case .idle:
@@ -165,7 +175,9 @@ struct ConnectionGraphCollapsedView: View {
             if let pool, pool.isAddingPeers || pool.needsCaptchaForMorePeers {
                 return ConnectionGraphNode.connected.title(pool: pool)
             }
-            return String(localized: "graph.collapsed.viaTurn", defaultValue: "Connected via TURN", comment: "Свёрнутый граф, шли через обход")
+            return String(localized: "graph.collapsed.viaTurn", defaultValue: "Connected via Backup Route", comment: "Свёрнутый граф, шли через обход")
+        case .connectedWithoutTurn(let reason):
+            return reason.rowText(serverName: serverName)
         case .connectedDirect:
             return String(localized: "graph.collapsed.direct", defaultValue: "Connected Directly", comment: "Свёрнутый граф, обход не понадобился")
         case .failed(let failure):

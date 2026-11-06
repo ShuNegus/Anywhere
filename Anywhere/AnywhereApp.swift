@@ -14,6 +14,9 @@ struct AnywhereApp: App {
 
     init() {
         CloudBlobSync.start()
+        #if DEBUG
+        MainActor.assumeIsolated { DebugBackupRouteSeed.runIfRequested() }
+        #endif
     }
 
     var body: some Scene {

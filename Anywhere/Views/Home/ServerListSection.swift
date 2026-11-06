@@ -31,6 +31,8 @@ struct ServerListSection: View {
     /// Подписка, которая сейчас обновляется: у неё вместо иконки крутится индикатор,
     /// у остальных кнопка неактивна (обновление идёт по одной).
     var refreshingSubscription: UUID? = nil
+    /// Режим резервного пути из настроек — для пояснения у знака подписки.
+    var backupRouteMode: TurnMode = .auto
 
     private static let rowHeight: CGFloat = 52
     private static let rowPadding: CGFloat = 16
@@ -64,7 +66,7 @@ struct ServerListSection: View {
 
             ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                 if let title = section.header {
-                    swipeableSubscriptionHeader(title, id: section.id)
+                    swipeableSubscriptionHeader(title, id: section.id, backupRoute: section.backupRoute)
                         .padding(.top, index == 0 ? 0 : 8)
                 }
                 card(section)
@@ -156,7 +158,7 @@ struct ServerListSection: View {
 
     /// Свайп влево по заголовку подписки. `.swipeActions` тут недоступен — список
     /// собран из `VStack`, а не из `List`, поэтому жест свой.
-    private func swipeableSubscriptionHeader(_ title: String, id: UUID) -> some View {
+    private func swipeableSubscriptionHeader(_ title: String, id: UUID, backupRoute: TurnAvailability?) -> some View {
         let offset = swipeOffset(for: id)
         return ZStack(alignment: .trailing) {
             Button {
@@ -174,7 +176,7 @@ struct ServerListSection: View {
             .accessibilityHidden(true)
 
             // Пока строка уехала, своя корзина прячется — иначе две корзины подряд.
-            subscriptionHeader(title, id: id, showsTrash: offset > -4)
+            subscriptionHeader(title, id: id, backupRoute: backupRoute, showsTrash: offset > -4)
                 .offset(x: offset)
         }
         .animation(.easeOut(duration: 0.2), value: swipedSection)
@@ -223,13 +225,21 @@ struct ServerListSection: View {
 
     /// Заголовок секции-подписки: имя слева, обновление и удаление справа.
     /// Обе кнопки «плоские» — второстепенные действия рядом с двумя основными сверху.
-    private func subscriptionHeader(_ title: String, id: UUID, showsTrash: Bool = true) -> some View {
+    private func subscriptionHeader(_ title: String, id: UUID, backupRoute: TurnAvailability? = nil, showsTrash: Bool = true) -> some View {
         HStack(spacing: 0) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.85))
                 .lineLimit(1)
                 .padding(.leading, 12)
+
+            // Знак резервного пути: 12 pt через 6 pt после имени, тап-зона 32 pt.
+            if let backupRoute {
+                TurnStatusIcon(availability: backupRoute, mode: backupRouteMode)
+                    .padding(.leading, -4)
+                    .padding(.vertical, -6)
+                    .fixedSize()
+            }
 
             Spacer(minLength: 8)
 
@@ -317,11 +327,19 @@ struct ServerListSection: View {
                     .font(.system(size: 20))
                     .frame(width: Self.flagWidth)
 
-                Text(name)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 6) {
+                    Text(name)
+                        .font(.body.weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    // Резервный путь есть не у всех серверов подписки — этот из таких.
+                    if item.marksBackupRoute {
+                        BackupRouteGlyph(kind: .available, color: .white.opacity(0.55))
+                            .frame(width: 10, height: 10)
+                            .accessibilityLabel(String(localized: "turn.icon.available.a11y", defaultValue: "Backup route available", comment: "VoiceOver: резервный путь есть"))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 pingCell(latencies[item.id])
 

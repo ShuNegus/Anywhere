@@ -14,6 +14,8 @@ struct ConnectionGraphSection: View {
     let stage: ConnectionStage
     /// См. ``ConnectionGraphView/pool``.
     var pool: TurnPoolSummary? = nil
+    /// Имя выбранного сервера — для причины «у сервера нет резервного пути».
+    var serverName: String? = nil
 
     /// Граф не разворачивается и не сворачивается сам: подключение, ошибка и
     /// возврат в покой меняют только его содержимое, но не то, раскрыт ли он.
@@ -37,7 +39,7 @@ struct ConnectionGraphSection: View {
                 .contentShape(Rectangle())
                 .accessibilityHint(String(localized: "graph.a11y.collapseHint", defaultValue: "Hide connection stages", comment: "VoiceOver-подсказка развёрнутого графа"))
             } else {
-                ConnectionGraphCollapsedView(stage: stage, pool: pool)
+                ConnectionGraphCollapsedView(stage: stage, pool: pool, serverName: serverName)
             }
         }
         .buttonStyle(.plain)
