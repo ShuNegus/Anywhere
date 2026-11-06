@@ -648,11 +648,9 @@ actor TLSClient {
     
     private func generateMLKEMEncapsulationKey() -> Data? {
         guard configuration.fingerprint.offersPostQuantumKeyShare else { return nil }
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            if let mlkemPrivateKey = try? CryptoKit.MLKEM768.PrivateKey() {
-                mlkemPrivateKeyStorage = mlkemPrivateKey
-                return Data(mlkemPrivateKey.publicKey.rawRepresentation)
-            }
+        if let mlkemPrivateKey = MLKEM768Shim.makePrivateKey() {
+            mlkemPrivateKeyStorage = mlkemPrivateKey
+            return mlkemPrivateKey.publicKeyRaw
         }
         return nil
     }
@@ -660,14 +658,10 @@ actor TLSClient {
     var offeredHybridKeyShare: Bool { mlkemPrivateKeyStorage != nil }
 
     func decapsulateMLKEM(ciphertext: Data) throws -> Data {
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            guard let mlkemPrivateKey = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM private key not available"))
-            }
-            let sharedSecret = try mlkemPrivateKey.decapsulate(ciphertext)
-            return sharedSecret.withUnsafeBytes { Data($0) }
+        guard let mlkemPrivateKey = mlkemPrivateKeyStorage as? MLKEM768ShimKey else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM private key not available"))
         }
-        throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM not supported on this platform"))
+        return try mlkemPrivateKey.decapsulate(ciphertext)
     }
 
     func clearHandshakeState() {

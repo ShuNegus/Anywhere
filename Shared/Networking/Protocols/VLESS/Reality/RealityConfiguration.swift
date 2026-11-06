@@ -152,7 +152,7 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
     }
     
     var supportedOnThisOS: TLSFingerprint {
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+        if MLKEM768Shim.isAvailable {
             return self
         }
         return withoutPostQuantum

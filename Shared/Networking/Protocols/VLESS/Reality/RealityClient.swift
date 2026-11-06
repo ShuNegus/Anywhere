@@ -158,10 +158,10 @@ actor RealityClient {
         }
 
         var mlkemEncapsulationKey: Data?
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *), configuration.fingerprint.offersPostQuantumKeyShare {
-            if let mlkemPrivateKey = try? CryptoKit.MLKEM768.PrivateKey() {
+        if configuration.fingerprint.offersPostQuantumKeyShare {
+            if let mlkemPrivateKey = MLKEM768Shim.makePrivateKey() {
                 mlkemPrivateKeyStorage = mlkemPrivateKey
-                mlkemEncapsulationKey = Data(mlkemPrivateKey.publicKey.rawRepresentation)
+                mlkemEncapsulationKey = mlkemPrivateKey.publicKeyRaw
             }
         }
         
@@ -773,14 +773,10 @@ actor RealityClient {
     }
 
     private func decapsulateMLKEM(ciphertext: Data) throws -> Data {
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            guard let mlkemPrivateKey = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM private key not available"))
-            }
-            let sharedSecret = try mlkemPrivateKey.decapsulate(ciphertext)
-            return sharedSecret.withUnsafeBytes { Data($0) }
+        guard let mlkemPrivateKey = mlkemPrivateKeyStorage as? MLKEM768ShimKey else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM private key not available"))
         }
-        throw AnywhereError.tls(.handshakeFailed(detail: "ML-KEM not supported on this platform"))
+        return try mlkemPrivateKey.decapsulate(ciphertext)
     }
 
     private func deriveKey(sharedSecret: SharedSecret, salt: Data, info: Data, outputLength: Int) -> Data? {

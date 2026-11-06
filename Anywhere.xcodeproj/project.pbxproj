@@ -11,6 +11,8 @@
 		382A1871306A04490032C2BF /* AnywhereIP in Frameworks */ = {isa = PBXBuildFile; productRef = 382A1870306A04490032C2BF /* AnywhereIP */; };
 		3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853793E30753251000675B7 /* AnywhereQUIC */; };
 		3853794130753258000675B7 /* AnywhereQUIC in Frameworks */ = {isa = PBXBuildFile; productRef = 3853794030753258000675B7 /* AnywhereQUIC */; };
+		B0B1AE0000000000000000C1 /* MLKEMNative in Frameworks */ = {isa = PBXBuildFile; productRef = B0B1AE0000000000000000B1 /* MLKEMNative */; };
+		B0B1AE0000000000000000C2 /* MLKEMNative in Frameworks */ = {isa = PBXBuildFile; productRef = B0B1AE0000000000000000B2 /* MLKEMNative */; };
 		38B2C4186D241EF7A2278F02 /* BLAKE in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C49B7761D5E2B8BE528B /* BLAKE */; };
 		38B2C426234A7168B56E86CC /* BLAKE in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C4CE1CDB7A0B75D898C9 /* BLAKE */; };
 		38B2C4A5307A1F0100D4E6F1 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = 38B2C4A3307A1F0100D4E6F1 /* YAML */; };
@@ -253,6 +255,7 @@
 				Networking/Protocols/TLS/TLSAlertDescription.swift,
 				Networking/Protocols/TLS/TLSAlertLevel.swift,
 				Networking/Protocols/TLS/TLSCipherSuite.swift,
+				Networking/Protocols/TLS/MLKEM768Shim.swift,
 				Networking/Protocols/TLS/TLSClient.swift,
 				Networking/Protocols/TLS/TLSClientHelloBuilder.swift,
 				Networking/Protocols/TLS/TLSClientHelloParser.swift,
@@ -436,6 +439,7 @@
 				3853794130753258000675B7 /* AnywhereQUIC in Frameworks */,
 				38B2C4A5307A1F0100D4E6F1 /* YAML in Frameworks */,
 				38B2C4186D241EF7A2278F02 /* BLAKE in Frameworks */,
+				B0B1AE0000000000000000C1 /* MLKEMNative in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -448,6 +452,7 @@
 				382A1871306A04490032C2BF /* AnywhereIP in Frameworks */,
 				3853793F30753251000675B7 /* AnywhereQUIC in Frameworks */,
 				38B2C426234A7168B56E86CC /* BLAKE in Frameworks */,
+				B0B1AE0000000000000000C2 /* MLKEMNative in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -549,6 +554,7 @@
 				3853794030753258000675B7 /* AnywhereQUIC */,
 				38B2C4A3307A1F0100D4E6F1 /* YAML */,
 				38B2C49B7761D5E2B8BE528B /* BLAKE */,
+				B0B1AE0000000000000000B1 /* MLKEMNative */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -574,6 +580,7 @@
 				382A1870306A04490032C2BF /* AnywhereIP */,
 				3853793E30753251000675B7 /* AnywhereQUIC */,
 				38B2C4CE1CDB7A0B75D898C9 /* BLAKE */,
+				B0B1AE0000000000000000B2 /* MLKEMNative */,
 			);
 			productName = "Network Extension";
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
@@ -649,6 +656,7 @@
 				38B2C4A1307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/AnywhereQUIC" */,
 				38B2C4A2307A1F0100D4E6F1 /* XCLocalSwiftPackageReference "Packages/YAML" */,
 				38B2C44881FD8FEA5EEA4D6E /* XCLocalSwiftPackageReference "Packages/BLAKE" */,
+				B0B1AE0000000000000000A1 /* XCLocalSwiftPackageReference "Packages/MLKEMNative" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -1212,6 +1220,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = LocalPackages/AnywhereRules;
 		};
+		B0B1AE0000000000000000A1 /* XCLocalSwiftPackageReference "Packages/MLKEMNative" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/MLKEMNative;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1243,6 +1255,14 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CBFA0DE000000000000000A1 /* XCLocalSwiftPackageReference "LocalPackages/AnywhereRules" */;
 			productName = AnywhereRules;
+		};
+		B0B1AE0000000000000000B1 /* MLKEMNative */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MLKEMNative;
+		};
+		B0B1AE0000000000000000B2 /* MLKEMNative */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MLKEMNative;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
