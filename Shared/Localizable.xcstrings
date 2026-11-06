@@ -54,6 +54,23 @@
         }
       }
     },
+    "server.list.refreshSubscription" : {
+      "comment" : "Кнопка обновления подписки",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update Subscription"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Обновить подписку"
+          }
+        }
+      }
+    },
     "vpn.error.turnUnavailable" : {
       "comment" : "Долгое нажатие на кнопку: TURN для выбранного сервера недоступен",
       "localizations" : {

@@ -29,6 +29,9 @@ struct HomeView: View {
     @State private var captchaMonitor = TurnCaptchaMonitor.shared
     /// Deleting a subscription is destructive, so it goes through a confirmation.
     @State private var subscriptionPendingDeletion: Subscription?
+    /// Subscription being refreshed from its header button; one at a time.
+    @State private var refreshingSubscription: UUID?
+    @State private var subscriptionRefreshError: String?
 
     private var isLoading: Bool { !configStore.isLoaded }
 
@@ -91,6 +94,14 @@ struct HomeView: View {
             Button("OK") { viewModel.startError = nil }
         } message: {
             Text(viewModel.startError ?? "")
+        }
+        .alert("Update Failed", isPresented: Binding(
+            get: { subscriptionRefreshError != nil },
+            set: { if !$0 { subscriptionRefreshError = nil } }
+        )) {
+            Button("OK", role: .cancel) { subscriptionRefreshError = nil }
+        } message: {
+            Text(subscriptionRefreshError ?? "")
         }
         .confirmationDialog(
             subscriptionPendingDeletion.map {
@@ -333,8 +344,25 @@ struct HomeView: View {
                 onAddSubscription: { showingAddSheet = true },
                 onDeleteSubscription: { id in
                     subscriptionPendingDeletion = subscriptionStore.subscriptions.first { $0.id == id }
-                }
+                },
+                onRefreshSubscription: { refreshSubscription(id: $0) },
+                refreshingSubscription: refreshingSubscription
             )
+        }
+    }
+
+    /// Same path as the Update action on the Proxies tab, which Pro Mode hides.
+    private func refreshSubscription(id: UUID) {
+        guard refreshingSubscription == nil,
+              let subscription = subscriptionStore.subscriptions.first(where: { $0.id == id }) else { return }
+        refreshingSubscription = id
+        Task {
+            do {
+                try await subscriptionStore.refresh(subscription)
+            } catch {
+                subscriptionRefreshError = error.localizedDescription
+            }
+            refreshingSubscription = nil
         }
     }
 

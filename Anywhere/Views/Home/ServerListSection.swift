@@ -25,6 +25,12 @@ struct ServerListSection: View {
     /// Вызывается с id секции-подписки. Секции без заголовка (одиночные конфиги,
     /// цепочки) подписками не являются — у них корзина не показывается вовсе.
     let onDeleteSubscription: (UUID) -> Void
+    /// Обновление подписки по кнопке в её заголовке. Доступно и без Pro Mode —
+    /// вкладка Proxies, где обновление было раньше, обычному клиенту не видна.
+    var onRefreshSubscription: (UUID) -> Void = { _ in }
+    /// Подписка, которая сейчас обновляется: у неё вместо иконки крутится индикатор,
+    /// у остальных кнопка неактивна (обновление идёт по одной).
+    var refreshingSubscription: UUID? = nil
 
     private static let rowHeight: CGFloat = 52
     private static let rowPadding: CGFloat = 16
@@ -215,8 +221,8 @@ struct ServerListSection: View {
         onDeleteSubscription(id)
     }
 
-    /// Заголовок секции-подписки: имя слева, удаление справа.
-    /// Корзина «плоская» — второстепенное действие рядом с двумя основными сверху.
+    /// Заголовок секции-подписки: имя слева, обновление и удаление справа.
+    /// Обе кнопки «плоские» — второстепенные действия рядом с двумя основными сверху.
     private func subscriptionHeader(_ title: String, id: UUID, showsTrash: Bool = true) -> some View {
         HStack(spacing: 0) {
             Text(title)
@@ -226,6 +232,9 @@ struct ServerListSection: View {
                 .padding(.leading, 12)
 
             Spacer(minLength: 8)
+
+            refreshButton(id)
+                .opacity(showsTrash ? 1 : 0)
 
             Button {
                 onDeleteSubscription(id)
@@ -242,6 +251,28 @@ struct ServerListSection: View {
         }
         .frame(height: 32)
         .padding(.trailing, -10)
+    }
+
+    private func refreshButton(_ id: UUID) -> some View {
+        let isRefreshing = refreshingSubscription == id
+        return Button {
+            onRefreshSubscription(id)
+        } label: {
+            ZStack {
+                if isRefreshing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(refreshingSubscription != nil)
+        .accessibilityLabel(String(localized: "server.list.refreshSubscription", defaultValue: "Update Subscription", comment: "Кнопка обновления подписки"))
     }
 
     private var gaugeIcon: Image {
