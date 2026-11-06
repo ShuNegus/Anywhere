@@ -15,7 +15,7 @@ struct HomeView: View {
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
     
-    private static let horizontalPadding: CGFloat = 20
+    private static let horizontalPadding: CGFloat = 16
     private static let maxControlPaneWidth: CGFloat = 500
     /// Clears the last row from under ``tabBarScrim`` (112 tall) when scrolled to the end.
     private static let scrollBottomInset: CGFloat = 96
@@ -36,7 +36,10 @@ struct HomeView: View {
     private var isLoading: Bool { !configStore.isLoaded }
 
     private var isConnected: Bool {
-        viewModel.vpnStatus == .connected
+        #if DEBUG
+        if let demo = DebugBackupRouteSeed.demoStage { return demo.isConnected }
+        #endif
+        return viewModel.vpnStatus == .connected
     }
 
     private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning || viewModel.isPreflighting }
@@ -45,7 +48,10 @@ struct HomeView: View {
     /// from the probe's verdict); the captcha monitor stays in as an independent signal
     /// because it fires the moment the sheet comes up, ahead of the next phase poll.
     private var stage: ConnectionStage {
-        ConnectionStage.resolve(
+        #if DEBUG
+        if let demo = DebugBackupRouteSeed.demoStage { return demo }
+        #endif
+        return ConnectionStage.resolve(
             status: viewModel.status,
             isPreflighting: viewModel.isPreflighting,
             // A session forced through TURN (power button held) walks the bypass branch
@@ -174,29 +180,30 @@ struct HomeView: View {
         .presentationDragIndicator(.visible)
     }
 
-    /// Vertical rhythm per SPEC.md §2: 44 top bar, 16, button + status, 28, graph, 24, list.
+    /// Vertical rhythm per the «Иконка TURN» mockup: top bar, power button, status,
+    /// stage row, server list.
     private var connectionControls: some View {
         VStack(spacing: 0) {
             topBar
 
-            Spacer().frame(height: 16)
+            Spacer().frame(height: 8)
 
-            VStack(spacing: 20) {
+            VStack(spacing: 14) {
                 powerButton
                 statusLabel
             }
             .opacity(configStore.hasConfigurations ? 1 : 0.4)
 
-            Spacer().frame(height: 28)
+            Spacer().frame(height: 14)
 
-            // Without a subscription there is nowhere to connect, so no graph either.
+            // Without a subscription there is nowhere to connect, so no stages either.
             if configStore.hasConfigurations {
                 ConnectionGraphSection(
                     stage: stage,
                     pool: viewModel.turnPool,
                     serverName: viewModel.selectedConfiguration?.name
                 )
-                Spacer().frame(height: 24)
+                Spacer().frame(height: 18)
             }
 
             serverList
@@ -205,9 +212,11 @@ struct HomeView: View {
     }
 
     /// Adding a subscription lives up here because the list it would otherwise hang off
-    /// does not exist when there is nothing yet. The right slot is reserved.
+    /// does not exist when there is nothing yet. Right-aligned, as in the mockup.
     private var topBar: some View {
         HStack(spacing: 0) {
+            Spacer(minLength: 0)
+
             Button {
                 showingAddSheet = true
             } label: {
@@ -224,13 +233,9 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(String(localized: "server.list.addSubscription", defaultValue: "Add Subscription", comment: "Кнопка добавления подписки"))
-
-            Spacer(minLength: 0)
-
-            Color.clear.frame(width: 44, height: 44)
         }
         .frame(height: 44)
-        .padding(.leading, -6)   // визуальный край круга совпадает с краем карточек
+        .padding(.trailing, -6)   // визуальный край круга совпадает с краем карточек
     }
 
     /// Fades the rows out under the tab bar instead of letting them cut off (SPEC.md §2).
@@ -394,23 +399,29 @@ struct HomeView: View {
     /// the home screen itself.
     private var statusLabel: some View {
         Button {
+            // Not `.disabled`: a disabled plain button dims its label, and the status
+            // must stay white while disconnected.
+            guard isConnected else { return }
             showingStatsSheet = true
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 // A failed stage keeps the node red; the label goes back to the raw
                 // tunnel status so it does not claim "Connecting" forever.
                 Text(stage.isFailed ? viewModel.status.localizedText : stage.statusText)
-                    .font(.headline)
+                    .font(.system(size: 17, weight: .semibold))
                 if isConnected {
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
+                    Text(verbatim: "›")
+                        .font(.system(size: 17, weight: .regular))
+                        .opacity(stage.lacksBypass ? 0.8 : 0.55)
                 }
             }
             // Connected, but without the backup route it needed: say so in red.
-            .foregroundStyle(stage.lacksBypass ? AnyShapeStyle(TurnStatusPalette.warningText) : AnyShapeStyle(.secondary))
+            .foregroundStyle(stage.lacksBypass ? TurnStatusPalette.warningText : .white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
         }
         .buttonStyle(.plain)
-        .disabled(!isConnected)
+        .allowsHitTesting(isConnected)
     }
 }
 
@@ -453,7 +464,9 @@ private struct BackgroundGradient: View {
 // MARK: - Power Button
 
 private struct PowerButton: View {
-    private static let circleDiameter: CGFloat = 140
+    /// Mockup: 112 pt disc with an 8 pt translucent ring around it.
+    private static let circleDiameter: CGFloat = 112
+    private static let ringWidth: CGFloat = 8
     /// Holding the button this long connects through TURN whatever the TURN mode says.
     static let forceTurnHold: Double = 2
 
@@ -483,31 +496,24 @@ private struct PowerButton: View {
             action()
         } label: {
             ZStack {
-                if #available(iOS 27.0, *) {
-                    Circle()
-                        .fill(.clear)
-                        .frame(width: Self.circleDiameter)
-                        .glassEffect(.regular, in: .circle)
-                } else if #available(iOS 26.0, *) {
-                    Circle()
-                        .fill(.clear)
-                        .frame(width: Self.circleDiameter)
-                        .glassEffect(.clear, in: .circle)
-                } else {
-                    Circle()
-                        .fill(.white.opacity(0.2))
-                        .frame(width: Self.circleDiameter)
-                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
-                }
+                Circle()
+                    .stroke(Color.white.opacity(0.05), lineWidth: Self.ringWidth)
+                    .frame(width: Self.circleDiameter + Self.ringWidth, height: Self.circleDiameter + Self.ringWidth)
+                Circle()
+                    .fill(Color.white.opacity(isConnected ? 0.14 : 0.08))
+                    .frame(width: Self.circleDiameter, height: Self.circleDiameter)
                 holdRing
                 if isTransitioning || isLoading {
                     ProgressView()
                         .controlSize(.large)
+                        .tint(.white)
                 } else {
                     Image(systemName: "power")
-                        .font(.system(size: 40, weight: .light))
+                        .font(.system(size: 34, weight: .light))
+                        .foregroundStyle(.white.opacity(isConnected ? 1 : 0.75))
                 }
             }
+            .frame(width: Self.circleDiameter + 2 * Self.ringWidth, height: Self.circleDiameter + 2 * Self.ringWidth)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -546,7 +552,7 @@ private struct PowerButton: View {
             .stroke(Color.cyan.opacity(isTurnForced && !isHolding ? 0.55 : 0.9),
                     style: StrokeStyle(lineWidth: 3, lineCap: .round))
             .rotationEffect(.degrees(-90))
-            .frame(width: Self.circleDiameter + 10)
+            .frame(width: Self.circleDiameter + Self.ringWidth, height: Self.circleDiameter + Self.ringWidth)
             .animation(isHolding ? .linear(duration: Self.forceTurnHold) : .easeOut(duration: 0.2), value: isHolding)
             .allowsHitTesting(false)
     }

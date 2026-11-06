@@ -21,6 +21,23 @@
         }
       }
     },
+    "graph.node.whitelistNeedsBypass" : {
+      "comment" : "Подпись узла «Проверка белых списков»: сайты закрыты, нужен резервный путь",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup route needed"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нужен резервный путь"
+          }
+        }
+      }
+    },
     "home.power.forceTurnAction" : {
       "comment" : "VoiceOver-действие кнопки питания: подключиться через TURN",
       "localizations" : {
@@ -101,6 +118,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Обновить подписку"
+          }
+        }
+      }
+    },
+    "status.notConnected" : {
+      "comment" : "Под кнопкой питания: VPN выключен",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not Connected"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не подключено"
           }
         }
       }
@@ -8568,13 +8602,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Connection Stages"
+            "value" : "Tap to Connect"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Этапы подключения"
+            "value" : "Нажмите, чтобы подключиться"
           }
         }
       }

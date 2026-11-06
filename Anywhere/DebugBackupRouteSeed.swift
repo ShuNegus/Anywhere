@@ -15,6 +15,24 @@ import Foundation
 enum DebugBackupRouteSeed {
     static let launchArgument = "-seedBackupRouteDemo"
 
+    /// `-demoStage <name>`: shows the home screen in that connection stage without a
+    /// tunnel, for simulator screenshots. Names: connecting, direct, viaTurn,
+    /// noVkLink, captchaFailed, serverNotCovered, failed.
+    static let demoStage: ConnectionStage? = {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-demoStage"), i + 1 < args.count else { return nil }
+        switch args[i + 1] {
+        case "connecting":       return .whitelistCheck
+        case "direct":           return .connectedDirect
+        case "viaTurn":          return .connectedViaTurn(captchaSolved: true)
+        case "noVkLink":         return .connectedWithoutTurn(.noVkLink)
+        case "captchaFailed":    return .connectedWithoutTurn(.captchaFailed)
+        case "serverNotCovered": return .connectedWithoutTurn(.serverNotCovered)
+        case "failed":           return .failed(.turnTimeout)
+        default:                 return nil
+        }
+    }()
+
     static func runIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains(launchArgument) else { return }
         AWCore.setOnboardingCompleted(true)

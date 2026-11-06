@@ -38,7 +38,8 @@ struct ServerListSection: View {
     private static let rowPadding: CGFloat = 16
     private static let flagWidth: CGFloat = 24
     private static let itemSpacing: CGFloat = 12
-    private static let pingWidth: CGFloat = 46
+    /// Wide enough for «таймаут» and «999 мс» on one line.
+    private static let pingWidth: CGFloat = 60
     private static let tickWidth: CGFloat = 20
     /// rowPadding + flagWidth + itemSpacing — разделитель начинается там же, где название.
     private static let separatorInset: CGFloat = 52
@@ -386,6 +387,8 @@ struct ServerListSection: View {
                 Color.clear
             }
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
         .frame(width: Self.pingWidth, alignment: .trailing)
     }
 

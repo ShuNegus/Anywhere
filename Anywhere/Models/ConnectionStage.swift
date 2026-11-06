@@ -257,6 +257,8 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
     func title(of node: ConnectionGraphNode, pool: TurnPoolSummary?) -> String {
         guard case .connectedWithoutTurn(let reason) = self else { return node.title(pool: pool) }
         switch node {
+        case .whitelistCheck:
+            return "\(node.title) · " + String(localized: "graph.node.whitelistNeedsBypass", defaultValue: "Backup route needed", comment: "Подпись узла «Проверка белых списков»: сайты закрыты, нужен резервный путь")
         case .turnTunnel where reason != .captchaFailed:
             return "\(node.title) · \(reason.nodeText)"
         case .captcha where reason == .captchaFailed:
@@ -275,7 +277,7 @@ nonisolated enum ConnectionStage: Sendable, Hashable {
         }
         if isConnected { return VPNStatus.connected.localizedText }
         if isBusy { return VPNStatus.connecting.localizedText }
-        return VPNStatus.disconnected.localizedText
+        return String(localized: "status.notConnected", defaultValue: "Not Connected", comment: "Под кнопкой питания: VPN выключен")
     }
 }
 
