@@ -29,6 +29,10 @@ struct AnywhereApp: App {
             tunnel?.reconnect()
         }
 
+        SubscriptionAutoRefresher.shared.configure(store: container.subscriptionStore) { subscription in
+            try await operations.subscriptions.refresh(subscription)
+        }
+
         AppDependencyManager.shared.add(dependency: container)
         AppDependencyManager.shared.add(dependency: operations)
         AppDependencyManager.shared.add(dependency: settings)

@@ -108,7 +108,7 @@ nonisolated enum ConnectivityProbe {
 
     /// One host: fresh DNS, then a full TLS handshake carrying that host as the SNI.
     static func reachable(_ host: String, timeout: Duration) async -> Bool {
-        guard let address = await DNSResolver.shared.resolveHost(host, forceFresh: true) else {
+        guard let address = await DNSResolver.proxies.resolveHost(host, forceFresh: true) else {
             return false
         }
         let client = TLSClient(configuration: TLSConfiguration(serverName: host, alpn: ["http/1.1"]))

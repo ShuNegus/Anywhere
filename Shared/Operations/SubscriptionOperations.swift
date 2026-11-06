@@ -25,11 +25,15 @@ struct SubscriptionOperations {
             )
         }
         configurationStore.replaceConfigurations(for: subscription.id, with: tagged)
+        recordTurnAndPush(result, for: subscription.id)
         reaction.run()
     }
     
     func delete(_ subscription: Subscription) {
         configurationStore.deleteConfigurations(for: subscription.id)
+        TurnMetadataStore.shared.removeMetadata(forSubscription: subscription.id)
+        store.setTurnAvailability(nil, for: subscription.id)
+        SubscriptionAutoRefresher.shared.subscriptionDeleted(subscription.id)
         store.delete(subscription)
         reaction.run()
     }
@@ -81,7 +85,17 @@ struct SubscriptionOperations {
         }
 
         configurationStore.replaceConfigurations(for: subscriptionId, with: newConfigurations)
+        // A refresh that comes back without a `turn` block clears the stale one, so a
+        // relay withdrawn server-side stops being dialled. A failed fetch keeps it.
+        recordTurnAndPush(result, for: subscriptionId)
         store.applyRefreshResult(result, to: subscriptionId)
         reaction.run()
+    }
+
+    /// Backup route (TURN) metadata, the status icon and the revision/push endpoints that
+    /// came with the subscription's `/turn` response.
+    private func recordTurnAndPush(_ result: SubscriptionFetcher.Result, for subscriptionId: UUID) {
+        store.applyTurnOutcome(result.turnOutcome, for: subscriptionId)
+        SubscriptionAutoRefresher.shared.subscriptionFetched(subscriptionId, push: result.push)
     }
 }

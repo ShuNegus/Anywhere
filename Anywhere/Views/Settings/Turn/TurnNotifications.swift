@@ -11,10 +11,6 @@ import UserNotifications
 /// appears, and only once — a user who declined is not asked again.
 enum TurnNotifications {
     static func requestAuthorizationIfNeeded() async {
-        #if DEBUG
-        // The simulator demo is for screenshots; the system prompt would cover them.
-        if ProcessInfo.processInfo.arguments.contains(DebugBackupRouteSeed.launchArgument) { return }
-        #endif
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .notDetermined else { return }

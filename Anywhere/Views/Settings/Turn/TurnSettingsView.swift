@@ -29,7 +29,13 @@ struct TurnSettingsView: View {
                         Text(mode.title).tag(mode)
                     }
                 } label: {
-                    SettingsItem.turn.label
+                    TextWithColorfulIcon(
+                        title: "TURN",
+                        comment: nil,
+                        systemName: "point.3.connected.trianglepath.dotted",
+                        foregroundStyle: .white,
+                        backgroundStyle: Color.indigo.gradient
+                    )
                 }
                 if settings.turnMode == .auto, let autoStatus {
                     LabeledContent("Route", value: autoStatus)

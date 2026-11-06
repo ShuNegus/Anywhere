@@ -30,7 +30,17 @@ final class SubscriptionAutoRefresher {
     /// after the previous one adds nothing.
     private static let minimumInterval: TimeInterval = 60
 
+    /// Wired at launch (`AnywhereApp`): the store is no longer a singleton, and a refresh
+    /// goes through `SubscriptionOperations` so it touches every store it should.
+    private var store: SubscriptionStore?
+    private var refresh: ((Subscription) async throws -> Void)?
+
     private init() {}
+
+    func configure(store: SubscriptionStore, refresh: @escaping (Subscription) async throws -> Void) {
+        self.store = store
+        self.refresh = refresh
+    }
 
     // MARK: - Refresh
 
@@ -53,7 +63,7 @@ final class SubscriptionAutoRefresher {
     }
 
     private func performRun(reason: String) async -> Outcome {
-        let store = SubscriptionStore.shared
+        guard let store, let refresh else { return .noChange }
         var refreshed = 0
         var failed = 0
 
@@ -74,7 +84,7 @@ final class SubscriptionAutoRefresher {
             ) else { continue }
 
             do {
-                try await store.refresh(subscription)
+                try await refresh(subscription)
                 refreshed += 1
                 logger.info("[\(reason)] Refreshed \(subscription.name) (server rev \(serverRev.map(String.init) ?? "-"))")
             } catch {
