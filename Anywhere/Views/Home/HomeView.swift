@@ -231,18 +231,26 @@ struct HomeView: View {
         let base = isConnected
             ? color(settings.connectedBackgroundEndData, default: .connectedBackgroundEnd)
             : color(settings.disconnectedBackgroundEndData, default: .disconnectedBackgroundEnd)
-        return LinearGradient(
-            stops: [
-                .init(color: base.opacity(0), location: 0),
-                .init(color: base.opacity(0.88), location: 0.46),
-                .init(color: base, location: 1),
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .frame(height: 112)
+        // Pinned to the physical bottom edge: the overlay itself ends at the safe area
+        // (above the tab bar), so the band is stretched by that inset to keep its top
+        // where it was and run all the way down under the tab bar.
+        return GeometryReader { proxy in
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                LinearGradient(
+                    stops: [
+                        .init(color: base.opacity(0), location: 0),
+                        .init(color: base.opacity(0.88), location: 0.46),
+                        .init(color: base, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 112 + proxy.safeAreaInsets.bottom)
+            }
+            .ignoresSafeArea(.container, edges: .bottom)
+        }
         .allowsHitTesting(false)
-        .ignoresSafeArea()
     }
 
     private func color(_ data: Data?, default fallback: Color) -> Color {
