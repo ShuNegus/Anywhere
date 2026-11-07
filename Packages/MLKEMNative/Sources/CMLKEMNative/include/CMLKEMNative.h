@@ -7,11 +7,11 @@
 
 #include <stdint.h>
 
-#define aw_mlkem768_PUBLICKEYBYTES 1184
-#define aw_mlkem768_SECRETKEYBYTES 2400
-#define aw_mlkem768_CIPHERTEXTBYTES 1088
-#define aw_mlkem768_SHAREDSECRETBYTES 32
-#define aw_mlkem768_SYMBYTES 32
+#define AW_MLKEM768_PUBLICKEYBYTES 1184
+#define AW_MLKEM768_SECRETKEYBYTES 2400
+#define AW_MLKEM768_CIPHERTEXTBYTES 1088
+#define AW_MLKEM768_SHAREDSECRETBYTES 32
+#define AW_MLKEM768_SYMBYTES 32
 
 int aw_mlkem768_keypair(uint8_t *pk, uint8_t *sk);
 /* coins = d || z (64 bytes) */

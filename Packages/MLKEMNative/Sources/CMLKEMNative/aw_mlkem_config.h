@@ -3,8 +3,8 @@
  * ML-KEM-768 only, portable C (no native backends), single compilation unit,
  * randomness from SecRandomCopyBytes.
  */
-#ifndef aw_mlkem_CONFIG_H
-#define aw_mlkem_CONFIG_H
+#ifndef AW_MLKEM_CONFIG_H
+#define AW_MLKEM_CONFIG_H
 
 #define MLK_CONFIG_PARAMETER_SET 768
 #define MLK_CONFIG_NAMESPACE_PREFIX aw_mlkem768
@@ -24,4 +24,4 @@ static inline int mlk_randombytes(uint8_t *out, size_t outlen)
 }
 #endif
 
-#endif /* aw_mlkem_CONFIG_H */
+#endif /* AW_MLKEM_CONFIG_H */
