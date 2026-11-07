@@ -110,6 +110,8 @@ nonisolated final class AWCore {
         static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
         static let tunnelIncludedRoutes = "tunnelIncludedRoutes"
         static let preflightVerdict = "preflightVerdict"
+        static let realityRejectionAt = "realityRejectionAt"
+        static let realityRejectionIdentity = "realityRejectionIdentity"
         static let preflightVerdictAt = "preflightVerdictAt"
         static let turnCaptchaManual = "turnCaptchaManual"
         static let turnEnabled = "turnEnabled"
@@ -740,6 +742,26 @@ nonisolated final class AWCore {
     static func getAppInForeground() -> Bool {
         guard userDefaults.object(forKey: UserDefaultsKey.appIsForeground) != nil else { return false }
         return userDefaults.bool(forKey: UserDefaultsKey.appIsForeground)
+    }
+
+    // MARK: - REALITY rejection
+
+    /// Last server whose REALITY handshake was rejected (`RealityRejectionGate.Key.identity`)
+    /// and when (Unix time). Written by the tunnel process, read by the home screen.
+    static func getRealityRejection() -> (identity: String, at: TimeInterval)? {
+        guard let identity = userDefaults.string(forKey: UserDefaultsKey.realityRejectionIdentity) else { return nil }
+        return (identity, userDefaults.double(forKey: UserDefaultsKey.realityRejectionAt))
+    }
+
+    /// `nil` clears the record.
+    static func setRealityRejection(identity: String?, at timestamp: TimeInterval) {
+        if let identity {
+            userDefaults.set(identity, forKey: UserDefaultsKey.realityRejectionIdentity)
+            userDefaults.set(timestamp, forKey: UserDefaultsKey.realityRejectionAt)
+        } else {
+            userDefaults.removeObject(forKey: UserDefaultsKey.realityRejectionIdentity)
+            userDefaults.removeObject(forKey: UserDefaultsKey.realityRejectionAt)
+        }
     }
 
     // MARK: - Pro Mode

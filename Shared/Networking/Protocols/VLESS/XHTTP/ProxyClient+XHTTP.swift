@@ -474,7 +474,7 @@ nonisolated extension ProxyClient {
                 }
                 return try await bringUp(TLSByteTransport(connection), retaining: client)
             case .reality(let realityConfig):
-                let client = RealityClient(configuration: realityConfig)
+                let client = RealityClient(configuration: realityConfig, endpoint: "\(host):\(port)")
                 let connection: TLSRecordConnection
                 if let tunnel {
                     connection = try await client.connect(overTunnel: tunnel)
@@ -553,7 +553,7 @@ nonisolated extension ProxyClient {
             }
             return .byteStream(TLSByteTransport(connection))
         case .reality(let realityConfig):
-            let client = RealityClient(configuration: realityConfig)
+            let client = RealityClient(configuration: realityConfig, endpoint: "\(host):\(port)")
             let connection: TLSRecordConnection
             if let tunnel = overTunnel {
                 connection = try await client.connect(overTunnel: tunnel)
@@ -683,7 +683,7 @@ nonisolated extension ProxyClient {
                 }
                 return wrap(TLSByteTransport(connection), retaining: client)
             case .reality(let realityConfig):
-                let client = RealityClient(configuration: realityConfig)
+                let client = RealityClient(configuration: realityConfig, endpoint: "\(host):\(port)")
                 let connection: TLSRecordConnection
                 if let tunnel {
                     connection = try await client.connect(overTunnel: tunnel)

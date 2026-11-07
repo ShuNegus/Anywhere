@@ -383,6 +383,10 @@ struct ServerListSection: View {
                 Text(String(localized: "insecure"))
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.40))
+            case .rejected:
+                Text(LatencyLabel.rejectedText)
+                    .font(.system(size: 13))
+                    .foregroundStyle(TurnStatusPalette.warningText)
             case nil:
                 Color.clear
             }

@@ -32,9 +32,19 @@ struct LatencyLabel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 50, alignment: .trailing)
+        case .rejected:
+            Text(Self.rejectedText)
+                .font(.caption)
+                .foregroundStyle(TurnStatusPalette.warningText)
+                .frame(minWidth: 50, alignment: .trailing)
         case nil:
             EmptyView()
         }
+    }
+
+    /// The server refused our REALITY handshake (see `RealityRejectionGate`).
+    static var rejectedText: String {
+        String(localized: "latency.rejected", defaultValue: "rejected", comment: "Пинг: сервер отклонил подключение (REALITY)")
     }
 
     static func color(_ ms: Int) -> Color {

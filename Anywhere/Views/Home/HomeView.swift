@@ -36,6 +36,11 @@ struct HomeView: View {
     /// Subscription being refreshed from its header button; one at a time.
     @State private var refreshingSubscription: UUID?
     @State private var subscriptionRefreshError: String?
+    /// The tunnel recorded a REALITY rejection for the selected server moments ago.
+    @State private var selectedServerRejected = false
+
+    /// The extension writes rejections to the app group; this re-reads them.
+    private static let rejectionPollInterval: Duration = .seconds(2)
 
     private var isLoading: Bool { !configStore.isLoaded }
 
@@ -155,6 +160,7 @@ struct HomeView: View {
         .onChange(of: captchaMonitor.captchaWaiting) { _, waiting in
             if waiting { turnSession.noteCaptchaSeen() }
         }
+        .task(id: isConnected) { await watchRealityRejections() }
         .onChange(of: tunnel.isManagerReady, initial: true) { _, ready in
             guard ready, !connectionEffectsEnabled else { return }
             Task { @MainActor in connectionEffectsEnabled = true }
@@ -202,7 +208,10 @@ struct HomeView: View {
 
             VStack(spacing: 14) {
                 powerButton
-                statusLabel
+                VStack(spacing: 4) {
+                    statusLabel
+                    if showsRejectionHint { rejectionHint }
+                }
             }
             .opacity(configStore.hasConfigurations ? 1 : 0.4)
 
@@ -324,7 +333,13 @@ struct HomeView: View {
 
     /// Chain latencies live in their own dictionary; the list keys everything by row id.
     private var listLatencies: [UUID: LatencyResult] {
-        latency.latencyResults.merging(latency.chainLatencyResults) { current, _ in current }
+        let merged = latency.latencyResults.merging(latency.chainLatencyResults) { current, _ in current }
+        #if DEBUG
+        if DebugBackupRouteSeed.demoRealityRejected, let id = selectedRowId {
+            return merged.merging([id: .rejected]) { _, demo in demo }
+        }
+        #endif
+        return merged
     }
 
     private var isMeasuringLatencies: Bool {
@@ -396,6 +411,48 @@ struct HomeView: View {
             .clipShape(.rect(cornerRadius: 16, style: .continuous))
     }
     
+    // MARK: - REALITY rejection hint
+
+    private var showsRejectionHint: Bool {
+        #if DEBUG
+        if DebugBackupRouteSeed.demoRealityRejected { return true }
+        #endif
+        return isConnected && selectedServerRejected
+    }
+
+    /// The server spliced us to its donor site: almost always a client too old for the
+    /// server's Xray. A timeout alone would send the user hunting network problems.
+    private var rejectionHint: some View {
+        Text(String(
+            localized: "home.reality.rejected.hint",
+            defaultValue: "Server rejects the connection — update the app",
+            comment: "Подсказка на главном: REALITY-сервер отклоняет подключение"
+        ))
+        .font(.system(size: 13, weight: .medium))
+        .foregroundStyle(TurnStatusPalette.warningText)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: Self.maxControlPaneWidth - 40)
+        .transition(.opacity)
+    }
+
+    /// Polls the app group while connected; cleared by the extension on the next
+    /// successful handshake with that server.
+    private func watchRealityRejections() async {
+        guard isConnected else {
+            selectedServerRejected = false
+            return
+        }
+        while !Task.isCancelled {
+            let keys = selection.selectedConfiguration?.realityRejectionKeys ?? []
+            let rejected = !keys.isEmpty && RealityRejectionNotice.isRecentlyRejected(keys)
+            if rejected != selectedServerRejected {
+                withAnimation(.easeInOut(duration: 0.2)) { selectedServerRejected = rejected }
+            }
+            try? await Task.sleep(for: Self.rejectionPollInterval)
+        }
+    }
+
     /// Tapping the status opens the statistics sheet — the stats no longer live on
     /// the home screen itself.
     private var statusLabel: some View {

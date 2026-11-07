@@ -119,6 +119,7 @@ nonisolated struct LatencyTestResponse: Codable, Sendable {
         case success
         case failed
         case insecure
+        case rejected
     }
     var result: Kind
     var ms: Int?
@@ -129,6 +130,7 @@ nonisolated extension LatencyTestResponse {
         switch result {
         case .success(let ms): self.init(result: .success, ms: ms)
         case .insecure: self.init(result: .insecure, ms: nil)
+        case .rejected: self.init(result: .rejected, ms: nil)
         case .failed, .testing: self.init(result: .failed, ms: nil)
         }
     }
@@ -137,6 +139,7 @@ nonisolated extension LatencyTestResponse {
         switch result {
         case .success: return .success(ms ?? 0)
         case .insecure: return .insecure
+        case .rejected: return .rejected
         case .failed: return .failed
         }
     }

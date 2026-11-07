@@ -258,7 +258,10 @@ nonisolated enum AnywhereError: Error {
 
         enum Reality: Sendable, Equatable {
             case invalidPublicKey
+            /// The server did not accept us and spliced the connection to its donor site.
             case authenticationFailed
+            /// Not dialed: the server rejected us moments ago (`RealityRejectionGate`).
+            case rejectedRecently
             case decryptionFailed
         }
     }
@@ -429,6 +432,7 @@ nonisolated extension AnywhereError.TLS.Reality {
         switch self {
         case .invalidPublicKey: "invalid REALITY public key"
         case .authenticationFailed: "REALITY authentication failed"
+        case .rejectedRecently: "REALITY server rejected the connection recently; retrying later"
         case .decryptionFailed: "REALITY decryption failed"
         }
     }
@@ -669,6 +673,10 @@ nonisolated extension AnywhereError {
              .routing(.dropped),
              .routing(.rejectedByRule):
             nil
+        // One per flow refused during a REALITY backoff; the rejection itself is
+        // logged once by RealityClient.
+        case .tls(.reality(.rejectedRecently)):
+            .debug
         default:
             .error
         }

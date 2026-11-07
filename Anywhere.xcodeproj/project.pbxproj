@@ -294,6 +294,7 @@
 				Networking/Protocols/VLESS/Reality/RealityClient.swift,
 				Networking/Protocols/VLESS/Reality/RealityConfiguration.swift,
 				Networking/Protocols/VLESS/Reality/RealityProxyConnection.swift,
+				Networking/Protocols/VLESS/Reality/RealityRejectionGate.swift,
 				Networking/Protocols/VLESS/VLESSConfiguration.swift,
 				Networking/Protocols/VLESS/VLESSConnection.swift,
 				Networking/Protocols/VLESS/VLESSEncryption.swift,

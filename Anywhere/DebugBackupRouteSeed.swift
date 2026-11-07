@@ -33,6 +33,10 @@ enum DebugBackupRouteSeed {
         }
     }()
 
+    /// `-demoRealityRejected`: shows the "server rejects the connection" hint and the
+    /// `rejected` ping on the selected row, for screenshots.
+    static let demoRealityRejected = ProcessInfo.processInfo.arguments.contains("-demoRealityRejected")
+
     /// Seeds the demo through the same operation a real subscription add goes through,
     /// so the stored TURN outcome drives the icon exactly as in the field.
     /// `-demoProMode YES|NO` and `-demoTab <home|dashboard|proxies|toolbox|settings>`:

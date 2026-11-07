@@ -523,6 +523,23 @@
         }
       }
     },
+    "home.reality.rejected.hint" : {
+      "comment" : "Подсказка на главном: REALITY-сервер отклоняет подключение",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server rejects the connection — update the app"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сервер отклоняет подключение — обновите приложение"
+          }
+        }
+      }
+    },
     "https://vk.com/call/join/…" : {
       "localizations" : {
         "en" : {
@@ -14291,6 +14308,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "上次更新"
+          }
+        }
+      }
+    },
+    "latency.rejected" : {
+      "comment" : "Пинг: сервер отклонил подключение (REALITY)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rejected"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "отклонён"
           }
         }
       }

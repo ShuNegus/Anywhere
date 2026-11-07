@@ -543,6 +543,14 @@ actor TCPConnection: MITMSessionHost {
     // MARK: Proxy connection
 
     private func connectProxy() async -> Establishment {
+        // A REALITY server that just rejected us would reject this flow too. Refuse here,
+        // before a TURN stream is taken from the pool or a socket is opened: every app
+        // flow retrying a rejecting server is what piled stuck streams up on a node.
+        if let key = configuration.realityRejectionKey,
+           let refusal = RealityRejectionGate.shared.refusal(for: key) {
+            return handleConnectFailure(refusal, bufferedClientData: nil)
+        }
+
         // Protocol-specific policy selects the prefix that can ride the opening write.
         let initialData: Data?
         let prefixLength = configuration.outboundProtocol.initialDataPolicy.prefixLength(

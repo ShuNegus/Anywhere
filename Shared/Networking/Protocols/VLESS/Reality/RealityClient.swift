@@ -27,15 +27,52 @@ actor RealityClient {
 
     // MARK: Initialization
 
-    init(configuration: RealityConfiguration) {
+    /// Identity for `RealityRejectionGate`.
+    private let gateKey: RealityRejectionGate.Key
+    private let gate: RealityRejectionGate
+
+    /// - Parameter endpoint: the server as configured (`address:port`), never a resolved
+    ///   IP, so the direct and the over-tunnel path share one gate entry.
+    init(
+        configuration: RealityConfiguration,
+        endpoint: String,
+        gate: RealityRejectionGate = .shared
+    ) {
         self.configuration = configuration
+        self.gateKey = RealityRejectionGate.Key(endpoint: endpoint, reality: configuration)
+        self.gate = gate
     }
 
     // MARK: - Public API
     
     func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
-        try await withHandshakeDeadline {
-            try await self.performConnect(host: host, port: port)
+        try await gated {
+            try await self.withHandshakeDeadline {
+                try await self.performConnect(host: host, port: port)
+            }
+        }
+    }
+
+    /// Refuses without touching the network while the server is in backoff, and feeds
+    /// the handshake's outcome back to the gate.
+    private func gated(
+        _ handshake: () async throws -> TLSRecordConnection
+    ) async throws -> TLSRecordConnection {
+        if let refusal = gate.refusal(for: gateKey) {
+            throw refusal
+        }
+        do {
+            let connection = try await handshake()
+            if gate.recordSuccess(for: gateKey) {
+                RealityRejectionNotice.noteAccepted(gateKey)
+            }
+            return connection
+        } catch AnywhereError.tls(.reality(.authenticationFailed)) {
+            if gate.recordRejection(for: gateKey) {
+                logger.warning("[Reality] \(configuration.serverName) via \(gateKey.endpoint) rejected the handshake; backing off")
+            }
+            RealityRejectionNotice.noteRejected(gateKey)
+            throw AnywhereError.tls(.reality(.authenticationFailed))
         }
     }
 
@@ -60,8 +97,10 @@ actor RealityClient {
     }
     
     func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
-        try await withHandshakeDeadline {
-            try await self.performConnect(overTunnel: tunnel)
+        try await gated {
+            try await self.withHandshakeDeadline {
+                try await self.performConnect(overTunnel: tunnel)
+            }
         }
     }
 

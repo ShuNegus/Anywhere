@@ -15,7 +15,15 @@ nonisolated enum LatencyTester {
     private static let latencyHost = "captive.apple.com"
     private static let latencyPort: UInt16 = 80
     
+    /// Probes bypass `RealityRejectionGate`: a server in backoff can still be re-tested
+    /// by hand, and the probe's outcome updates the gate like any other handshake.
     nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
+        await RealityRejectionGate.$bypass.withValue(true) {
+            await testIgnoringRejectionGate(configuration)
+        }
+    }
+
+    nonisolated private static func testIgnoringRejectionGate(_ configuration: ProxyConfiguration) async -> LatencyResult {
         ConnectionMetrics.shared.suspendRecording()
         defer { ConnectionMetrics.shared.resumeRecording() }
 
@@ -44,6 +52,9 @@ nonisolated enum LatencyTester {
             logger.report("[Latency] \(configuration.name)", error: error)
             if case AnywhereError.tls(.certificateValidationFailed) = error {
                 return .insecure
+            }
+            if let error = error as? AnywhereError, error.isRealityRejection {
+                return .rejected
             }
             return .failed
         }

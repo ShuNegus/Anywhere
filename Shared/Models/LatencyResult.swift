@@ -12,4 +12,7 @@ nonisolated enum LatencyResult: Sendable, Hashable {
     case success(Int)  // milliseconds
     case failed
     case insecure
+    /// The REALITY server refused us (spliced to its donor site) — usually a client
+    /// too old for the server's Xray, not a network problem.
+    case rejected
 }

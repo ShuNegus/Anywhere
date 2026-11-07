@@ -52,7 +52,7 @@ nonisolated extension ProxyClient {
         realityConfig: RealityConfiguration,
         request: ProxyRequest
     ) async throws -> ProxyConnection {
-        let realityClient = RealityClient(configuration: realityConfig)
+        let realityClient = RealityClient(configuration: realityConfig, endpoint: "\(configuration.serverAddress):\(configuration.serverPort)")
         let realityConnection = try await connectRealityRecord(realityClient)
         let realityProxyConnection = RealityProxyConnection(realityConnection: realityConnection)
         return try await sendVLESSProtocolHandshake(
@@ -168,7 +168,7 @@ nonisolated extension ProxyClient {
 
         let grpcConnection: GRPCConnection
         if case .reality(let realityConfig) = configuration.xraySecurityLayer {
-            let realityClient = RealityClient(configuration: realityConfig)
+            let realityClient = RealityClient(configuration: realityConfig, endpoint: "\(configuration.serverAddress):\(configuration.serverPort)")
             let realityConnection = try await connectRealityRecord(realityClient)
             grpcConnection = GRPCConnection(tlsConnection: realityConnection, configuration: grpcConfig, authority: authority)
         } else if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
